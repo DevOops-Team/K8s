@@ -8,3 +8,6 @@ credentials/
 .build/
 __pycache__/
 .DS_Store
+
+# Local VS Code settings
+.vscode/
