@@ -1,0 +1,38 @@
+crds:
+  enabled: true
+replicaCount: 2
+nodeSelector: &nodes
+  platform-worker: "true"
+tolerations: &tolerations []
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: cert-manager
+        topologyKey: kubernetes.io/hostname
+webhook:
+  replicaCount: 2
+  nodeSelector: *nodes
+  tolerations: *tolerations
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: webhook
+          topologyKey: kubernetes.io/hostname
+cainjector:
+  replicaCount: 2
+  nodeSelector: *nodes
+  tolerations: *tolerations
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cainjector
+          topologyKey: kubernetes.io/hostname
+startupapicheck:
+  nodeSelector: *nodes
+  tolerations: *tolerations

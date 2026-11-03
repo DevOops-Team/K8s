@@ -1,0 +1,12 @@
+{
+  "git.openRepositoryInParentFolders": "never",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.DS_Store": true
+  },
+  "files.trimTrailingWhitespace": true,
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2,
+  "yaml.format.enable": true,
+  "window.title": "gpu-k8s \u2014 ${activeEditorShort}"
+}

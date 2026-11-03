@@ -1,0 +1,10 @@
+.env
+*.local.yaml
+*.local.yml
+*.vault.yml
+secrets/
+credentials/
+.venv/
+.build/
+__pycache__/
+.DS_Store
