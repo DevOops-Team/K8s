@@ -16,8 +16,9 @@ def accept_message(consumer, workflow, msg):
 def run(config, stop, health):
     import boto3
     from confluent_kafka import Consumer, Producer
-    table = boto3.resource('dynamodb', region_name=config['aws_region']).Table(config['dynamodb_table'])
-    store = Store(table)
+    dynamodb = boto3.resource('dynamodb', region_name=config['aws_region'])
+    table = dynamodb.Table(config['recovery_table'])
+    store = Store(table, dynamodb.Table(config['fencing_table']))
     execute = config['execution_enabled']
     executor = Executor(config['executor_url'], os.environ.get('EXECUTOR_TOKEN','')) if execute else None
     workflow = Workflow(store, executor, execute)

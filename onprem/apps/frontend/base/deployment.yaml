@@ -63,3 +63,10 @@ spec:
           tcpSocket:
             port: http
           periodSeconds: 10
+          timeoutSeconds: 2
+        livenessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3

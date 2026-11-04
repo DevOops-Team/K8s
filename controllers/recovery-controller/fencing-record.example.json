@@ -1,0 +1,7 @@
+{
+  "job_id": "training-123",
+  "generation": 1,
+  "owner": "eks-a",
+  "approved_gen": 1,
+  "approved_step": 1000
+}

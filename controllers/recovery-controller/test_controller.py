@@ -35,3 +35,16 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(dep['spec']['replicas'],1)
         self.assertEqual(dep['spec']['strategy']['type'],'Recreate')
         self.assertFalse(dep['spec']['template']['spec']['automountServiceAccountToken'])
+
+    def test_execute_requires_reviewed_A_policy(self):
+        from controller import validate_config
+        config=dict(schema_version=1,mode='execute',event_source='kafka',execution_enabled=True,
+                    aws_region='ap-northeast-2',recovery_table='recovery',fencing_table='fencing',
+                    kafka_bootstrap_servers='kafka:9093',kafka_group_id='recovery-v1',
+                    fault_topic='gpu.fault',result_topic='recovery.action',executor_url='https://executor',
+                    redispatch_policy='controller-only',scheduler_policy_confirmed=False)
+        with self.assertRaises(ValueError):validate_config(config)
+        config['scheduler_policy_confirmed']=True
+        self.assertEqual(validate_config(config)['redispatch_policy'],'controller-only')
+        config['fencing_table']='recovery'
+        with self.assertRaises(ValueError):validate_config(config)

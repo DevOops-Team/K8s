@@ -63,6 +63,18 @@ spec:
             - ALL
           seccompProfile:
             type: RuntimeDefault
+        livenessProbe:
+          tcpSocket:
+            port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        startupProbe:
+          tcpSocket:
+            port: metrics
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 24
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

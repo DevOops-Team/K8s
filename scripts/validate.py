@@ -60,6 +60,10 @@ def main():
             assert key not in seen,('Duplicate owner',key)
             seen.add(key)
             assert obj['kind'] not in ['Secret','JobSet'],'Credentials and runtime jobs are not Git resources'
+            if obj['kind'] in ['Deployment','StatefulSet','DaemonSet']:
+                for container in obj['spec']['template']['spec']['containers']:
+                    assert container.get('livenessProbe'), (obj['metadata']['name'],container['name'],'missing livenessProbe')
+
         if name in ['gpu-frontend','gpu-backend']:
             deployment=next(d for d in resources if d['kind']=='Deployment');service=next(d for d in resources if d['kind']=='Service')
             pod=deployment['spec']['template']
@@ -71,6 +75,9 @@ def main():
                 assert 'replace-me' not in pod['spec']['containers'][0]['image']
                 assert '@sha256:' in pod['spec']['containers'][0]['image']
         if name.startswith('gpu-queues-'):
+            identity=next(d for d in resources if d['kind']=='ConfigMap' and d['metadata']['name']=='devoops-cluster-info')
+            assert identity['metadata']['namespace']=='training'
+            assert identity['data']['CLUSTER_NAME']==spec['destination']['name']
             cq=next(d for d in resources if d['kind']=='ClusterQueue')
             q=next(q for q in cq['spec']['resourceGroups'][0]['flavors'][0]['resources'] if q['name']=='nvidia.com/gpu')
             assert type(q['nominalQuota']) is int and 1<=q['nominalQuota']<=4

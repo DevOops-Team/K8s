@@ -10,3 +10,4 @@ resources:
 - gpu-traefik.yaml
 - gpu-web.yaml
 - gpu-recovery-controller.yaml
+- gpu-cert-manager-cainjector.yaml

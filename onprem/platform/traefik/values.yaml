@@ -15,15 +15,15 @@ service:
   spec:
     type: ClusterIP
 nodeSelector:
-  platform-worker: "true"
+  platform-worker: 'true'
 tolerations: []
 affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchLabels:
-            app.kubernetes.io/name: traefik
-        topologyKey: kubernetes.io/hostname
+    - labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+      topologyKey: kubernetes.io/hostname
 resources:
   requests:
     cpu: 100m
@@ -36,3 +36,9 @@ podDisruptionBudget:
 accessLog:
   enabled: true
   format: json
+livenessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1

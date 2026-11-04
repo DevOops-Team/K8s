@@ -1,4 +1,4 @@
-"""Observe-only recovery foundation. No Kafka consumer or execution adapters yet."""
+"""Recovery controller with observe/execute modes and external execution adapters."""
 import argparse
 import json
 import signal
@@ -35,14 +35,18 @@ def validate_config(config):
     if source == 'disabled' and config['execution_enabled']:
         raise ValueError('execution requires kafka input')
     if source == 'kafka':
-        for key in ('aws_region','dynamodb_table','kafka_bootstrap_servers','kafka_group_id','fault_topic','result_topic'):
+        for key in ('aws_region','recovery_table','fencing_table','kafka_bootstrap_servers','kafka_group_id','fault_topic','result_topic'):
             if not isinstance(config.get(key),str) or not config[key].strip() or 'YOUR_' in config[key]:
                 raise ValueError('configure '+key)
+        if config['recovery_table']==config['fencing_table']:
+            raise ValueError('recovery inbox and job_id fencing table must be separate')
         if config['fault_topic']==config['result_topic']:
             raise ValueError('input and output topics must differ')
         if type(config.get('reconcile_seconds',5)) is not int or not 1 <= config.get('reconcile_seconds',5) <= 60:
             raise ValueError('reconcile_seconds must be 1..60')
         if config['execution_enabled']:
+            if config.get('redispatch_policy')!='controller-only' or config.get('scheduler_policy_confirmed') is not True:
+                raise ValueError('A policy must be configured and reviewed before execution')
             from urllib.parse import urlparse
             if urlparse(config.get('executor_url','')).scheme != 'https':
                 raise ValueError('HTTPS executor_url required')
