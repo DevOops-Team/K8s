@@ -16,6 +16,7 @@ action:
   acceptedAt -> isolatedAt -> stoppedAt -> resubmittedAt -> admittedAt (Done)
 """
 import copy
+import json
 import os
 import time
 
@@ -27,6 +28,7 @@ import kube
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 내려가길 기다리는 최대 시간
 ADMIT_TIMEOUT_SECONDS = int(os.getenv("ADMIT_TIMEOUT_SECONDS", "900"))
+CONTROLLER_NS = os.getenv("CONTROLLER_NAMESPACE", "job-placement")   # 재제출용 잡 사본 보관
 
 kube.setup_logging("relocator")
 log = kube.logging.getLogger("relocator")
@@ -49,8 +51,14 @@ class Ctx:
             K.RR_GROUP, K.RR_VERSION, self.ns, K.RR_PLURAL, self.name, {"status": self.st})
 
     def job(self):
+        # 요청이 있는 네임스페이스의 잡만 다룬다 (다른 네임스페이스 잡을 지우게 만드는 요청 차단)
         ns, _, name = self.spec["jobRef"].partition("/")
+        if ns != self.ns:
+            raise PermissionError(f"jobRef 네임스페이스 {ns} != 요청 네임스페이스 {self.ns}")
         return ns, name
+
+    def snapshot_name(self):
+        return f"rr-snapshot-{self.rr['metadata']['uid']}"
 
 
 # ---------- 단계
@@ -82,7 +90,11 @@ def isolate(x: Ctx):
         if api is None:
             raise RuntimeError(f"워커 {src} 접속 정보 없음")
         core = client.CoreV1Api(api)
+        gpu_nodes = {n.metadata.name for n in core.list_node(
+            label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items}
         for node in x.spec.get("excludeNodes") or []:
+            if node not in gpu_nodes:   # GPU 노드가 아닌 것(컨트롤 플레인 등)은 격리하지 않음
+                raise PermissionError(f"{node}는 {src}의 GPU 노드({K.GPU_NODE_SELECTOR})가 아님")
             n = core.read_node(node, _request_timeout=kube.TIMEOUT)
             taints = [t for t in (n.spec.taints or []) if t.key != K.TAINT_FAULTY]
             taints.append(client.V1Taint(key=K.TAINT_FAULTY, value="true", effect="NoSchedule"))
@@ -147,8 +159,10 @@ def build_new(x: Ctx, old):
 
 def resubmit(x: Ctx):
     ns, _ = x.job()
-    # 옛 잡 원본은 접수 때 status에 저장해 둔 것을 쓴다 (삭제 뒤에도 재제출할 수 있게)
-    old = x.st.get("snapshot")
+    # 옛 잡 원본은 접수 때 컨트롤러 네임스페이스 ConfigMap에 저장해 둔 것을 쓴다
+    # (요청 status는 다른 주체도 쓸 수 있어서 거기 두면 재제출 내용을 바꿔치기할 수 있음)
+    cm = client.CoreV1Api(x.mgr).read_namespaced_config_map(x.snapshot_name(), CONTROLLER_NS)
+    old = json.loads(cm.data["jobset"])
     new = build_new(x, old)
     try:
         x.co.create_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", new)
@@ -174,9 +188,17 @@ def watch_admit(x: Ctx):
 def snapshot(x: Ctx):
     ns, name = x.job()
     old = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
-    x.save(snapshot={"metadata": {"labels": old["metadata"].get("labels") or {},
-                                  "annotations": old["metadata"].get("annotations") or {}},
-                     "spec": old["spec"]})
+    snap = {"metadata": {"labels": old["metadata"].get("labels") or {},
+                         "annotations": old["metadata"].get("annotations") or {}},
+            "spec": old["spec"]}
+    body = client.V1ConfigMap(metadata=client.V1ObjectMeta(
+        name=x.snapshot_name(), labels={"app": "relocator", K.LABEL_REQUEST_ID: x.spec["requestId"]}),
+        data={"jobset": json.dumps(snap)})
+    try:
+        client.CoreV1Api(x.mgr).create_namespaced_config_map(CONTROLLER_NS, body)
+    except client.ApiException as e:
+        if e.status != 409:
+            raise
 
 
 def step(x: Ctx, all_rrs):
@@ -203,6 +225,9 @@ def reconcile(mgr, workers):
         x = Ctx(mgr, workers, rr)
         try:
             step(x, rrs)
+        except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
+            log.warning("%s: 거부 - %s", x.name, e)
+            x.save(phase="Failed", message=f"거부: {e}")
         except Exception as e:  # noqa: BLE001  다음 루프에서 같은 단계 재시도
             log.exception("%s: 단계 실패, 다음 루프에서 다시", x.name)
             try:

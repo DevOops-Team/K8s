@@ -15,9 +15,10 @@ export KUBE_CONTEXT=${KUBE_CONTEXT:-kind-manager}
 export WORKER_CONTEXTS=${WORKER_CONTEXTS:-worker1=kind-worker1,worker2=kind-worker2,worker3=kind-worker3}
 export PYTHONUNBUFFERED=1
 
-# CRD가 없으면 먼저 설치
-kubectl --context "$KUBE_CONTEXT" get crd relocationrequests.scheduling.devoops.site >/dev/null 2>&1 \
-  || kubectl --context "$KUBE_CONTEXT" apply -f deploy/crd-relocationrequest.yaml
+# CRD와 재배치 실행기 잡 사본 보관 네임스페이스가 없으면 먼저 만듦
+kubectl --context "$KUBE_CONTEXT" apply -f deploy/crd-relocationrequest.yaml >/dev/null
+kubectl --context "$KUBE_CONTEXT" get ns job-placement >/dev/null 2>&1 \
+  || kubectl --context "$KUBE_CONTEXT" create ns job-placement
 
 names=("${@:-dispatcher relocator priority}")
 read -r -a names <<< "${names[*]}"

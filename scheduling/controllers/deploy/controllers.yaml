@@ -5,29 +5,55 @@ kind: Namespace
 metadata:
   name: job-placement
 ---
+# 컨트롤러마다 ServiceAccount를 따로 둔다: 필요한 권한만
+#   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
+#   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기 + 잡 사본 ConfigMap
+#   priority  : JobSet 라벨만
 apiVersion: v1
 kind: ServiceAccount
-metadata:
-  name: job-placement
-  namespace: job-placement
+metadata: {name: dispatcher, namespace: job-placement}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: relocator, namespace: job-placement}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: priority, namespace: job-placement}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata:
-  name: job-placement
+metadata: {name: job-placement-dispatcher}
 rules:
 - apiGroups: [kueue.x-k8s.io]
-  resources: [workloads, multikueueclusters, clusterqueues]
+  resources: [workloads]
   verbs: [get, list, watch, patch]
 - apiGroups: [kueue.x-k8s.io]
   resources: [workloads/status]
   verbs: [patch]
+- apiGroups: [kueue.x-k8s.io]
+  resources: [multikueueclusters]
+  verbs: [get, list, watch]
 - apiGroups: [jobset.x-k8s.io]
   resources: [jobsets]
-  verbs: [get, list, watch, create, patch, delete]
+  verbs: [get]
 - apiGroups: [batch]
   resources: [jobs]
-  verbs: [get, list]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: job-placement-relocator}
+rules:
+- apiGroups: [kueue.x-k8s.io]
+  resources: [workloads]
+  verbs: [get, list, watch]
+- apiGroups: [kueue.x-k8s.io]
+  resources: [multikueueclusters]
+  verbs: [get, list, watch, patch]
+- apiGroups: [jobset.x-k8s.io]
+  resources: [jobsets]
+  verbs: [get, list, create, delete]
 - apiGroups: [scheduling.devoops.site]
   resources: [relocationrequests]
   verbs: [get, list, watch]
@@ -36,32 +62,67 @@ rules:
   verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: job-placement
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement}
-subjects:
-- {kind: ServiceAccount, name: job-placement, namespace: job-placement}
+kind: ClusterRole
+metadata: {name: job-placement-priority}
+rules:
+- apiGroups: [kueue.x-k8s.io]
+  resources: [workloads]
+  verbs: [get, list, watch]
+- apiGroups: [jobset.x-k8s.io]
+  resources: [jobsets]
+  verbs: [get, list, watch, patch]
 ---
-# 워커 kubeconfig: MultiKueue가 쓰는 Secret을 같이 읽는다 (워커 쪽 권한은 그 kubeconfig 계정 권한)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: job-placement-dispatcher}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-dispatcher}
+subjects: [{kind: ServiceAccount, name: dispatcher, namespace: job-placement}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: job-placement-relocator}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-relocator}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: job-placement}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: job-placement-priority}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-priority}
+subjects: [{kind: ServiceAccount, name: priority, namespace: job-placement}]
+---
+# 워커 kubeconfig: MultiKueue가 쓰는 Secret 중 이름을 지정한 것만 (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
+# MultiKueueCluster 목록 조회도 필요하지만 그건 위 ClusterRole에 있음
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata:
-  name: job-placement-worker-kubeconfig
-  namespace: kueue-system
+metadata: {name: job-placement-worker-kubeconfig, namespace: kueue-system}
 rules:
 - apiGroups: [""]
   resources: [secrets]
+  resourceNames: [worker1-secret, worker2-secret, worker3-secret]
   verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata:
-  name: job-placement-worker-kubeconfig
-  namespace: kueue-system
+metadata: {name: job-placement-worker-kubeconfig, namespace: kueue-system}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-placement-worker-kubeconfig}
 subjects:
-- {kind: ServiceAccount, name: job-placement, namespace: job-placement}
+- {kind: ServiceAccount, name: dispatcher, namespace: job-placement}
+- {kind: ServiceAccount, name: relocator, namespace: job-placement}
+---
+# 재배치 실행기의 잡 사본 보관소 (자기 네임스페이스 ConfigMap만)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: relocator-snapshots, namespace: job-placement}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: relocator-snapshots, namespace: job-placement}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: relocator-snapshots}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: job-placement}]
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -74,7 +135,7 @@ spec:
   template:
     metadata: {labels: {app: dispatcher}}
     spec:
-      serviceAccountName: job-placement
+      serviceAccountName: dispatcher
       containers:
       - name: main
         image: job-placement:dev
@@ -93,7 +154,7 @@ spec:
   template:
     metadata: {labels: {app: relocator}}
     spec:
-      serviceAccountName: job-placement
+      serviceAccountName: relocator
       containers:
       - name: main
         image: job-placement:dev
@@ -112,7 +173,7 @@ spec:
   template:
     metadata: {labels: {app: priority}}
     spec:
-      serviceAccountName: job-placement
+      serviceAccountName: priority
       containers:
       - name: main
         image: job-placement:dev

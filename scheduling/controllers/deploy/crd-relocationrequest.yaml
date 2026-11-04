@@ -79,7 +79,3 @@ spec:
               stoppedAt: {type: string}
               resubmittedAt: {type: string}
               admittedAt: {type: string}
-              snapshot:
-                type: object
-                description: 재제출용 옛 잡 사본 (실행기 내부용)
-                x-kubernetes-preserve-unknown-fields: true
