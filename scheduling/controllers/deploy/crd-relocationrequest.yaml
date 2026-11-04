@@ -1,0 +1,85 @@
+# 재배치 요청: 장애복구 파트(복구 컨트롤러)가 만들고 재배치 실행기가 처리한다.
+# 정책 이름(ours / naive / hyperpod)은 모른다. "무엇을 할지(action)"만 받는다.
+# 초안 — 11/05 회고에서 장애복구 파트와 확정
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: relocationrequests.scheduling.devoops.site
+spec:
+  group: scheduling.devoops.site
+  scope: Namespaced
+  names:
+    kind: RelocationRequest
+    plural: relocationrequests
+    singular: relocationrequest
+    shortNames: [rr]
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - {name: Request, type: string, jsonPath: .spec.requestId}
+    - {name: Action, type: string, jsonPath: .spec.action}
+    - {name: Job, type: string, jsonPath: .spec.jobRef}
+    - {name: Phase, type: string, jsonPath: .status.phase}
+    - {name: From, type: string, jsonPath: .status.sourceCluster}
+    - {name: To, type: string, jsonPath: .status.targetCluster}
+    - {name: NewJob, type: string, jsonPath: .status.newJob}
+    - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required: [requestId, jobRef, action]
+            x-kubernetes-validations:
+            - rule: "self == oldSelf"
+              message: "spec은 만든 뒤 바꿀 수 없음. 새 요청을 만들 것"
+            - rule: "self.action != 'moveToSpare' || (has(self.excludeNodes) && size(self.excludeNodes) > 0)"
+              message: "moveToSpare에는 excludeNodes가 필요"
+            properties:
+              requestId:
+                type: string
+                description: 같은 값의 요청은 한 번만 실행 (장애 이벤트 id)
+              jobRef:
+                type: string
+                description: 대상 JobSet, namespace/name (관리 클러스터 기준)
+                pattern: '^[a-z0-9-]+/[a-z0-9.-]+$'
+              action:
+                type: string
+                enum: [restartInPlace, moveToSpare, evacuateCluster]
+              excludeNodes:
+                type: array
+                items: {type: string}
+                description: 격리할 노드 (moveToSpare)
+              excludeClusters:
+                type: array
+                items: {type: string}
+                description: 재제출 때 보내면 안 되는 클러스터
+              reason:
+                type: string
+                description: 기록용 원인 분류
+                enum: [hardware, software, spot, straggler, az, unknown]
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              phase:
+                type: string
+                description: Accepted -> Executing -> Done / Failed / Duplicate
+              message: {type: string}
+              sourceCluster: {type: string}
+              targetCluster: {type: string}
+              newJob: {type: string}
+              acceptedAt: {type: string}
+              isolatedAt: {type: string}
+              stoppedAt: {type: string}
+              resubmittedAt: {type: string}
+              admittedAt: {type: string}
+              snapshot:
+                type: object
+                description: 재제출용 옛 잡 사본 (실행기 내부용)
+                x-kubernetes-preserve-unknown-fields: true

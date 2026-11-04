@@ -89,7 +89,7 @@ metadata:
     type: kwok
     node-role: gpu
     kubernetes.io/hostname: gpu-node-5
-    scheduling.gpu-project.io/spare: "true"
+    devoops/spare: "true"
 spec:
   taints:
     - key: kwok.x-k8s.io/node

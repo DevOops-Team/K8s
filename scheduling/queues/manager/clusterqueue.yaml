@@ -82,3 +82,5 @@ spec:
       resources:
       - name: nvidia.com/gpu
         nominalQuota: '2'
+        # 복구 몫은 남에게 빌려주지 않음: 선점 없이도 복구 잡이 바로 쿼터를 받게
+        lendingLimit: '0'

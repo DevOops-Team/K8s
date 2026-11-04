@@ -28,7 +28,7 @@ metadata:
   name: lq-heavy
   namespace: ml
 spec:
-  clusterQueue: cq-heavy
+  clusterQueue: train-cq  # 워커는 CQ 하나. 관리 클러스터와 같은 LQ 이름만 맞춤
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -36,7 +36,7 @@ metadata:
   name: lq-light
   namespace: ml
 spec:
-  clusterQueue: cq-light
+  clusterQueue: train-cq  # 워커는 CQ 하나. 관리 클러스터와 같은 LQ 이름만 맞춤
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -44,4 +44,4 @@ metadata:
   name: lq-recovery
   namespace: ml
 spec:
-  clusterQueue: cq-recovery
+  clusterQueue: train-cq  # 워커는 CQ 하나. 관리 클러스터와 같은 LQ 이름만 맞춤

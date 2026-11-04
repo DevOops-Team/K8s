@@ -8,6 +8,8 @@ metadata:
   namespace: ml
   labels:
     kueue.x-k8s.io/queue-name: lq-heavy
+  annotations:
+    devoops/manual-dispatch: "true"   # 디스패처가 돌고 있어도 손대지 않게 (이 실습은 수동 지명)
 spec:
   suspend: true
   replicatedJobs:

@@ -1,0 +1,36 @@
+# 예비 노드 자리 표시 Pod (GPU-70) — 워커 클러스터에 apply. 컨트롤러가 필요 없다.
+# 예비 노드의 GPU를 잡고 있다가, 우선순위가 더 높은 Pod(복구 잡, 기본 0)가 오면
+# kube-scheduler 선점으로 밀려난다. Kueue 선점과는 무관 (Kueue는 이 Pod를 관리하지 않음).
+# 예비 on/off = 이 Deployment를 두느냐 마느냐.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: spare-placeholder
+value: -10
+preemptionPolicy: Never
+globalDefault: false
+description: "예비 노드 자리 표시. 누구에게나 밀려남"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spare-placeholder
+  namespace: ml
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: spare-placeholder}}
+  template:
+    metadata: {labels: {app: spare-placeholder}}
+    spec:
+      priorityClassName: spare-placeholder
+      terminationGracePeriodSeconds: 0
+      nodeSelector:
+        devoops/spare: "true"
+      tolerations:
+      - {key: kwok.x-k8s.io/node, operator: Equal, value: fake, effect: NoSchedule}   # kind 전용
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+        resources:
+          requests: {nvidia.com/gpu: 1}
+          limits: {nvidia.com/gpu: 1}
