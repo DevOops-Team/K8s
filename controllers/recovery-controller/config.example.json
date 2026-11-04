@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "mode": "observe",
+  "event_source": "disabled",
+  "execution_enabled": false
+}

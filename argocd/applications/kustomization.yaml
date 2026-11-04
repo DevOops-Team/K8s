@@ -1,14 +1,4 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-- gpu-foundation.yaml
-- gpu-traefik.yaml
-- gpu-cert-manager.yaml
-- gpu-frontend.yaml
-- gpu-backend.yaml
-- gpu-web.yaml
-- gpu-queues-eks-a.yaml
-- gpu-queues-eks-b.yaml
-- gpu-queues-eks-c.yaml
-- gpu-multikueue.yaml
-- gpu-cloudflared.yaml
+- onprem

@@ -1,131 +1,127 @@
-# K8s — gpu-k8s Kubernetes GitOps
+# K8s — 온프레미스와 EKS별 GitOps
 
-이 저장소는 Argo CD가 관리하는 Kubernetes 매니페스트입니다. 실행 중인 클러스터에는 아직 적용하지 않았습니다.
-GitHub 저장소는 https://github.com/DevOops-Team/K8s.git 이며 Argo CD는 develop 브랜치를 읽습니다. 앱 이미지·ACME 이메일은 아직 미정이고 최초 구성에는 자동 동기화를 넣지 않았습니다.
-
-## 두 저장소의 경계
-
-| gpu-iac | gpu-k8s |
-|---|---|
-| Terraform 자원 생성 영역, Ansible VM 준비, Kubespray·HA·API VIP·CoreDNS·MAP | 앱 Deployment·Service·RBAC, Traefik·cert-manager 설정, frontend Ingress·Certificate |
-| Argo CD 최초 설치·업그레이드와 root 등록 | Argo Application/AppProject 및 일반 리소스의 지속 동기화 |
-| 외부 Cloudflare Tunnel·DNS API 설정 | cloudflared Deployment·PDB |
-| 비밀값 최초 등록·갱신, 별도 credential 관리 | 비밀값 없이 Secret 이름 참조 |
-| Kubernetes 실행 기반 준비 | EKS 큐·ResourceFlavor·MultiKueue 연결 객체 |
-
-Kueue v0.20.0·JobSet v0.13.0 컨트롤러와 Kueue MAP 정책·디스패처는 스케줄링 파트가 설치합니다. 여기서는 컨트롤러를 설치하지 않고 큐·연결만 관리합니다. 이전 Ansible의 리소스 적용 경로는 삭제했으므로 양쪽이 같은 Deployment 등을 수정하지 않습니다.
-
-## 폴더
+GitHub: https://github.com/DevOops-Team/K8s.git / develop.
+온프레미스·EKS A/B/C의 설정과 Argo CD root를 분리했습니다. 이 변경은 로컬 코드 업데이트이며 클러스터 적용은 하지 않았습니다.
 
 ```text
+onprem/
+├─ apps/frontend, backend/   # 플랫폼 앱; backend는 내부 ClusterIP만 사용
+├─ platform/                # namespace·Traefik·cert-manager·웹·cloudflared
+└─ scheduling/              # 매니저 큐·MultiKueue
+
+eks/
+├─ eks-a/                   # A 전용 큐·ResourceFlavor·SA·연결 권한
+├─ eks-b/
+└─ eks-c/
+   ├─ resources.yaml        # Argo CD 적용 파일
+   ├─ kustomization.yaml
+   └─ settings.example.yaml # 로컬 설정 도구용 예시; 적용 리소스 아님
+
 argocd/
-├─ bootstrap/           # AppProject + root Application; IaC가 최초 등록
-└─ applications/        # root가 읽는 11개 구성 요소 Application
-apps/
-├─ frontend/base/       # Deployment·Service·ServiceAccount·PDB
-├─ frontend/overlays/onprem/  # 실제 이미지 digest·replicas
-├─ backend/base/        # 내부 ClusterIP Service·Deployment·RBAC
-└─ backend/overlays/onprem/
-platform/
-├─ namespaces/          # 공유 namespace의 단일 소유자
-├─ traefik/             # 버전 고정 Helm values
-├─ cert-manager/        # 버전 고정 Helm values
-├─ web/                 # devoops.site Certificate·Ingress·ClusterIssuer
-└─ cloudflared/         # 2개 커넥터와 PDB
-scheduling/
-├─ manager/             # GPU 12장 매니저 큐·MultiKueue
-└─ workers/eks-{a,b,c}/  # EKS별 GPU 4장 큐·연결용 RBAC
-scripts/                # 로컬 값 설정·검증; 서버 적용 안 함
-examples/               # 아직 활성화하지 않은 선택 워크로드 설명
+├─ bootstrap/onprem/        # gpu-root + gpu-platform project
+├─ bootstrap/eks/eks-a/     # gpu-root-eks-a + gpu-eks-a project
+├─ bootstrap/eks/eks-b/
+├─ bootstrap/eks/eks-c/
+└─ applications/
+   ├─ onprem/               # 온프레미스 구성 요소 Application 8개
+   └─ eks/eks-{a,b,c}/       # EKS별 Application 1개
 ```
 
-frontend만 devoops.site로 공개합니다. backend는 ClusterIP:8000 예시이고 Ingress가 없습니다. 브라우저의 JavaScript는 ClusterIP에 직접 접속할 수 없으므로, frontend 서버의 내부 프록시/BFF 등 실제 앱의 통신 방식을 맞춰야 합니다. 브라우저에 backend.platform.svc 같은 주소를 넣지 않습니다.
+기본 argocd/bootstrap 및 argocd/applications 진입점은 **onprem만 포함**합니다. EKS는 해당 root를 따로 등록·sync해야 합니다. 각 AppProject의 목적지도 해당 환경으로 제한했습니다.
+Argo CD는 여전히 온프레미스 관리 클러스터에서 실행하며 등록된 EKS API로 배포합니다. 폴더와 root를 분리한 것이 VPN 우회나 AWS 내부 Argo CD 설치를 의미하지 않습니다.
 
-## 1. 로컬 설정
+## 담당 범위
 
-Python 3.12+, kubectl을 준비합니다. 터미널의 현재 위치는 gpu-k8s입니다.
+- gpu-iac: VM/Kubespray/HA/MAP, Argo bootstrap, Secret, 외부 Cloudflare API. EKS별 읽기 전용 준비 점검과 선택적 registry Secret 등록.
+- gpu-k8s: 각 클러스터 안의 원하는 리소스 상태.
+- AWS 담당: EKS·Managed Node Group·GPU AMI/드라이버·device plugin·IAM·접근 경로·Node Auto Repair·Node Monitoring Agent.
+- 스케줄링 담당: 각 클러스터의 Kueue v0.20.0·JobSet v0.13.0 컨트롤러와 매니저 디스패처·MAP 정책. 이 저장소는 설치하지 않습니다.
+
+## 로컬 준비·검증
 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/python scripts/validate.py
+.venv/bin/python scripts/validate.py --target onprem
+.venv/bin/python scripts/validate.py --target eks-a
+.venv/bin/python scripts/validate.py --target all
 ```
 
-GitHub 저장소 주소·브랜치는 설정되어 있습니다. 앱 이미지와 이메일의 실제 값을 입력합니다. 아래 digest는 실제 GHCR 이미지 값으로 대체합니다.
+검증은 로컬 Kustomize 빌드·소유권·적용 대상·할당량 일관성을 확인합니다. AWS/EKS 실환경에는 접속하지 않습니다. --ready는 선택한 환경의 미설정 Git URL/앱 이미지/이메일을 추가 확인하지만 실환경 준비 완료를 보장하지 않습니다. --argocd-schema에 checksum 검증한 공식 Argo 설치 YAML을 주면 Application/AppProject 스키마도 확인합니다.
+
+## 온프레미스 설정
 
 ```bash
 .venv/bin/python scripts/configure.py \
-  --repo-url https://github.com/DevOops-Team/K8s.git \
-  --revision develop \
+  --repo-url https://github.com/DevOops-Team/K8s.git --revision develop \
   --frontend-image ghcr.io/실제팀/frontend@sha256:실제64자리digest \
   --backend-image ghcr.io/실제팀/backend@sha256:실제64자리digest \
-  --backend-port 8000 \
-  --acme-email 실제이메일
-.venv/bin/python scripts/validate.py --ready
+  --backend-port 8000 --acme-email 실제이메일
+.venv/bin/python scripts/validate.py --target onprem --ready
 ```
 
-configure.py는 로컬 파일만 변경합니다. 실제 이미지를 제공한 앱만 replicas=2로 바뀝니다. 초기 0개 복제본과 0으로 채운 digest는 미설정 표시이며 운영용 이미지가 아닙니다.
-스크립트는 기존 repo URL도 새 URL로 갱신하므로 재실행할 수 있습니다. 변경 내용을 검토하고 Git에 커밋·push합니다. 루트와 Helm values source를 포함한 모든 Application URL을 같은 gpu-k8s 주소로 설정합니다.
-각 EKS의 노드 라벨·CPU/메모리 할당량·training ServiceAccount IAM annotation은 scheduling/workers/eks-*/resources.yaml에서 실제 환경에 맞춥니다. IAM 자원 자체는 여기서 생성하지 않습니다.
+이미지가 없는 앱은 replicas=0을 유지합니다. 실제 이미지를 넣은 앱만 2개로 바뀝니다. 자동 sync는 기본 꺼져 있고 --enable-auto-sync를 쓰면 --scope에 지정한 환경의 자식 Application만 켭니다(기본 scope=onprem). root는 수동 sync, prune은 꺼진 상태입니다.
+브라우저는 backend ClusterIP를 직접 호출할 수 없으므로 frontend 서버/BFF 등의 내부 연결은 앱 담당과 맞춥니다. backend Ingress는 없습니다.
 
-## 2. Argo CD 최초 연결
-
-자세한 순서는 [docs/bootstrap.md](docs/bootstrap.md)를 따릅니다.
-
-1. gpu-iac에서 VM/Kubernetes/MAP를 준비하고 Argo CD를 최초 설치합니다.
-2. DevOops-Team/K8s 저장소의 develop에 구성을 push합니다. 비공개 저장소 인증은 argocd repo add 등으로 등록합니다.
-3. EKS를 Argo CD에 eks-a/eks-b/eks-c 이름으로 등록합니다. kubeconfig context와 Argo cluster name은 별개이며 Application 목적지 name은 후자입니다.
-4. Secret을 gpu-iac에서 등록하고 root Application을 최초 등록합니다.
-5. root를 sync한 뒤 아래 초기 순서대로 구성 요소를 sync합니다.
-
-자동 동기화는 기본 꺼져 있고 prune도 꺼져 있습니다. sync-wave 숫자는 정렬 정보이며, **Application 리소스 생성 순서만으로 자식 앱 준비 완료를 보장하지 않습니다.** 처음에는 아래 단계별 Health/Sync 상태와 CRD 준비를 확인합니다. 준비 후 configure.py --enable-auto-sync로 자식 앱의 자동 배포를 켤 수 있습니다. 이때도 삭제는 자동 prune하지 않습니다.
-
-## 3. 최초 sync 순서
+## EKS 하나씩 설정
 
 ```bash
+cp eks/eks-a/settings.example.yaml eks/eks-a/settings.local.yaml
+# GPU 노드 라벨·taint·CPU/메모리 할당량·IAM annotation을 실제 값으로 수정
+.venv/bin/python scripts/configure-eks.py --cluster eks-a --settings eks/eks-a/settings.local.yaml
+.venv/bin/python scripts/validate.py --target all
+```
+
+B/C도 해당 파일로 별도 실행합니다. settings.local.yaml은 Git 제외이며, **생성된 resources.yaml은 커밋**합니다. 이 도구는 선택한 EKS만 수정하고 다른 EKS 리소스는 바꾸지 않습니다. 다만 매니저의 합계 할당량은 세 EKS를 합산해 onprem/scheduling/resources.yaml에 함께 갱신하므로 두 diff를 검토하고 각각 sync합니다.
+
+설정 항목:
+
+| 항목 | 의미 |
+|---|---|
+| cluster_alias | eks-a/b/c 중 선택 대상과 일치해야 함 |
+| gpu_node_labels | 실제 GPU 노드 라벨과 일치해야 함 |
+| gpu_node_taints | ResourceFlavor의 taint 정보. 학습 Pod의 toleration도 제출 코드에서 맞춰야 함 |
+| gpu_quota | 기본 4장, 도구 허용 범위 1~4. 물리 GPU 5장은 AWS에서 준비 |
+| cpu_quota | 해당 큐의 양의 정수 CPU 할당량 |
+| memory_quota | 설정 도구는 정수 Gi 단위(예: 128Gi)를 사용 |
+| training_service_account_annotations | IRSA 등 필요한 annotation. Pod Identity association은 AWS 담당이 구성 |
+
+CPU 32 / 메모리 128Gi는 예시입니다. 실제 선택한 GPU 노드에서 **예약분을 제외하고 학습에 사용할 수 있는 자원**에 맞추며, 매니저 quota를 실물 예약으로 보지 않습니다. settings.example.yaml은 자동 적용되지 않습니다.
+
+## 환경별 적용
+
+1. gpu-iac에서 온프레미스 Kubernetes/MAP/Argo를 준비하고 Secret을 등록합니다.
+2. argocd/bootstrap/onprem을 등록하고 gpu-root를 sync합니다.
+3. foundation → Traefik/cert-manager → frontend/backend → 웹 인증서 순서로 health를 확인하며 sync합니다.
+4. AWS·스케줄링 담당의 EKS 준비 후 gpu-iac의 EKS별 preflight를 실행합니다.
+5. EKS를 Argo CD에 eks-a/b/c 이름으로 등록하고 각 registry Secret·전용 root를 따로 등록합니다.
+6. gpu-root-eks-a → gpu-queues-eks-a를 sync합니다. B/C도 각각 실행합니다.
+7. 각 EKS의 MultiKueue 전용 kubeconfig를 매니저 Secret으로 등록한 뒤 gpu-multikueue를 sync합니다.
+8. production frontend 인증서·endpoint 준비 후 gpu-iac에서 Cloudflare 외부 리소스를 구성하고 gpu-cloudflared를 sync합니다.
+
+```bash
+# 온프레미스만
 argocd app sync gpu-root
+# 최초에는 구성 요소별로 sync/health 확인
 argocd app sync gpu-foundation
 argocd app sync gpu-traefik gpu-cert-manager
 argocd app wait gpu-traefik gpu-cert-manager --health --timeout 600
 argocd app sync gpu-frontend gpu-backend
 argocd app wait gpu-frontend gpu-backend --health --timeout 600
 argocd app sync gpu-web
+
+# EKS A만: root를 먼저 등록한 뒤
+argocd app sync gpu-root-eks-a
+argocd app sync gpu-queues-eks-a
 ```
 
-cert-manager CRD와 controller, cloudflare-dns-api-token을 먼저 준비한 뒤 gpu-web을 sync합니다. Certificate/frontend-tls가 Ready인지 별도로 확인합니다.
-스케줄링 파트의 Kueue/JobSet과 각 EKS 인증정보가 준비된 뒤:
+Application의 sync-wave는 자식 앱 건강 상태까지 자동 보장하지 않습니다. 초기에 단계별 검증을 수행하고, 준비 후 환경별 자동 sync를 선택합니다.
 
-```bash
-argocd app sync gpu-queues-eks-a gpu-queues-eks-b gpu-queues-eks-c
-# MultiKueue 전용 kubeconfig를 준비하고 gpu-iac의 remote Secret 등록 실행
-argocd app sync gpu-multikueue
-```
+## VPN 단절과 장애 복구
 
-gpu-iac의 Cloudflare provider 구성으로 Tunnel·DNS·cloudflared-token을 준비한 뒤:
+온프레미스의 Argo/MultiKueue는 VPN을 유일한 EKS API 경로로 쓴다면 단절 중 EKS 변경·조회가 제한됩니다. EKS 내부 Kubernetes/JobSet과 AWS Node Auto Repair는 필요한 로컬 조건이 정상이라면 계속 동작합니다. 이 저장소 분리가 독립적인 AWS 복구 프로그램을 만드는 것은 아닙니다. kubelet/containerd SSH 복구기는 온프레미스 전용이며 EKS에 사용하지 않습니다.
+노드가 교체되는 것과 DDP/FSDP 학습이 체크포인트에서 재개되는 것은 별개입니다. 학습 재개·실행 권한·VPN 단절 시 중복 실행 방지는 스케줄링/복구 코드에서 처리해야 합니다.
 
-```bash
-argocd app sync gpu-cloudflared
-```
+CI는 변경 대상 환경의 경로만 수정합니다. 예: frontend 이미지는 onprem/apps/frontend/overlays/onprem/kustomization.yaml. 자동 sync가 켜진 해당 자식 앱이 반영합니다.
 
-필요한 Secret 없이 먼저 sync하면 해당 앱이 Pending/Degraded일 수 있습니다. Namespace 이름, release 이름, 기존 Service selector는 이전 구성과 동일하게 유지했습니다. 이미 배포된 리소스가 있다면 [docs/migration.md](docs/migration.md) 순서로 인계합니다.
-
-## 4. 이미지 자동 배포
-
-CI가 앱 이미지를 빌드해 GHCR에 저장한 뒤 해당 앱 overlays/onprem/kustomization.yaml의 digest를 변경해 gpu-k8s에 커밋합니다. Argo CD 자동 sync를 활성화한 앱은 Git의 새 digest로 업데이트됩니다. Argo CD가 애플리케이션 코드를 빌드하거나 GHCR의 latest를 임의로 선택하지는 않습니다.
-
-설정 변경으로 인한 Pod 재시작이 필요하면 Deployment의 Pod template도 함께 변경해야 합니다. 일반 ConfigMap/Secret 변경만으로 모든 앱이 자동 재시작된다고 가정하지 않습니다.
-
-## 검증
-
-validate.py는 모든 Kustomize 소스 빌드, 중복 리소스 소유권, 내부 전용 backend, frontend 라우팅, EKS GPU 할당량을 로컬에서 검사합니다. --ready는 Git URL·이미지·이메일의 미설정 값도 거부합니다. 실제 클러스터·DNS·권한·학습 재개를 검증하는 도구는 아닙니다.
-웹 컨트롤러는 Argo CD가 고정 버전 공식 Helm chart와 Git의 values를 조합합니다. 버전은 versions.yaml과 각 Application에 기록되어 있고 변경 시 함께 갱신합니다. 공식 차트는 변경 불가능한 digest가 아니라 버전으로 고정되어 있으며, 로컬 초기 검증에는 기존 공식 아티팩트 checksum과 렌더링 결과도 확인했습니다.
-비밀값 관리 위치는 [docs/secrets.md](docs/secrets.md), 소유권 인계는 [docs/migration.md](docs/migration.md)를 확인합니다.
-
-공식 Argo CD CRD 스키마도 로컬에서 확인하려면, IaC bootstrap이 checksum 검증해 내려받은 파일을 지정합니다.
-
-```bash
-.venv/bin/python scripts/validate.py \
-  --argocd-schema ../gpu-iac/ansible/.cache/argocd/upstream.yaml
-```
-
-이 옵션은 제공한 스키마에 대해 검사하며 네트워크 접근·배포를 수행하지 않습니다.
+[부트스트랩](docs/bootstrap.md) · [비밀값](docs/secrets.md) · [기존 구성 인계](docs/migration.md)

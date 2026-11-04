@@ -19,6 +19,7 @@ def main():
     p.add_argument('--backend-image', help='ghcr.io/org/image@sha256:<64 lowercase hex>')
     p.add_argument('--backend-port', type=int)
     p.add_argument('--acme-email')
+    p.add_argument('--scope', choices=['onprem','eks-a','eks-b','eks-c'], default='onprem', help='Only this target has auto-sync enabled; repo URL changes remain repository-wide')
     p.add_argument('--enable-auto-sync', action='store_true', help='After controller/Secret prerequisites are ready')
     args = p.parse_args()
     if not re.match(r'^(https://|ssh://|git@)', args.repo_url) or 'YOUR_ORG' in args.repo_url:
@@ -31,7 +32,7 @@ def main():
         p.error('backend-port must be 1..65535')
     if args.acme_email and ('@' not in args.acme_email or args.acme_email.endswith('@example.com')):
         p.error('Use an actual ACME contact email')
-    root_path = ROOT / 'argocd/bootstrap/root.yaml'
+    root_path = ROOT / 'argocd/bootstrap/onprem/root.yaml'
     old_repo = yaml.safe_load(root_path.read_text())['spec']['source']['repoURL']
     for path in (ROOT/'argocd').rglob('*.yaml'):
         docs = list(yaml.safe_load_all(path.read_text()))
@@ -47,7 +48,8 @@ def main():
                     if source.get('repoURL') in [old_repo,PLACEHOLDER]:
                         source['repoURL'] = args.repo_url
                         source['targetRevision'] = args.revision
-                if args.enable_auto_sync and doc['metadata']['name'] != 'gpu-root':
+                target = spec['destination'].get('name','onprem')
+                if args.enable_auto_sync and target == args.scope and not doc['metadata']['name'].startswith('gpu-root'):
                     spec['syncPolicy']['automated'] = {'prune': False, 'selfHeal': True, 'allowEmpty': False}
         path.write_text('---\n'.join(yaml.safe_dump(d,sort_keys=False,width=110) for d in docs if d))
     for name in ['frontend','backend']:
@@ -55,14 +57,14 @@ def main():
         if not image:
             continue
         repository,digest = image.split('@',1)
-        path = ROOT/f'apps/{name}/overlays/onprem/kustomization.yaml'
+        path = ROOT/f'onprem/apps/{name}/overlays/onprem/kustomization.yaml'
         data = yaml.safe_load(path.read_text())
         data['images'][0].update(newName=repository,digest=digest)
         data['replicas'][0]['count'] = 2
         save(path,data)
     if args.backend_port:
         for kind in ['deployment','service']:
-            path = ROOT/f'apps/backend/base/{kind}.yaml'
+            path = ROOT/f'onprem/apps/backend/base/{kind}.yaml'
             data = yaml.safe_load(path.read_text())
             if kind == 'deployment':
                 data['spec']['template']['spec']['containers'][0]['ports'][0]['containerPort'] = args.backend_port
@@ -70,7 +72,7 @@ def main():
                 data['spec']['ports'][0]['port'] = args.backend_port
             save(path,data)
     if args.acme_email:
-        path = ROOT/'platform/web/resources.yaml'
+        path = ROOT/'onprem/platform/web/resources.yaml'
         docs = list(yaml.safe_load_all(path.read_text()))
         for d in docs:
             if d and d.get('kind') == 'ClusterIssuer':

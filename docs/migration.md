@@ -10,3 +10,9 @@
 6. 이후 자동 sync를 켜면 수동 변경이 selfHeal로 되돌아갈 수 있습니다. 삭제는 Git diff를 검토하고 별도로 prune합니다.
 
 Argo CD bootstrap 매니페스트와 외부 Secret은 gpu-iac의 명시적 부트스트랩 대상입니다. Argo CD 자체가 같은 설치 리소스를 self-manage하도록 구성하지 않았습니다.
+
+## 온프레미스/EKS root 분리 인계
+
+리소스와 자식 Application의 이름은 유지했지만 source path와 EKS project/root는 변경했습니다. 기존 gpu-root가 EKS 자식 Application까지 이미 관리하고 있었다면, 자동 prune을 켜지 말고 **EKS 자식 Application을 orphan 방식으로 분리한 뒤** 새 EKS root로 소유권을 인계합니다. 기존 Namespace/큐/Pod를 삭제하는 절차가 아닙니다. 현재 Argo의 tracking-id/instance label과 finalizer를 확인하고, FailOnSharedResource 충돌을 해결한 후 sync합니다. 실제 클러스터를 조회하거나 자동으로 소유권을 강제 변경하는 스크립트는 실행하지 않았습니다.
+
+기존 source `apps/`, `platform/`, `scheduling/manager`, `scheduling/workers/eks-*`는 각각 `onprem/apps/`, `onprem/platform/`, `onprem/scheduling`, `eks/eks-*`로 이동했습니다. 기존 CI의 이미지 수정 경로도 갱신합니다.
