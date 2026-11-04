@@ -124,12 +124,28 @@ watch_for() {  # 초 간격 명령...
   while [ "$(date +%s)" -lt "$end" ]; do "$@"; sleep "$every"; done
 }
 
+# 워커 네트워크 끊기/붙이기. 다시 붙일 때 원래 IP로 (IP가 바뀌면 kind 클러스터 안 apiserver·etcd 주소가 어긋나 깨짐)
+IPDIR="${TMPDIR:-/tmp}/kind-scenario-ip"
+cut_off() {
+  local c="$1-control-plane"; mkdir -p "$IPDIR"
+  docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$c" > "$IPDIR/$1"
+  docker network disconnect kind "$c"
+  echo "  $1 끊음 (IP $(cat "$IPDIR/$1") 저장)"
+}
+reconnect() {
+  local c="$1-control-plane"
+  docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" | grep -q '"kind"' && return 0   # 이미 붙어 있음
+  if [ -s "$IPDIR/$1" ]; then docker network connect --ip "$(cat "$IPDIR/$1")" kind "$c"
+  else docker network connect kind "$c"; fi
+  echo "  $1 다시 연결 (IP $(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$c"))"
+}
+
 reset() {
   say "초기화 (잡·요청 삭제, 노드·펜싱·네트워크 원상복구)"
   kubectl --context $MGR -n $NS delete relocationrequests --all --ignore-not-found >/dev/null 2>&1 || true
   kubectl --context $MGR -n $NS delete jobsets --all --ignore-not-found --wait=false >/dev/null
   for w in "${WORKERS[@]}"; do
-    docker network connect kind "$w-control-plane" 2>/dev/null || true
+    reconnect "$w"
     kubectl --context $MGR label multikueuecluster "$w" devoops/fenced- >/dev/null 2>&1 || true
     for n in $(kubectl --context kind-$w get nodes -l node-role=gpu -o name 2>/dev/null); do
       kubectl --context kind-$w uncordon "$n" >/dev/null

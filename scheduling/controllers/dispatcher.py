@@ -124,6 +124,13 @@ def patch_nomination(mgr, wl, cluster, tried):
         "status": {"nominatedClusterNames": [cluster]}})
 
 
+def touch_nomination(mgr, wl, tried):
+    """지명은 그대로 두고 지명 시각만 지금으로 (재지명 확인을 RENOMINATE_SECONDS 뒤로 미룸)"""
+    kube.kueue(mgr).patch_namespaced_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, wl["metadata"]["namespace"], "workloads", wl["metadata"]["name"],
+        {"metadata": {"annotations": {K.ANN_NOMINATED_AT: str(int(time.time())), K.ANN_TRIED: ",".join(sorted(tried))}}})
+
+
 def reconcile(mgr, workers, starving_holder):
     clusters = cluster_state(mgr, workers)
     if clusters and not any(c.active for c in clusters):
@@ -172,6 +179,11 @@ def reconcile(mgr, workers, starving_holder):
             at = int(meta_ann.get(K.ANN_NOMINATED_AT, "0"))
             if time.time() - at < RENOMINATE_SECONDS:
                 continue
+            if ann.get(K.ANN_TARGET):
+                # 갈 수 있는 곳이 하나뿐 -> 다시 지명할 곳이 없음. 시각만 갱신해서 다음 확인을 미룸
+                log.warning("%s: %s에서 %ds 동안 입장 못 함 (target 고정이라 그대로 대기)", name, current, RENOMINATE_SECONDS)
+                touch_nomination(mgr, wl, tried)
+                continue
             tried |= set(current)
             log.info("%s: %s에서 %ds 동안 입장 못 함 -> 다시 지명", name, current, RENOMINATE_SECONDS)
         pods = kube.workload_pods(wl)
@@ -183,10 +195,12 @@ def reconcile(mgr, workers, starving_holder):
         pick = choose(pods, clusters, exclude=exclude | tried, **opts)
         if pick is None and tried:
             pick = choose(pods, clusters, exclude=exclude | set(current), **opts)
-        if pick is None:
-            log.debug("%s (GPU %d): 들어갈 워커 없음, 대기", name, sum(pods))
-            continue
-        if current == [pick]:
+        if pick is None or current == [pick]:
+            if current:   # 다시 지명할 곳이 없음 -> 지금 지명 유지, 시각만 갱신 (매 루프 반복 방지)
+                log.info("%s: 다른 워커도 자리 없음 -> %s 지명 유지", name, current)
+                touch_nomination(mgr, wl, tried)
+            else:
+                log.debug("%s (GPU %d): 들어갈 워커 없음, 대기", name, sum(pods))
             continue
         patch_nomination(mgr, wl, pick, tried)
         c = by_name[pick]
