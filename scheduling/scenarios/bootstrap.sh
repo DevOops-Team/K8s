@@ -27,8 +27,7 @@ for w in "${WORKERS[@]}"; do
       echo "  LocalQueue $lq: $cq -> $want 로 다시 만듦"
       kubectl --context $ctx -n ml delete localqueue "$lq"
     fi
-  done < <(kubectl --context $ctx -n ml get localqueues -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.clusterQueue}{"
-"}{end}' 2>/dev/null)
+  done < <(kubectl --context $ctx -n ml get localqueues -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.clusterQueue}{"\n"}{end}' 2>/dev/null)
   kubectl --context $ctx apply -k "$ROOT/queues/worker/overlays/kind" >/dev/null
   kubectl --context $ctx apply -f "$ROOT/kwok/nodes.yaml" >/dev/null
   kubectl --context $ctx label node gpu-node-5 scheduling.gpu-project.io/spare- >/dev/null 2>&1 || true
