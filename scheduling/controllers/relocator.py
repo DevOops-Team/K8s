@@ -118,13 +118,19 @@ def stop_old(x: Ctx):
         if e.status != 404:
             raise
     gone = kube.workload_for_jobset(x.mgr, ns, name) is None
-    waited = kube.since(x.st["isolatedAt"])
-    if not gone and waited < STOP_WAIT_SECONDS:
-        return  # 다음 루프에서 다시 확인
-    msg = "" if gone else f"옛 Workload가 {STOP_WAIT_SECONDS}s 안에 안 지워짐 (워커가 끊겼으면 거기서 아직 돌 수 있음: 이중 실행 주의)"
-    if msg:
+    confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
+    if gone or confirmed:
+        how = "옛 Workload 삭제 확인" if gone else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
+        log.info("%s: 옛 실행 멈춤 (%s)", x.name, how)
+        x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=how)
+        return
+    # 멈춘 게 확인되지 않으면 재제출하지 않는다 (contracts.md: 종료 확인 전 restart 금지 = 이중 실행 방지)
+    # 워커가 끊겨 있으면 관리 클러스터에서 지워도 거기서 아직 돌 수 있다
+    if kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS and x.st.get("phase") != "WaitingForStop":
+        msg = (f"옛 Workload가 {STOP_WAIT_SECONDS}s 넘게 안 지워짐 -> 재제출 보류. 옛 실행이 멈춘 걸 확인했으면 "
+               f"이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
         log.warning("%s: %s", x.name, msg)
-    x.save(stoppedAt=kube.now_rfc3339(), message=msg)
+        x.save(phase="WaitingForStop", message=msg)
 
 
 def build_new(x: Ctx, old):

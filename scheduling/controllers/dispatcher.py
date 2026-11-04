@@ -38,8 +38,15 @@ def cluster_state(mgr, workers) -> list:
         if c.active and api is not None:
             try:
                 fill_capacity(c, api)
+            except client.ApiException as e:
+                if e.status in (401, 403):   # 끊김이 아니라 권한 문제. 로그로 분명히 구분
+                    log.error("%s 권한 없음 (%s): 워커 kubeconfig 계정에 nodes·pods list, clusterqueues get 권한 필요",
+                              name, e.status)
+                else:
+                    log.warning("%s 용량 조회 실패: %s %s", name, e.status, e.reason)
+                c.active = False
             except Exception as e:  # noqa: BLE001  워커 조회 실패 = 이번 루프에선 못 쓰는 클러스터
-                log.warning("%s 용량 조회 실패: %s", name, e)
+                log.warning("%s 용량 조회 실패 (끊김?): %s", name, e)
                 c.active = False
         out.append(c)
     return out

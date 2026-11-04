@@ -34,3 +34,7 @@ webhook:
 waitForPodsReady:
   timeout: 2m
   blockAdmission: true
+  # 실행 중 Pod가 죽었을 때 Kueue가 혼자 내리고 다시 넣지 않게 끔.
+  # 실행 중 장애의 재시작 여부는 장애복구 파트가 판단하고 재배치 요청으로만 처리 (세대 번호 없이 재시작되는 것 방지)
+  # 처음 입장할 때의 갱 실패(timeout)는 Pod가 통째로 내려가 학습이 돈 적이 없으니 재큐해도 안전 -> 그대로 둠
+  recoveryTimeout: 0s

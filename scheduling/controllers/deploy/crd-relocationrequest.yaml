@@ -69,7 +69,7 @@ spec:
             properties:
               phase:
                 type: string
-                description: Accepted -> Executing -> Done / Failed / Duplicate
+                description: Accepted -> Executing (-> WaitingForStop) -> Done / Failed / Duplicate
               message: {type: string}
               sourceCluster: {type: string}
               targetCluster: {type: string}

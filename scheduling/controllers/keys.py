@@ -29,6 +29,9 @@ LABEL_JOB_ID = "devoops/job-id"
 LABEL_GENERATION = "devoops/generation"
 LABEL_REQUEST_ID = "devoops/request-id"
 
+# --- 재배치 요청에 붙이는 어노테이션: 요청을 만든 쪽(복구 컨트롤러·사람)이 씀
+ANN_STOP_CONFIRMED = "devoops/old-execution-stopped"   # "true" = 옛 실행이 멈춘 걸 다른 방법으로 확인함
+
 # --- 펜싱 / 노드
 LABEL_FENCED = "devoops/fenced"              # MultiKueueCluster에 "true" -> 새 잡 안 보냄
 TAINT_FAULTY = "devoops/faulty"              # 고장 노드 taint (NoSchedule)

@@ -11,8 +11,13 @@ wait_admitted train-b 120
 say "worker2 네트워크 끊기 + evacuateCluster 요청"
 docker network disconnect kind worker2-control-plane
 relocate rr-evac evt-002 evacuateCluster train-b
-expect "worker2 펜싱 라벨, 옛 Workload는 60s 안에 안 지워짐(워커가 안 보여서) -> 경고 남기고 진행, train-b-g1이 worker1 또는 worker3에"
-watch_for 120 15 show_rr
+expect "worker2 펜싱 라벨, 옛 Workload가 안 지워짐(워커가 안 보여서) -> 60s 뒤 phase=WaitingForStop, 재제출 보류"
+watch_for 90 15 show_rr
+
+say "복구 컨트롤러가 다른 방법으로 옛 실행 종료를 확인했다고 가정 -> 어노테이션"
+kubectl --context $MGR -n $NS annotate relocationrequest rr-evac devoops/old-execution-stopped=true --overwrite
+expect "train-b-g1이 worker1 또는 worker3에 재제출·입장"
+watch_for 60 15 show_rr
 rr_times rr-evac
 
 say "새 일반 잡 제출 -> worker2로 가면 안 됨"
