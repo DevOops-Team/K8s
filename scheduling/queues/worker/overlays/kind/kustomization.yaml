@@ -1,0 +1,20 @@
+resources:
+  - ../../base
+patches:
+  # kind 전용: GPU가 KWOK 가짜 노드에만 있으므로 그 노드로 가도록 flavor에서 주입
+  - target:
+      kind: ResourceFlavor
+      name: gpu
+    patch: |-
+      apiVersion: kueue.x-k8s.io/v1beta2
+      kind: ResourceFlavor
+      metadata:
+        name: gpu
+      spec:
+        nodeLabels:
+          node-role: gpu
+        tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Equal
+          value: fake
+          effect: NoSchedule

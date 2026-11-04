@@ -1,0 +1,13 @@
+apiVersion: kueue.x-k8s.io/v1beta2   # 7-1의 apiVersion과 같게
+kind: WorkloadPriorityClass
+metadata:
+  name: training
+value: 100
+description: "일반 학습 잡"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: recovery
+value: 1000
+description: "장애 후 재제출 잡. 대기열 맨 앞"

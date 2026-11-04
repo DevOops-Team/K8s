@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: gpu
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: train-cq
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+  - coveredResources: ["nvidia.com/gpu"]
+    flavors:
+    - name: gpu
+      resources:
+      - name: nvidia.com/gpu
+        nominalQuota: "4"   # 환경마다 다름 (kind: KWOK 노드 4개). 우리 망에서는 overlay에서 바꿈
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: lq-heavy
+  namespace: ml
+spec:
+  clusterQueue: cq-heavy
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: lq-light
+  namespace: ml
+spec:
+  clusterQueue: cq-light
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: lq-recovery
+  namespace: ml
+spec:
+  clusterQueue: cq-recovery

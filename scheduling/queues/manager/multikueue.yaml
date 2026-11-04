@@ -1,0 +1,51 @@
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: multikueue-ac
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: multikueue-config
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueConfig
+metadata:
+  name: multikueue-config
+spec:
+  clusters:
+  - worker1
+  - worker2
+  - worker3
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
+  name: worker1
+spec:
+  clusterSource:
+    kubeConfig:
+      location: worker1-secret
+      locationType: Secret
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
+  name: worker2
+spec:
+  clusterSource:
+    kubeConfig:
+      location: worker2-secret
+      locationType: Secret
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: MultiKueueCluster
+metadata:
+  name: worker3
+spec:
+  clusterSource:
+    kubeConfig:
+      location: worker3-secret
+      locationType: Secret

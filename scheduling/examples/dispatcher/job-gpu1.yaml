@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: disp-test-
+  namespace: ml
+  labels:
+    kueue.x-k8s.io/queue-name: lq-train
+spec:
+  suspend: true
+  completions: 1
+  parallelism: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: main
+        image: busybox:1.36
+        command: ["sh", "-c", "echo start; sleep 600"]
+        resources:
+          limits:
+            nvidia.com/gpu: "1"

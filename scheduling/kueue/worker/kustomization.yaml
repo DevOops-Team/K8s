@@ -1,0 +1,12 @@
+# 워커 클러스터용 Kueue: 기본 매니페스트 + 설정 ConfigMap 교체만
+# (MAP·dispatcherName·workerLostTimeout은 관리 클러스터 전용)
+resources:
+  - ../base
+configMapGenerator:
+  - name: kueue-manager-config
+    namespace: kueue-system
+    behavior: replace
+    files:
+      - controller_manager_config.yaml
+generatorOptions:
+  disableNameSuffixHash: true
