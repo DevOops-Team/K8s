@@ -18,11 +18,17 @@ kubectl --context $MGR get multikueueclusters
 for w in "${WORKERS[@]}"; do
   ctx=kind-$w
   say "$w"
-  # LocalQueue.spec.clusterQueue는 못 바꿈 -> 다른 걸 가리키면 지우고 다시 만듦
-  for lq in $(kubectl --context $ctx -n ml get localqueues -o jsonpath='{range .items[?(@.spec.clusterQueue!="train-cq")]}{.metadata.name}{" "}{end}' 2>/dev/null); do
-    echo "  LocalQueue $lq 가 train-cq가 아님 -> 다시 만듦"
-    kubectl --context $ctx -n ml delete localqueue "$lq"
-  done
+  # LocalQueue.spec.clusterQueue는 못 바꿈 -> 원하는 CQ와 다르면 지우고 다시 만듦
+  #   lq-heavy, lq-light -> train-cq / lq-recovery -> recovery-cq
+  while read -r lq cq; do
+    [ -z "$lq" ] && continue
+    want=train-cq; [ "$lq" = lq-recovery ] && want=recovery-cq
+    if [ "$cq" != "$want" ]; then
+      echo "  LocalQueue $lq: $cq -> $want 로 다시 만듦"
+      kubectl --context $ctx -n ml delete localqueue "$lq"
+    fi
+  done < <(kubectl --context $ctx -n ml get localqueues -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.clusterQueue}{"
+"}{end}' 2>/dev/null)
   kubectl --context $ctx apply -k "$ROOT/queues/worker/overlays/kind" >/dev/null
   kubectl --context $ctx apply -f "$ROOT/kwok/nodes.yaml" >/dev/null
   kubectl --context $ctx label node gpu-node-5 scheduling.gpu-project.io/spare- >/dev/null 2>&1 || true
@@ -31,6 +37,7 @@ for w in "${WORKERS[@]}"; do
   kubectl --context $ctx -n kueue-system rollout restart deploy/kueue-controller-manager >/dev/null
   kubectl --context $ctx -n kueue-system rollout status deploy/kueue-controller-manager --timeout=180s
   kubectl --context $ctx -n ml get localqueues -o custom-columns=LQ:.metadata.name,CQ:.spec.clusterQueue --no-headers | sed 's/^/  /'
+  kubectl --context $ctx get clusterqueues --no-headers | sed 's/^/  /'
   kubectl --context $ctx get nodes -l node-role=gpu -L devoops/spare --no-headers | sed 's/^/  /'
 done
 

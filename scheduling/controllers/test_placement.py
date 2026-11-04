@@ -46,6 +46,25 @@ class Choose(unittest.TestCase):
         self.assertIsNone(choose([1] * 4, cs))
         self.assertEqual(choose([1] * 4, cs, recovery=True), "worker1")
 
+    def test_recovery_quota_only_for_recovery(self):
+        # 학습 몫 다 씀(0), 복구 몫 1, 노드 1대 빔
+        cs = [c("worker1", 0, [1], recovery_free=1)]
+        self.assertIsNone(choose([1], cs))
+        self.assertEqual(choose([1], cs, recovery=True), "worker1")
+
+    def test_recovery_borrows_training_quota(self):
+        # 4장 복구 잡 = 복구 몫 1 + 학습 몫 3 빌림
+        cs = [c("worker1", 3, [1, 1, 1], recovery_free=1, spare_free=[1])]
+        self.assertEqual(choose([1] * 4, cs, recovery=True), "worker1")
+        self.assertIsNone(choose([1] * 4, cs))
+
+    def test_use_takes_recovery_first(self):
+        x = c("worker1", 4, [], recovery_free=1)
+        x.use(3, recovery=True)
+        self.assertEqual((x.recovery_free, x.quota_free), (0, 2))
+        x.use(1, recovery=False)
+        self.assertEqual(x.quota_free, 1)
+
     def test_blocked_cluster_skipped(self):
         cs = [c("worker1", 2, [1, 1]), c("worker2", 4, [1] * 4)]
         self.assertEqual(choose([1], cs, blocked={"worker1"}), "worker2")

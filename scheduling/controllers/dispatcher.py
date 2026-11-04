@@ -53,18 +53,28 @@ def cluster_state(mgr, workers) -> list:
 
 
 def fill_capacity(c: Cluster, api):
-    # 1) 쿼터: 워커 ClusterQueue들의 nominalQuota - 예약량
+    # 1) 쿼터: 워커 ClusterQueue마다 nominalQuota - 예약량
+    #    lendingLimit 0인 CQ(복구 전용)는 복구 잡만 쓸 수 있는 몫으로 따로 셈.
+    #    복구 CQ가 학습 몫을 빌려 쓰고 있으면(예약 > nominal) 그만큼 학습 몫에서 뺌
     for cq in kube.kueue(api).list_cluster_custom_object(
             K.KUEUE_GROUP, K.KUEUE_VERSION, "clusterqueues", _request_timeout=kube.TIMEOUT)["items"]:
+        nominal, private = 0, False
         for rg in cq["spec"].get("resourceGroups", []):
             for fl in rg["flavors"]:
                 for r in fl["resources"]:
                     if r["name"] == K.GPU:
-                        c.quota_free += int(r["nominalQuota"])
+                        nominal += int(r["nominalQuota"])
+                        private = private or str(r.get("lendingLimit", "")) == "0"
+        reserved = 0
         for fl in (cq.get("status") or {}).get("flavorsReservation") or []:
             for r in fl["resources"]:
                 if r["name"] == K.GPU:
-                    c.quota_free -= int(r["total"])
+                    reserved += int(r["total"])
+        if private:
+            c.recovery_free += max(nominal - reserved, 0)
+            c.quota_free -= max(reserved - nominal, 0)   # 빌려 간 학습 몫
+        else:
+            c.quota_free += nominal - reserved
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
     core = client.CoreV1Api(api)
     used, held = {}, {}
@@ -127,7 +137,7 @@ def reconcile(mgr, workers, starving_holder):
         for n in (wl["status"].get("nominatedClusterNames") or []):
             if n in by_name:
                 c, pods = by_name[n], kube.workload_pods(wl)
-                c.quota_free -= sum(pods)
+                c.use(sum(pods), is_recovery(wl))
                 c.node_free = [f for f in take(pods, c.nodes_for(is_recovery(wl))) if f > 0]
 
     # 우선순위 높은 순, 같으면 먼저 온 순
@@ -180,9 +190,10 @@ def reconcile(mgr, workers, starving_holder):
             continue
         patch_nomination(mgr, wl, pick, tried)
         c = by_name[pick]
-        c.quota_free -= sum(pods)
+        c.use(sum(pods), rec)
         c.node_free = [f for f in take(pods, c.nodes_for(rec)) if f > 0]
-        log.info("%s (GPU %d%s) -> %s  [남은 쿼터 %d]", name, sum(pods), ", 복구" if rec else "", pick, c.quota_free)
+        log.info("%s (GPU %d%s) -> %s  [남은 쿼터 학습 %d / 복구 %d]", name, sum(pods), ", 복구" if rec else "",
+                 pick, c.quota_free, c.recovery_free)
     return starving_holder
 
 

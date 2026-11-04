@@ -25,7 +25,7 @@ spec:
     - name: gpu
       resources:
       - name: nvidia.com/gpu
-        nominalQuota: '8'
+        nominalQuota: '10'   # 학습 12 = heavy 10 + light 2 (워커 학습 4 x 3)
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
@@ -81,6 +81,6 @@ spec:
     - name: gpu
       resources:
       - name: nvidia.com/gpu
-        nominalQuota: '2'
-        # 복구 몫은 남에게 빌려주지 않음: 선점 없이도 복구 잡이 바로 쿼터를 받게
+        nominalQuota: '3'   # 예비 1 x 3
+        # 복구 몫은 학습 잡에 안 빌려줌 (학습 몫은 복구 잡에 빌려줌)
         lendingLimit: '0'

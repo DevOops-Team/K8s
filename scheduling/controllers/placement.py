@@ -7,12 +7,25 @@ class Cluster:
     name: str
     active: bool = True          # MultiKueueCluster Active=True
     fenced: bool = False         # 펜싱 라벨
-    quota_free: int = 0          # 워커 ClusterQueue: nominalQuota - 예약량
+    quota_free: int = 0          # 워커 학습 CQ(빌려주는 쿼터): nominalQuota - 예약량
+    recovery_free: int = 0       # 워커 복구 CQ(lendingLimit 0): 복구 잡만 쓸 수 있는 남은 쿼터
     node_free: list = field(default_factory=list)        # 스케줄 가능한 노드별 남은 GPU
     spare_free: list = field(default_factory=list)       # 자리 표시 Pod가 잡고 있는 GPU (복구 잡만 쓸 수 있음)
 
     def nodes_for(self, recovery: bool) -> list:
         return self.node_free + (self.spare_free if recovery else [])
+
+    def quota_for(self, recovery: bool) -> int:
+        # 학습 몫은 복구 잡에 빌려주지만, 복구 몫은 학습 잡에 안 빌려줌
+        return self.quota_free + (self.recovery_free if recovery else 0)
+
+    def use(self, gpus: int, recovery: bool):
+        """자리를 차지했다고 기록. 복구 잡은 복구 몫부터 쓰고 모자라면 학습 몫에서 빌림"""
+        if recovery:
+            own = min(gpus, max(self.recovery_free, 0))
+            self.recovery_free -= own
+            gpus -= own
+        self.quota_free -= gpus
 
 
 def fits(pods: list, nodes: list) -> bool:
@@ -53,9 +66,10 @@ def choose(pods: list, clusters: list, *, recovery=False, target=None,
     for c in clusters:
         if not eligible(c, target, exclude, blocked):
             continue
-        if c.quota_free < need or not fits(pods, c.nodes_for(recovery)):
+        quota = c.quota_for(recovery)
+        if quota < need or not fits(pods, c.nodes_for(recovery)):
             continue
-        key = (c.quota_free - need, c.name)
+        key = (quota - need, c.name)
         if best is None or key < best[0]:
             best = (key, c)
     return best[1].name if best else None
