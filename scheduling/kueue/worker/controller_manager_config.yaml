@@ -29,7 +29,6 @@ metrics:
   bindAddress: :8443
 webhook:
   port: 9443
-multiKueue:
 # 갱 스케줄링(전부 아니면 전무): 승인 후 timeout 안에 Pod 전부 Ready가 안 되면 내리고 다시 큐로
 # timeout 2m은 kind 테스트용. EKS에서는 이미지 pull 시간을 감안해 eks 오버레이에서 따로 정함
 waitForPodsReady:

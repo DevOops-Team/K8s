@@ -1,0 +1,34 @@
+# 실습 전용 (kind + KWOK): GPU 4장을 한 번에 써야 하는 분산 학습 흉내
+# Pod 4개(각 GPU 1장)가 전부 Ready여야 의미가 있음 -> 갱 스케줄링 대상
+# 관리 클러스터에 apply. 워커 지명은 run-scenario.sh가 수동으로 함
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: gang-4gpu
+  namespace: ml
+  labels:
+    kueue.x-k8s.io/queue-name: lq-heavy
+spec:
+  suspend: true
+  replicatedJobs:
+  - name: trainer
+    replicas: 1
+    template:
+      spec:
+        parallelism: 4
+        completions: 4
+        backoffLimit: 0
+        template:
+          metadata:
+            annotations:
+              # KWOK가 Pod를 바로 끝내지 않게 (examples/kwok/pod-complete-delay.yaml)
+              pod-complete.stage.kwok.x-k8s.io/delay: "30m"
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: main
+              image: busybox:1.36
+              command: ["sleep", "1800"]
+              resources:
+                requests: { nvidia.com/gpu: 1 }
+                limits:   { nvidia.com/gpu: 1 }

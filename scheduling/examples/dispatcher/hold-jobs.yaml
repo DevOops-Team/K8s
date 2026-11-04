@@ -5,7 +5,7 @@ metadata:
   name: hold-a
   namespace: ml
   labels:
-    kueue.x-k8s.io/queue-name: lq-train
+    kueue.x-k8s.io/queue-name: lq-light
 spec:
   suspend: true
   template:
@@ -28,7 +28,7 @@ metadata:
   name: hold-b
   namespace: ml
   labels:
-    kueue.x-k8s.io/queue-name: lq-train
+    kueue.x-k8s.io/queue-name: lq-light
 spec:
   suspend: true
   template:
