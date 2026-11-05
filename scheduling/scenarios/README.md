@@ -22,21 +22,19 @@
 위 1~9는 결과를 눈으로 비교하지만, 이 스크립트는 PASS/FAIL을 스스로 판정한다. 준비와 컨트롤러 실행까지 한 번에 한다.
 
 ```bash
-./normal-training.sh            # 설계 기본값 (조임 60s, 풂 300s, aging 720 GPU·s), 약 25분
-FAST=1 ./normal-training.sh     # 시간 값 축소 (20s / 60s / 240 GPU·s), 약 12분
-./normal-training.sh 5 7 8      # 골라서 (8은 7 바로 뒤)
-CONTROL=1 FAST=1 ./normal-training.sh   # 대조군: allocator 없이 7번만. big이 굶어야 PASS
+./normal-training.sh            # 설계 기본값 (aging 720 GPU·s, 비워 두기 120s), 약 20분
+FAST=1 ./normal-training.sh     # 시간 값 축소 (240 GPU·s / 60s), 약 10분
+./normal-training.sh 5 7        # 골라서
 ```
 
-대조군에서 7번이 PASS(= big이 굶음)여야, 본 실행의 7번 PASS가 "Light를 조였기 때문"이라고 말할 수 있다.
+7번은 컨트롤러 도움 없이 Kueue 설정만으로 통과해야 한다. Heavy 잡이 자기 몫 안에서 기다리는 동안 Kueue가 같은 cohort의 새 빌려 쓰기를 막기 때문이다(KEP-83). 11/05 대조군 실행(배분 조정 컨트롤러 없이)에서 big이 146s에 쿼터를 받는 걸 확인하고 Light 조이기 기능을 뺐다. 큐 설정(cohort, 선점, 큐 전략)을 바꾸면 7번을 다시 돌린다. 7번은 big 자리를 모으는 동안 논 GPU·초도 찍는다(판정 없음, 정보).
 
 | # | 확인 | 문서 위치 |
 |---|---|---|
 | 1 | 큐 몫 8/4/3, Heavy StrictFIFO, Recovery lendingLimit 0 | 배분(1) |
 | 2 | 3장 이상 Heavy, 5장 이상 거부 (`lib.sh`의 `queue_for`가 잡 투입기 흉내) | 입력 |
 | 3 | 1장 6개 -> worker1 4, worker2 2 | 배치(1) |
-| 4 | Heavy 대기 없으면 Light가 12장까지 빌려 씀, 안 조임 | 배분(1)·(2) |
+| 4 | Heavy 대기 없으면 Light가 12장까지 빌려 씀 | 배분(1)·(2) |
 | 5 | 앞의 4장 잡이 막히면 뒤 3장 잡도 대기 | 배분(1) |
 | 6 | 4장·2장·1장 잡이 대기 시간 x GPU 수 순서로 aged | 배분(3) |
-| 7 | 작은 잡이 계속 와도 Light 조임 -> 4장 잡 입장 | 배분(2)·배치(1) |
-| 8 | Heavy 대기 0이 이어지면 풂 -> Light 다시 빌려 씀 | 배분(2) |
+| 7 | 작은 잡이 계속 와도 4장 잡 입장 (big 대기 중 Light가 몫 4 넘게 새로 못 받음) | 배분(2)·배치(1) |

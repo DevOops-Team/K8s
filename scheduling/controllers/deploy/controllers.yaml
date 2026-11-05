@@ -8,7 +8,7 @@ metadata:
 # 컨트롤러마다 ServiceAccount를 따로 둔다: 필요한 권한만
 #   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
 #   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기 + 잡 사본 ConfigMap
-#   allocator : JobSet 우선순위 라벨 + Light ClusterQueue borrowingLimit (배분 조정 컨트롤러)
+#   allocator : JobSet 우선순위 라벨 (배분 조정 컨트롤러)
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: dispatcher, namespace: job-placement}
@@ -71,10 +71,6 @@ rules:
 - apiGroups: [jobset.x-k8s.io]
   resources: [jobsets]
   verbs: [get, list, watch, patch]
-- apiGroups: [kueue.x-k8s.io]
-  resources: [clusterqueues]
-  resourceNames: [cq-light]   # 조이는 대상은 Light 하나뿐
-  verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

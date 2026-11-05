@@ -1,7 +1,7 @@
 """python -m unittest -v test_allocator.py  (쿠버네티스 없이 돈다)"""
 import unittest
 
-from allocation_rules import aged, want_tight
+from allocation_rules import aged
 
 
 class Aging(unittest.TestCase):
@@ -15,29 +15,6 @@ class Aging(unittest.TestCase):
 
     def test_zero_gpu_counts_as_one(self):
         self.assertTrue(aged(720, 0, 720))
-
-
-class Borrow(unittest.TestCase):
-    T, R = 60, 300
-
-    def w(self, tight, wait, idle):
-        return want_tight(tight, wait, idle, self.T, self.R)
-
-    def test_tighten_only_after_wait(self):
-        self.assertFalse(self.w(False, 30, None))   # 막 들어온 Heavy 잡: 아직
-        self.assertTrue(self.w(False, 60, None))
-
-    def test_stay_tight_while_heavy_waits(self):
-        self.assertTrue(self.w(True, 5, None))      # 새 Heavy 잡이 막 들어와도 유지
-
-    def test_release_after_idle(self):
-        self.assertTrue(self.w(True, None, 0))
-        self.assertTrue(self.w(True, None, 299))
-        self.assertFalse(self.w(True, None, 300))
-
-    def test_loose_stays_loose_without_heavy(self):
-        self.assertFalse(self.w(False, None, 0))
-        self.assertFalse(self.w(False, None, 10_000))
 
 
 if __name__ == "__main__":

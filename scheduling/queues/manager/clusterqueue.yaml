@@ -54,8 +54,8 @@ spec:
       resources:
       - name: nvidia.com/gpu
         nominalQuota: '4'   # GPU 2장 이하 잡
-        # borrowingLimit은 배분 조정 컨트롤러(allocator.py)가 붙였다 뗐다 함:
-        #   Heavy 대기 있으면 '0'(자기 몫까지만), 없으면 필드 없음(남는 몫 전부 빌려 씀). 여기엔 적지 않는다
+        # borrowingLimit 없음 = Heavy가 비면 남는 몫 전부 빌려 씀.
+        # Heavy 잡이 자기 몫 안에서 기다리는 동안엔 Kueue가 새 빌려 쓰기를 막는다(KEP-83) -> 따로 조일 필요 없음
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
