@@ -1,0 +1,23 @@
+# 설치: kubectl apply --server-side -k scheduling/jobset/base
+resources:
+  - manifests.yaml
+patches:
+  # CPU requests 500m -> 250m (Kueue와 같은 이유). limits(memory 4Gi)와 memory requests는 기본값 유지
+  - target:
+      kind: Deployment
+      name: jobset-controller-manager
+      namespace: jobset-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: jobset-controller-manager
+        namespace: jobset-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  requests:
+                    cpu: 250m

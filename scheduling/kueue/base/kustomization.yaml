@@ -1,2 +1,23 @@
 resources:
   - kueue-v0.20.4-manifests.yaml
+patches:
+  # CPU requests 500m -> 250m (관리 worker 1대 장애 시 CPU 여유 확보, EKS 시스템 노드 공간 확보)
+  # limits(cpu 2, memory 512Mi)와 memory requests는 기본값 유지
+  - target:
+      kind: Deployment
+      name: kueue-controller-manager
+      namespace: kueue-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kueue-controller-manager
+        namespace: kueue-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                resources:
+                  requests:
+                    cpu: 250m
