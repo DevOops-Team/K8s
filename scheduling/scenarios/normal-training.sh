@@ -265,6 +265,7 @@ t8() {
 
 # ======================================================================
 if [ "${SKIP_BOOTSTRAP:-0}" != 1 ]; then
+  echo "[$(ts)] 준비 중... 워커 Kueue 재시작 포함 몇 분 걸림 (진행: tail -f $LOG/bootstrap.log)"
   bash "$HERE/bootstrap.sh" > "$LOG/bootstrap.log" 2>&1 || { echo "준비 실패 -> $LOG/bootstrap.log"; exit 1; }
   echo "준비 완료 (로그 $LOG/bootstrap.log)"
 fi
@@ -282,11 +283,12 @@ fi
 echo "시간 값: tighten=${TIGHTEN_SECONDS}s release=${RELEASE_SECONDS}s aging=${AGING_GPU_SECONDS} GPU·s starve=${STARVE_SECONDS}s"
 
 pick=("$@"); [ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7 8)
-for n in "${pick[@]}"; do
-  CUR="#$n"
+for num in "${pick[@]}"; do
+  CUR="#$num"
+  if ! declare -F "t$num" >/dev/null; then fail "없는 검사 번호"; continue; fi
   # 8번은 7번이 남긴 상태(조임, big 입장)에서 이어서 본다
-  [ "$n" != 1 ] && [ "$n" != 8 ] && reset_all
-  "t$n"
+  if [ "$num" != 1 ] && [ "$num" != 8 ]; then reset_all; fi
+  "t$num"
 done
 reset_all >/dev/null 2>&1
 

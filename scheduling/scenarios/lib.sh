@@ -166,6 +166,7 @@ reconnect() {
 }
 
 reset() {
+  local w n left   # 부르는 쪽 변수(예: 반복문의 n)를 덮어쓰지 않게
   say "초기화 (잡·요청 삭제, 노드·펜싱·네트워크 원상복구)"
   kubectl --context $MGR -n $NS delete relocationrequests --all --ignore-not-found >/dev/null 2>&1 || true
   kubectl --context $MGR -n $NS delete jobsets --all --ignore-not-found --wait=false >/dev/null
