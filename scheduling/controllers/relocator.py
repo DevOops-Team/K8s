@@ -34,6 +34,7 @@ kube.setup_logging("relocator")
 log = kube.logging.getLogger("relocator")
 
 FINAL = {"Done", "Failed", "Duplicate"}
+KUEUE_PREFIX = "kueue.x-k8s.io/"
 
 
 class Ctx:
@@ -108,6 +109,41 @@ def isolate(x: Ctx):
     x.save(phase="Executing", isolatedAt=kube.now_rfc3339())
 
 
+def old_gone_on_worker(x: Ctx, ns, name):
+    """옛 잡이 돌던 워커에서 JobSet·Workload·Pod가 전부 없어졌는지. (멈춤확인, 이유)
+    워커에 접속이 안 되면 확인 불가 = 멈췄다고 보지 않는다"""
+    src = x.st.get("sourceCluster")
+    if not src:
+        return True, "워커에 보내지기 전이었음"
+    api = x.workers.get().get(src)
+    if api is None:
+        return False, f"{src} 접속 정보 없음"
+    try:
+        try:
+            kube.kueue(api).get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name,
+                                                         _request_timeout=kube.TIMEOUT)
+            return False, f"{src}에 JobSet 남아 있음"
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+        wls = kube.kueue(api).list_namespaced_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, ns, "workloads",
+                                                            _request_timeout=kube.TIMEOUT)["items"]
+        if any(kube.workload_owner(w) == ("JobSet", name) for w in wls):
+            return False, f"{src}에 Workload 남아 있음"
+        try:
+            pods = client.CoreV1Api(api).list_namespaced_pod(
+                ns, label_selector=f"jobset.sigs.k8s.io/jobset-name={name}", _request_timeout=kube.TIMEOUT).items
+        except client.ApiException as e:
+            if e.status != 403:   # MultiKueue SA(multikueue-sa-role)는 Pod 권한이 없을 수 있음 -> JobSet·Workload로 판단
+                raise
+            return True, f"{src}에서 JobSet·Workload 사라짐 (Pod 조회 권한 없음)"
+        if pods:
+            return False, f"{src}에 Pod {len(pods)}개 남아 있음"
+        return True, f"{src}에서도 사라짐"
+    except Exception as e:  # noqa: BLE001  끊김·타임아웃
+        return False, f"{src} 접속 안 됨 ({type(e).__name__})"
+
+
 def stop_old(x: Ctx):
     ns, name = x.job()
     try:
@@ -117,20 +153,39 @@ def stop_old(x: Ctx):
     except client.ApiException as e:
         if e.status != 404:
             raise
-    gone = kube.workload_for_jobset(x.mgr, ns, name) is None
+    mgr_gone = kube.workload_for_jobset(x.mgr, ns, name) is None
+    worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
-    if gone or confirmed:
-        how = "옛 Workload 삭제 확인" if gone else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
+    if (mgr_gone and worker_gone) or confirmed:
+        how = f"옛 Workload 삭제 확인 ({why})" if (mgr_gone and worker_gone) else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
         log.info("%s: 옛 실행 멈춤 (%s)", x.name, how)
         x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=how)
         return
     # 멈춘 게 확인되지 않으면 재제출하지 않는다 (contracts.md: 종료 확인 전 restart 금지 = 이중 실행 방지)
-    # 워커가 끊겨 있으면 관리 클러스터에서 지워도 거기서 아직 돌 수 있다
+    # 관리 클러스터 Workload는 워커가 끊겨 있어도 지워진다. 워커 쪽에서 사라진 걸 봐야 멈춘 것
     if kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS and x.st.get("phase") != "WaitingForStop":
-        msg = (f"옛 Workload가 {STOP_WAIT_SECONDS}s 넘게 안 지워짐 -> 재제출 보류. 옛 실행이 멈춘 걸 확인했으면 "
+        msg = (f"옛 실행 종료를 {STOP_WAIT_SECONDS}s 안에 확인 못 함 ({why}) -> 재제출 보류. 옛 실행이 멈춘 걸 확인했으면 "
                f"이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
         log.warning("%s: %s", x.name, msg)
         x.save(phase="WaitingForStop", message=msg)
+
+
+def _strip_meta(meta):
+    for field in ("annotations", "labels"):
+        d = (meta or {}).get(field)
+        if d:
+            for k in [k for k in d if k.startswith(KUEUE_PREFIX)]:
+                del d[k]
+
+
+def strip_kueue_injected(spec):
+    """입장할 때 Kueue가 템플릿에 붙인 것(kueue.x-k8s.io/workload 어노테이션, podset·큐 라벨)을 지운다.
+    그대로 두면 새 Workload 입장 때 'conflict for key=kueue.x-k8s.io/workload'로 unsuspend가 실패하고
+    새 Workload가 바로 Finished 처리된다 (스냅샷이 실행 중인 잡에서 떠진 것이라 이미 붙어 있음)"""
+    for rj in spec.get("replicatedJobs") or []:
+        tmpl = rj.get("template") or {}
+        _strip_meta(tmpl.get("metadata"))
+        _strip_meta(((tmpl.get("spec") or {}).get("template") or {}).get("metadata"))
 
 
 def build_new(x: Ctx, old):
@@ -146,6 +201,7 @@ def build_new(x: Ctx, old):
                                    K.LABEL_QUEUE: K.RECOVERY_QUEUE, K.LABEL_PRIORITY: K.PRIORITY_RECOVERY},
                         "annotations": dict(old["metadata"].get("annotations") or {})},
            "spec": copy.deepcopy(old["spec"])}
+    strip_kueue_injected(new["spec"])
     new["metadata"]["annotations"].pop("kubectl.kubernetes.io/last-applied-configuration", None)
     new["metadata"]["annotations"].pop(K.ANN_MANUAL, None)
     new["spec"]["suspend"] = True
@@ -184,7 +240,11 @@ def watch_admit(x: Ctx):
     ns, _, name = x.st["newJob"].partition("/")
     wl = kube.workload_for_jobset(x.mgr, ns, name)
     cluster = ((wl or {}).get("status") or {}).get("clusterName")
-    if wl and cluster and kube.is_true(wl, "Admitted"):
+    if wl and kube.is_true(wl, "Finished"):
+        c = kube.cond(wl, "Finished") or {}
+        x.save(phase="Failed", message=f"재제출 잡 Workload가 바로 끝남: {c.get('reason', '')} {c.get('message', '')}".strip())
+        log.warning("%s: %s Workload가 Finished (%s)", x.name, name, c.get("message", ""))
+    elif wl and cluster and kube.is_true(wl, "Admitted"):
         x.save(phase="Done", admittedAt=kube.now_rfc3339(), targetCluster=cluster)
         log.info("%s: 완료, %s가 %s에 입장", x.name, name, cluster)
     elif kube.since(x.st["resubmittedAt"]) > ADMIT_TIMEOUT_SECONDS:

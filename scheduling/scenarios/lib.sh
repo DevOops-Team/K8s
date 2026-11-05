@@ -125,7 +125,13 @@ watch_for() {  # 초 간격 명령...
 }
 
 # 워커 네트워크 끊기/붙이기. 다시 붙일 때 원래 IP로 (IP가 바뀌면 kind 클러스터 안 apiserver·etcd 주소가 어긋나 깨짐)
+# 원래 IP = API 서버 advertise 주소. 끊을 때 저장한 IP는 그걸 못 읽을 때만 씀
+# (저장 시점에 이미 IP가 뒤바뀌어 있었으면 저장값도 틀림)
 IPDIR="${TMPDIR:-/tmp}/kind-scenario-ip"
+orig_ip() {
+  docker exec "$1-control-plane" grep -oP '(?<=--advertise-address=)\S+' /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null \
+    || cat "$IPDIR/$1" 2>/dev/null || true
+}
 cut_off() {
   local c="$1-control-plane"; mkdir -p "$IPDIR"
   docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$c" > "$IPDIR/$1"
@@ -133,11 +139,15 @@ cut_off() {
   echo "  $1 끊음 (IP $(cat "$IPDIR/$1") 저장)"
 }
 reconnect() {
-  local c="$1-control-plane"
-  docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" | grep -q '"kind"' && return 0   # 이미 붙어 있음
-  if [ -s "$IPDIR/$1" ]; then docker network connect --ip "$(cat "$IPDIR/$1")" kind "$c"
-  else docker network connect kind "$c"; fi
-  echo "  $1 다시 연결 (IP $(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$c"))"
+  local c="$1-control-plane" ip now
+  ip=$(orig_ip "$1")
+  if ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$c" | grep -q '"kind"'; then
+    if [ -n "$ip" ]; then docker network connect --ip "$ip" kind "$c"
+    else docker network connect kind "$c"; fi
+    echo "  $1 다시 연결 (IP $(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$c"))"
+  fi
+  now=$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "$c")
+  [ -z "$ip" ] || [ "$now" = "$ip" ] || echo "  경고: $1 IP가 $now (원래 $ip). 워커를 전부 끊고 reconnect로 다시 붙일 것" >&2
 }
 
 reset() {
@@ -149,7 +159,7 @@ reset() {
     kubectl --context $MGR label multikueuecluster "$w" devoops/fenced- >/dev/null 2>&1 || true
     for n in $(kubectl --context kind-$w get nodes -l node-role=gpu -o name 2>/dev/null); do
       kubectl --context kind-$w uncordon "$n" >/dev/null
-      kubectl --context kind-$w taint "$n" devoops/faulty- >/dev/null 2>&1 || true
+      kubectl --context kind-$w taint nodes "${n#node/}" devoops/faulty- >/dev/null 2>&1 || true   # taint는 node/이름 형식 못 받음
     done
     kubectl --context kind-$w -n $NS delete deploy spare-placeholder --ignore-not-found >/dev/null 2>&1 || true
   done
