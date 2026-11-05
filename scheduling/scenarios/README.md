@@ -24,7 +24,10 @@
 ./normal-training.sh            # 설계 기본값 (조임 60s, 풂 300s, aging 720 GPU·s), 약 25분
 FAST=1 ./normal-training.sh     # 시간 값 축소 (20s / 60s / 240 GPU·s), 약 12분
 ./normal-training.sh 5 7 8      # 골라서 (8은 7 바로 뒤)
+CONTROL=1 FAST=1 ./normal-training.sh   # 대조군: allocator 없이 7번만. big이 굶어야 PASS
 ```
+
+대조군에서 7번이 PASS(= big이 굶음)여야, 본 실행의 7번 PASS가 "Light를 조였기 때문"이라고 말할 수 있다.
 
 | # | 확인 | 문서 위치 |
 |---|---|---|

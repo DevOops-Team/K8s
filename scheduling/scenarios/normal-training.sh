@@ -6,6 +6,8 @@
 #   ./normal-training.sh 5 7 8        골라서 (8은 7 바로 뒤에 돌아야 함)
 #   SKIP_BOOTSTRAP=1                  준비(bootstrap.sh) 건너뛰기
 #   USE_RUNNING_CONTROLLERS=1         이미 띄운 컨트롤러 사용 (그쪽 시간 값과 이 스크립트 값이 같아야 함)
+#   CONTROL=1 ./normal-training.sh    대조군: 배분 조정 컨트롤러(allocator) 없이 7번만. big이 굶어야 PASS
+#                                     (7번 PASS가 "조여서"인지 "원래 들어가서"인지 가려냄)
 #
 # 검사 항목                                        문서 위치
 #   1 큐 설정 (몫 8/4/3, StrictFIFO, lendingLimit 0)   배분(1)
@@ -197,10 +199,17 @@ t6() {
 
 T7_QUOTA_AT=""   # 8번이 씀: 큰 잡이 쿼터를 받은 시각 = Heavy 대기가 0이 된 시각
 t7() {
-  say "7. Heavy 대기 -> Light 조임 -> 작은 잡이 계속 와도 큰 잡 입장 (배분 2, 배치 1)"
-  expect "Light 12장(150s짜리)으로 꽉 참 + 1장 잡이 10초마다 계속 옴 -> 4장 잡 제출"
-  expect "${TIGHTEN_SECONDS}s 뒤 cq-light borrowingLimit 0 -> Light가 자기 몫 4 넘게는 새로 못 받음 -> 큰 잡 쿼터 -> 워커 지명"
-  for i in $(seq 1 12); do submit_auto "fill-$i" 1 150s >/dev/null; done
+  local control=${CONTROL:-0}
+  if [ "$control" = 1 ]; then
+    say "7. [대조군] 배분 조정 컨트롤러 없이: 작은 잡이 계속 오면 큰 잡이 굶는가"
+    expect "조임 없음 -> 1장씩 빌 때마다 작은 잡이 가져감 -> big은 끝까지 쿼터 못 받아야 PASS"
+  else
+    say "7. Heavy 대기 -> Light 조임 -> 작은 잡이 계속 와도 큰 잡 입장 (배분 2, 배치 1)"
+    expect "${TIGHTEN_SECONDS}s 뒤 cq-light borrowingLimit 0 -> Light가 자기 몫 4 넘게는 새로 못 받음 -> 큰 잡 쿼터 -> 워커 지명"
+  fi
+  expect "Light 12장으로 꽉 참(10초 간격으로 하나씩 끝남: 130s~240s) + 1장 잡이 10초마다 계속 옴 -> 4장 잡 제출"
+  # 한꺼번에 끝나면 12장이 동시에 비어 조이지 않아도 big이 들어감 -> 하나씩 끝나게 해야 차이가 보임
+  for i in $(seq 1 12); do submit_auto "fill-$i" 1 "$((120 + 10 * i))s" >/dev/null; done
   wait_until 90 reserved_is fill- 12
   ( for i in $(seq 1 60); do submit_auto "feed-$i" 1 90s >/dev/null; sleep 10; done ) &
   FEEDER=$!
@@ -227,6 +236,16 @@ t7() {
     [ "$now" -ge "$max" ] && break
     prev=$used; sleep 5
   done
+  if [ "$control" = 1 ]; then
+    check "[대조군] 조임 없음" eq "${tight_at:-없음}" 없음
+    if [ -z "$quota_at" ]; then
+      pass "[대조군] big이 ${max}s 동안 쿼터 못 받음 = 컨트롤러 없으면 굶음"
+    else
+      fail "[대조군] 컨트롤러 없이도 big이 ${quota_at}s에 쿼터 받음 -> 7번이 조임 효과를 못 가려냄"
+    fi
+    show | grep -E "NAME|big" || true
+    return
+  fi
   if [ -n "$tight_at" ] && [ "$tight_at" -le $((TIGHTEN_SECONDS + SLACK)) ]; then
     pass "조임 (${tight_at}s, 기대 ${TIGHTEN_SECONDS}s)"
   else
@@ -273,8 +292,14 @@ fi
 CTL=""
 cleanup() { stop_feeder; [ -n "$CTL" ] && { kill "$CTL" 2>/dev/null; wait "$CTL" 2>/dev/null; }; }
 trap cleanup EXIT
+CTL_NAMES=()   # 비우면 run-local.sh가 셋 다 띄움
+if [ "${CONTROL:-0}" = 1 ]; then
+  [ "${USE_RUNNING_CONTROLLERS:-0}" = 1 ] && { echo "CONTROL=1은 USE_RUNNING_CONTROLLERS=1과 같이 못 씀 (allocator를 빼야 함)"; exit 1; }
+  CTL_NAMES=(dispatcher relocator)
+  echo "[대조군] allocator 없이 dispatcher, relocator만 실행"
+fi
 if [ "${USE_RUNNING_CONTROLLERS:-0}" != 1 ]; then
-  bash "$HERE/../controllers/run-local.sh" > "$LOG/controllers.log" 2>&1 &
+  bash "$HERE/../controllers/run-local.sh" "${CTL_NAMES[@]}" > "$LOG/controllers.log" 2>&1 &
   CTL=$!
   sleep 15
   kill -0 "$CTL" 2>/dev/null || { echo "컨트롤러가 바로 죽음:"; tail -30 "$LOG/controllers.log"; exit 1; }
@@ -282,7 +307,10 @@ if [ "${USE_RUNNING_CONTROLLERS:-0}" != 1 ]; then
 fi
 echo "시간 값: tighten=${TIGHTEN_SECONDS}s release=${RELEASE_SECONDS}s aging=${AGING_GPU_SECONDS} GPU·s starve=${STARVE_SECONDS}s"
 
-pick=("$@"); [ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7 8)
+pick=("$@")
+if [ ${#pick[@]} -eq 0 ]; then
+  if [ "${CONTROL:-0}" = 1 ]; then pick=(7); else pick=(1 2 3 4 5 6 7 8); fi
+fi
 for num in "${pick[@]}"; do
   CUR="#$num"
   if ! declare -F "t$num" >/dev/null; then fail "없는 검사 번호"; continue; fi
