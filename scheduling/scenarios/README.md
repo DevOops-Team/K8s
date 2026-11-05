@@ -15,3 +15,24 @@
 | 9 | `09-duplicate.sh` | 같은 requestId 두 번 -> 한 번만 실행 |
 
 6·7번은 `docker network disconnect`를 쓴다 (sudo 없이 docker가 되는 사용자 기준).
+
+## 평소 학습 자동 검증 (`normal-training.sh`)
+
+위 1~9는 결과를 눈으로 비교하지만, 이 스크립트는 PASS/FAIL을 스스로 판정한다. 준비와 컨트롤러 실행까지 한 번에 한다.
+
+```bash
+./normal-training.sh            # 설계 기본값 (조임 60s, 풂 300s, aging 720 GPU·s), 약 25분
+FAST=1 ./normal-training.sh     # 시간 값 축소 (20s / 60s / 240 GPU·s), 약 12분
+./normal-training.sh 5 7 8      # 골라서 (8은 7 바로 뒤)
+```
+
+| # | 확인 | 문서 위치 |
+|---|---|---|
+| 1 | 큐 몫 8/4/3, Heavy StrictFIFO, Recovery lendingLimit 0 | 배분(1) |
+| 2 | 3장 이상 Heavy, 5장 이상 거부 (`lib.sh`의 `queue_for`가 잡 투입기 흉내) | 입력 |
+| 3 | 1장 6개 -> worker1 4, worker2 2 | 배치(1) |
+| 4 | Heavy 대기 없으면 Light가 12장까지 빌려 씀, 안 조임 | 배분(1)·(2) |
+| 5 | 앞의 4장 잡이 막히면 뒤 3장 잡도 대기 | 배분(1) |
+| 6 | 4장·2장·1장 잡이 대기 시간 x GPU 수 순서로 aged | 배분(3) |
+| 7 | 작은 잡이 계속 와도 Light 조임 -> 4장 잡 입장 | 배분(2)·배치(1) |
+| 8 | Heavy 대기 0이 이어지면 풂 -> Light 다시 빌려 씀 | 배분(2) |

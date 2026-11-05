@@ -20,7 +20,7 @@ kubectl --context "$KUBE_CONTEXT" apply -f deploy/crd-relocationrequest.yaml >/d
 kubectl --context "$KUBE_CONTEXT" get ns job-placement >/dev/null 2>&1 \
   || kubectl --context "$KUBE_CONTEXT" create ns job-placement
 
-names=("${@:-dispatcher relocator priority}")
+names=("${@:-dispatcher relocator allocator}")
 read -r -a names <<< "${names[*]}"
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait' INT TERM EXIT

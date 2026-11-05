@@ -41,6 +41,9 @@ PLACEHOLDER_PRIORITY_CLASS = "spare-placeholder"   # 예비 노드 자리 표시
 # --- 큐 / 우선순위
 NAMESPACE = os.getenv("JOB_NAMESPACE", "ml")
 RECOVERY_QUEUE = os.getenv("RECOVERY_QUEUE", "lq-recovery")
+HEAVY_QUEUE = os.getenv("HEAVY_QUEUE", "lq-heavy")      # LocalQueue 이름 (Workload.spec.queueName)
+LIGHT_CQ = os.getenv("LIGHT_CQ", "cq-light")            # 배분 조정 컨트롤러가 borrowingLimit을 조이는 ClusterQueue
+ANN_BORROW_TIGHTENED_AT = "devoops/borrow-tightened-at"  # Light CQ에 남기는 기록: 조인 시각
 PRIORITY_TRAINING = "training"
 PRIORITY_AGED = "training-aged"
 PRIORITY_RECOVERY = "recovery"

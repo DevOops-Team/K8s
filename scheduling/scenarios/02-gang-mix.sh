@@ -8,7 +8,7 @@ reset
 say "4,3,2,1,4,2,1장 잡 제출 (합 17장 > 일반 잡이 쓸 수 있는 12장)"
 expect "들어간 잡은 Pod가 전부 Running, 못 들어간 잡은 Pod 0개 (관리 클러스터에서 대기)"
 i=0
-for g in 4 3 2 1 4 2 1; do i=$((i+1)); submit "mix-$i" "$g" lq-heavy 20m; done
+for g in 4 3 2 1 4 2 1; do i=$((i+1)); submit_auto "mix-$i" "$g" 20m; done
 
 check_partial() {
   echo "--- [$(ts)] 반쪽 배치 검사"

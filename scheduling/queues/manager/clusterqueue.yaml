@@ -17,7 +17,7 @@ spec:
       policy: Never
     reclaimWithinCohort: Never
     withinClusterQueue: Never
-  queueingStrategy: BestEffortFIFO
+  queueingStrategy: StrictFIFO   # Heavy끼리는 순서 보장 (앞의 큰 잡이 못 들어가면 뒤도 대기)
   resourceGroups:
   - coveredResources:
     - nvidia.com/gpu
@@ -25,7 +25,7 @@ spec:
     - name: gpu
       resources:
       - name: nvidia.com/gpu
-        nominalQuota: '10'   # 학습 12 = heavy 10 + light 2 (워커 학습 4 x 3)
+        nominalQuota: '8'   # 학습 12 = heavy 8 + light 4 (워커 학습 4 x 3). GPU 3장 이상 잡
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
@@ -45,7 +45,7 @@ spec:
       policy: Never
     reclaimWithinCohort: Never
     withinClusterQueue: Never
-  queueingStrategy: BestEffortFIFO
+  queueingStrategy: BestEffortFIFO   # 작은 잡은 들어갈 수 있는 것부터
   resourceGroups:
   - coveredResources:
     - nvidia.com/gpu
@@ -53,7 +53,9 @@ spec:
     - name: gpu
       resources:
       - name: nvidia.com/gpu
-        nominalQuota: '2'
+        nominalQuota: '4'   # GPU 2장 이하 잡
+        # borrowingLimit은 배분 조정 컨트롤러(allocator.py)가 붙였다 뗐다 함:
+        #   Heavy 대기 있으면 '0'(자기 몫까지만), 없으면 필드 없음(남는 몫 전부 빌려 씀). 여기엔 적지 않는다
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue

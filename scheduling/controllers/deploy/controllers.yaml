@@ -8,7 +8,7 @@ metadata:
 # 컨트롤러마다 ServiceAccount를 따로 둔다: 필요한 권한만
 #   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
 #   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기 + 잡 사본 ConfigMap
-#   priority  : JobSet 라벨만
+#   allocator : JobSet 우선순위 라벨 + Light ClusterQueue borrowingLimit (배분 조정 컨트롤러)
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: dispatcher, namespace: job-placement}
@@ -19,7 +19,7 @@ metadata: {name: relocator, namespace: job-placement}
 ---
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: priority, namespace: job-placement}
+metadata: {name: allocator, namespace: job-placement}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -63,7 +63,7 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: job-placement-priority}
+metadata: {name: job-placement-allocator}
 rules:
 - apiGroups: [kueue.x-k8s.io]
   resources: [workloads]
@@ -71,6 +71,10 @@ rules:
 - apiGroups: [jobset.x-k8s.io]
   resources: [jobsets]
   verbs: [get, list, watch, patch]
+- apiGroups: [kueue.x-k8s.io]
+  resources: [clusterqueues]
+  resourceNames: [cq-light]   # 조이는 대상은 Light 하나뿐
+  verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -86,9 +90,9 @@ subjects: [{kind: ServiceAccount, name: relocator, namespace: job-placement}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: job-placement-priority}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-priority}
-subjects: [{kind: ServiceAccount, name: priority, namespace: job-placement}]
+metadata: {name: job-placement-allocator}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-allocator}
+subjects: [{kind: ServiceAccount, name: allocator, namespace: job-placement}]
 ---
 # 워커 kubeconfig: MultiKueue가 쓰는 Secret 중 이름을 지정한 것만 (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
 # MultiKueueCluster 목록 조회도 필요하지만 그건 위 ClusterRole에 있음
@@ -165,18 +169,18 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: priority
+  name: allocator
   namespace: job-placement
 spec:
   replicas: 1
-  selector: {matchLabels: {app: priority}}
+  selector: {matchLabels: {app: allocator}}
   template:
-    metadata: {labels: {app: priority}}
+    metadata: {labels: {app: allocator}}
     spec:
-      serviceAccountName: priority
+      serviceAccountName: allocator
       containers:
       - name: main
         image: job-placement:dev
         imagePullPolicy: IfNotPresent
-        command: ["python", "priority.py"]
+        command: ["python", "allocator.py"]
         resources: {requests: {cpu: 50m, memory: 64Mi}}

@@ -56,6 +56,21 @@ EOF
   echo "  제출: $name (GPU $gpus, $queue, $dur)"
 }
 
+# 잡 투입기 흉내: GPU 수로 큐를 정한다 (설계: 한 클러스터 학습 노드의 절반 초과 -> Heavy)
+#   한 클러스터 학습 노드 수를 넘는 잡은 어디에도 못 들어가므로 거부 (종료 코드 2)
+HEAVY_MIN_GPUS=${HEAVY_MIN_GPUS:-3}
+MAX_JOB_GPUS=${MAX_JOB_GPUS:-4}
+queue_for() {
+  [ "$1" -gt "$MAX_JOB_GPUS" ] && return 2
+  if [ "$1" -ge "$HEAVY_MIN_GPUS" ]; then echo lq-heavy; else echo lq-light; fi
+}
+# submit_auto 이름 GPU수 [유지시간] [추가 어노테이션 ...]
+submit_auto() {
+  local q
+  q=$(queue_for "$2") || { echo "  거부: $1 (GPU $2 > 한 클러스터 학습 노드 $MAX_JOB_GPUS)"; return 2; }
+  submit "$1" "$2" "$q" "${3:-20m}" "${@:4}"
+}
+
 # 관리 클러스터 Workload 한눈에
 show() {
   echo "--- [$(ts)] 관리 클러스터 Workload"

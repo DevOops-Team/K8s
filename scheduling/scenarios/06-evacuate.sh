@@ -5,7 +5,7 @@ reset
 trap 'reconnect worker2' EXIT
 
 say "2장 잡 train-b를 worker2에"
-submit train-b 2 lq-heavy 30m '"devoops/target-cluster": "worker2"'
+submit train-b 2 lq-light 30m '"devoops/target-cluster": "worker2"'
 wait_admitted train-b 120
 
 say "worker2 네트워크 끊기 + evacuateCluster 요청"
