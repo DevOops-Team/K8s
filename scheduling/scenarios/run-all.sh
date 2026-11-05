@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 전부 한 번에: 준비 -> 컨트롤러 3개 백그라운드 실행 -> 시나리오 1~9 -> 컨트롤러 종료
+# 전부 한 번에: 준비 -> 컨트롤러 3개 백그라운드 실행 -> 시나리오 1~10 -> 컨트롤러 종료
 #   ./run-all.sh            전부 (30분 안팎)
 #   ./run-all.sh 1 5 9      골라서
 #   SKIP_BOOTSTRAP=1 ./run-all.sh   준비 건너뛰기
@@ -22,10 +22,10 @@ if ! kill -0 $ctl 2>/dev/null; then echo "컨트롤러가 바로 죽음:"; tail 
 grep "시작:" "$LOG/controllers.log" || true
 
 pick=("$@")
-[ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7 8 9)
+[ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7 8 9 10)
 results=()
 for n in "${pick[@]}"; do
-  f=$(ls "$HERE"/0"$n"-*.sh)
+  f=$(ls "$HERE"/$(printf %02d "$n")-*.sh)
   echo; echo "########## 시나리오 $n: $(basename "$f")"
   if bash "$f" 2>&1 | tee "$LOG/scenario-$n.log"; then results+=("$n 끝까지 실행"); else results+=("$n 중간에 멈춤 (로그 확인)"); fi
 done

@@ -7,7 +7,9 @@
 action:
   restartInPlace   같은 클러스터에 다시 띄움
   moveToSpare      고장 노드 cordon·taint -> 같은 클러스터에 복구 우선순위로 재제출 (빈자리는 예비 노드)
-  evacuateCluster  클러스터 펜싱 -> excludeClusters를 붙여 재제출 (디스패처가 다른 곳을 고름)
+  moveToOtherCluster  (예비 소진, SDC) 의심 노드 cordon·taint -> 원래 클러스터를 빼고 재제출.
+                   펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
+  evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
 
 자리는 정하지 않는다. 재제출한 잡도 디스패처를 다시 거친다.
 
@@ -84,24 +86,31 @@ def accept(x: Ctx, all_rrs):
     return True
 
 
+def cordon_nodes(x: Ctx, src, nodes):
+    api = x.workers.get().get(src)
+    if api is None:
+        raise RuntimeError(f"워커 {src} 접속 정보 없음")
+    core = client.CoreV1Api(api)
+    gpu_nodes = {n.metadata.name for n in core.list_node(
+        label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items}
+    for node in nodes:
+        if node not in gpu_nodes:   # GPU 노드가 아닌 것(컨트롤 플레인 등)은 격리하지 않음
+            raise PermissionError(f"{node}는 {src}의 GPU 노드({K.GPU_NODE_SELECTOR})가 아님")
+        n = core.read_node(node, _request_timeout=kube.TIMEOUT)
+        taints = [t for t in (n.spec.taints or []) if t.key != K.TAINT_FAULTY]
+        taints.append(client.V1Taint(key=K.TAINT_FAULTY, value="true", effect="NoSchedule"))
+        core.patch_node(node, {"spec": {"unschedulable": True, "taints": [t.to_dict() for t in taints]}},
+                        _request_timeout=kube.TIMEOUT)
+        log.info("%s: %s/%s cordon + taint", x.name, src, node)
+
+
 def isolate(x: Ctx):
     action, src = x.spec["action"], x.st.get("sourceCluster")
-    if action == "moveToSpare":
-        api = x.workers.get().get(src)
-        if api is None:
-            raise RuntimeError(f"워커 {src} 접속 정보 없음")
-        core = client.CoreV1Api(api)
-        gpu_nodes = {n.metadata.name for n in core.list_node(
-            label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items}
-        for node in x.spec.get("excludeNodes") or []:
-            if node not in gpu_nodes:   # GPU 노드가 아닌 것(컨트롤 플레인 등)은 격리하지 않음
-                raise PermissionError(f"{node}는 {src}의 GPU 노드({K.GPU_NODE_SELECTOR})가 아님")
-            n = core.read_node(node, _request_timeout=kube.TIMEOUT)
-            taints = [t for t in (n.spec.taints or []) if t.key != K.TAINT_FAULTY]
-            taints.append(client.V1Taint(key=K.TAINT_FAULTY, value="true", effect="NoSchedule"))
-            core.patch_node(node, {"spec": {"unschedulable": True, "taints": [t.to_dict() for t in taints]}},
-                            _request_timeout=kube.TIMEOUT)
-            log.info("%s: %s/%s cordon + taint", x.name, src, node)
+    nodes = x.spec.get("excludeNodes") or []
+    if action in ("moveToSpare", "moveToOtherCluster") and nodes:
+        if not src:
+            raise PermissionError(f"잡이 아직 워커에 안 보내져서 {nodes}를 어느 클러스터에서 격리할지 모름")
+        cordon_nodes(x, src, nodes)
     elif action == "evacuateCluster":
         x.co.patch_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", src,
                                          {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
@@ -188,6 +197,20 @@ def strip_kueue_injected(spec):
         _strip_meta(((tmpl.get("spec") or {}).get("template") or {}).get("metadata"))
 
 
+LEAVE_SOURCE = {"moveToOtherCluster", "evacuateCluster"}   # 원래 클러스터를 떠나는 action
+
+
+def placement_hints(action, src, old_exclude_csv, extra_exclude):
+    """재제출 잡의 (target-cluster, exclude-clusters 목록). 순수 함수 (test_relocator.py)
+    restartInPlace·moveToSpare: 원래 클러스터로 고정 / moveToOtherCluster·evacuateCluster: 원래 클러스터를 뺌"""
+    exclude = {c for c in (old_exclude_csv or "").split(",") if c} | set(extra_exclude or [])
+    if action in LEAVE_SOURCE:
+        if src:
+            exclude.add(src)
+        return None, sorted(exclude)
+    return (src or None), sorted(exclude - {src})
+
+
 def build_new(x: Ctx, old):
     ns, old_name = x.job()
     labels = old["metadata"].get("labels") or {}
@@ -206,16 +229,16 @@ def build_new(x: Ctx, old):
     new["metadata"]["annotations"].pop(K.ANN_MANUAL, None)
     new["spec"]["suspend"] = True
     new["spec"].pop("managedBy", None)   # Kueue 웹훅이 다시 채움
-    src = x.st.get("sourceCluster")
-    exclude = {c for c in (new["metadata"]["annotations"].get(K.ANN_EXCLUDE) or "").split(",") if c}
-    exclude |= set(x.spec.get("excludeClusters") or [])
-    if x.spec["action"] == "evacuateCluster":
-        exclude.add(src)
-        new["metadata"]["annotations"].pop(K.ANN_TARGET, None)
-    elif src:
-        new["metadata"]["annotations"][K.ANN_TARGET] = src
+    ann = new["metadata"]["annotations"]
+    target, exclude = placement_hints(x.spec["action"], x.st.get("sourceCluster"),
+                                      ann.get(K.ANN_EXCLUDE), x.spec.get("excludeClusters"))
+    if target:
+        ann[K.ANN_TARGET] = target
+    elif x.spec["action"] in LEAVE_SOURCE:
+        ann.pop(K.ANN_TARGET, None)
+    ann.pop(K.ANN_EXCLUDE, None)
     if exclude:
-        new["metadata"]["annotations"][K.ANN_EXCLUDE] = ",".join(sorted(exclude))
+        ann[K.ANN_EXCLUDE] = ",".join(exclude)
     return new
 
 

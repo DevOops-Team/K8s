@@ -13,6 +13,7 @@
 | 7 | `07-all-down.sh` | 워커 전부 끊김 -> 디스패처가 지명 멈춤 |
 | 8 | `08-no-spare.sh` | 예비 없으면 자리 날 때까지 대기, 5번과 시각 비교 |
 | 9 | `09-duplicate.sh` | 같은 requestId 두 번 -> 한 번만 실행 |
+| 10 | `10-move-to-other-cluster.sh` | 예비 소진·SDC: 의심 노드만 격리, 잡은 다른 워커로, worker2 펜싱 안 함 (6번과 비교) |
 
 6·7번은 `docker network disconnect`를 쓴다 (sudo 없이 docker가 되는 사용자 기준).
 

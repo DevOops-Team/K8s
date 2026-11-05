@@ -50,11 +50,11 @@ spec:
                 pattern: '^[a-z0-9-]+/[a-z0-9.-]+$'
               action:
                 type: string
-                enum: [restartInPlace, moveToSpare, evacuateCluster]
+                enum: [restartInPlace, moveToSpare, moveToOtherCluster, evacuateCluster]
               excludeNodes:
                 type: array
                 items: {type: string}
-                description: 격리할 노드 (moveToSpare)
+                description: 격리할 노드 (moveToSpare 필수, moveToOtherCluster 선택)
               excludeClusters:
                 type: array
                 items: {type: string}
@@ -62,7 +62,7 @@ spec:
               reason:
                 type: string
                 description: 기록용 원인 분류
-                enum: [hardware, software, spot, straggler, az, unknown]
+                enum: [hardware, software, spot, straggler, sdc, az, unknown]
           status:
             type: object
             x-kubernetes-preserve-unknown-fields: true
