@@ -33,10 +33,14 @@ def manager_client():
 
 
 class Workers:
-    """워커 이름 -> ApiClient. 60초마다 다시 만든다 (Secret 교체 반영)."""
+    """워커 이름 -> ApiClient. 60초마다 다시 만든다 (Secret 교체 반영).
 
-    def __init__(self, mgr):
+    own_secret: 컨트롤러 전용 kubeconfig Secret 이름 형식 (예: "{name}-relocator-kubeconfig").
+                있으면 그걸 쓰고, 없으면(kind) MultiKueue Secret으로 대신한다."""
+
+    def __init__(self, mgr, own_secret=None):
         self.mgr = mgr
+        self.own_secret = own_secret
         self._clients, self._at = {}, 0
 
     def get(self):
@@ -58,7 +62,15 @@ class Workers:
             name = mkc["metadata"]["name"]
             secret = mkc["spec"]["clusterSource"]["kubeConfig"]["location"]
             try:
-                data = core.read_namespaced_secret(secret, K.KUEUE_NS).data["kubeconfig"]
+                data = None
+                if self.own_secret:
+                    try:
+                        data = core.read_namespaced_secret(self.own_secret.format(name=name), K.KUEUE_NS).data["kubeconfig"]
+                    except client.ApiException as e:
+                        if e.status not in (403, 404):
+                            raise
+                if data is None:
+                    data = core.read_namespaced_secret(secret, K.KUEUE_NS).data["kubeconfig"]
                 out[name] = config.new_client_from_config_dict(yaml.safe_load(base64.b64decode(data)))
             except Exception as e:  # noqa: BLE001
                 log.warning("워커 %s kubeconfig 못 읽음: %s", name, e)

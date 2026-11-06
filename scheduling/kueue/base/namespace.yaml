@@ -1,0 +1,6 @@
+# Kueue·JobSet·스케줄링 컨트롤러가 들어가는 네임스페이스 (11/05 K8s 아키텍처: 관리·EKS 모두 platform)
+# 우리 망 온프레미스에서는 Argo CD gpu-foundation이 만듦 -> 여기 것은 kind·EKS용
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform

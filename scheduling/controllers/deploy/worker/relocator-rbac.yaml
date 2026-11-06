@@ -1,0 +1,54 @@
+# 워커(EKS)마다 올리는 재배치 실행기 전용 SA (IAM 답변 11/05: 노드 권한을 MultiKueue SA와 나눔)
+# 이 SA의 장기 토큰으로 kubeconfig를 만들어 관리 클러스터 platform/<워커이름>-relocator-kubeconfig Secret(키 kubeconfig)에 넣는다
+#   (MultiKueue kubeconfig를 만드는 IaC 플레이북 multikueue-access.yml과 같은 방식)
+# 없으면 relocator는 MultiKueue Secret을 대신 쓴다 (kind)
+#
+# 옛 잡은 관리 클러스터에서 지우고 워커 사본은 MultiKueue가 정리하므로, 워커에는 읽기 + 노드 격리만 필요
+#   nodes: get, list, patch (GPU 노드 cordon·taint)
+#   training: jobsets get, workloads list, pods list (옛 실행이 사라졌는지 확인)
+# NodeClaim 삭제를 넣게 되면 그때 karpenter.sh nodeclaims 권한 추가
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: relocator, namespace: platform}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: relocator-token
+  namespace: platform
+  annotations: {kubernetes.io/service-account.name: relocator}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: scheduling-relocator-nodes}
+rules:
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: scheduling-relocator-nodes}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-relocator-nodes}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: scheduling-relocator-read, namespace: training}
+rules:
+- apiGroups: [jobset.x-k8s.io]
+  resources: [jobsets]
+  verbs: [get]
+- apiGroups: [kueue.x-k8s.io]
+  resources: [workloads]
+  verbs: [list]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: scheduling-relocator-read, namespace: training}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: scheduling-relocator-read}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]

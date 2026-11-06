@@ -2,8 +2,8 @@
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: lq-heavy
-  namespace: ml
+  name: queue-heavy
+  namespace: training
 spec:
   clusterQueue: cq-heavy
   stopPolicy: None
@@ -11,8 +11,8 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: lq-light
-  namespace: ml
+  name: queue-light
+  namespace: training
 spec:
   clusterQueue: cq-light
   stopPolicy: None
@@ -20,8 +20,8 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: lq-recovery
-  namespace: ml
+  name: queue-recovery
+  namespace: training
 spec:
   clusterQueue: cq-recovery
   stopPolicy: None

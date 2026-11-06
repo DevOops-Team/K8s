@@ -8,7 +8,8 @@
 # 예상 (이걸 맞히는지 보는 게 목적):
 #   t=0      worker2에서 승인. Pod 3개 Running, 1개 Pending (노드가 3대뿐)
 #   t≈2m     worker2 Workload가 PodsReadyTimeout으로 Evicted -> Pod 4개 전부 내려감
-#   t≈3m     backoff(약 60s) 뒤 다시 승인 -> 같은 상황 반복
+#   이후     requeuingStrategy.backoffLimitCount 0 (JobSet 템플릿 5절) -> 다시 큐에 안 넣고 Workload 비활성화
+#            (11/06 전에는 backoff 약 60s 뒤 다시 승인되며 반복됐음)
 #   ??       관리 클러스터 Workload는 어떻게 되나? 다른 워커로 다시 보내지나? <- 확인할 것
 set -euo pipefail
 
@@ -17,7 +18,7 @@ MGR=kind-manager
 WORKERS=(kind-worker1 kind-worker2 kind-worker3)
 TARGET=worker2
 CORDON_NODES=(gpu-node-1 gpu-node-2)
-NS=ml
+NS=training
 WATCH_SECONDS=${WATCH_SECONDS:-240}
 
 ts() { date +%H:%M:%S; }
@@ -27,10 +28,10 @@ setup() {
   for ctx in "${WORKERS[@]}"; do
     log "$ctx: kueue/worker 적용"
     kubectl --context "$ctx" apply --server-side --force-conflicts -k "$ROOT/kueue/worker" >/dev/null
-    kubectl --context "$ctx" -n kueue-system rollout restart deploy/kueue-controller-manager
-    kubectl --context "$ctx" -n kueue-system rollout status deploy/kueue-controller-manager --timeout=180s
+    kubectl --context "$ctx" -n platform rollout restart deploy/kueue-controller-manager
+    kubectl --context "$ctx" -n platform rollout status deploy/kueue-controller-manager --timeout=180s
     echo "적용된 waitForPodsReady:"
-    kubectl --context "$ctx" -n kueue-system get cm kueue-manager-config \
+    kubectl --context "$ctx" -n platform get cm kueue-manager-config \
       -o jsonpath='{.data.controller_manager_config\.yaml}' | grep -A3 '^waitForPodsReady'
   done
 }
@@ -58,7 +59,7 @@ run() {
   log "worker2 노드 ${CORDON_NODES[*]} cordon (5대 중 3대만 남김)"
   for n in "${CORDON_NODES[@]}"; do kubectl --context "kind-$TARGET" cordon "$n"; done
 
-  log "JobSet 제출 (관리 클러스터, lq-heavy)"
+  log "JobSet 제출 (관리 클러스터, queue-heavy)"
   kubectl --context "$MGR" apply -f "$ROOT/examples/gang/gang-4gpu.yaml"
 
   local wl=""

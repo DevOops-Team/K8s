@@ -1,4 +1,4 @@
-"""레플리카 3개 중 하나만 일하게 하는 리더 선출 (coordination.k8s.io Lease).
+"""레플리카 3개 중 하나만 일하게 하는 리더 선출 (coordination.k8s.io Lease, platform/scheduling-<이름>).
 
     elector = leader.Elector(kube.manager_client(), "dispatcher")   # 갱신 스레드가 바로 시작
     while True:
@@ -31,7 +31,7 @@ log = logging.getLogger("leader")
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "15"))
 RENEW_SECONDS = int(os.getenv("RENEW_SECONDS", "5"))
 REQUEST_TIMEOUT = 3  # Lease 요청이 멈춰 리더 표시만 남는 일 막음 (RENEW_SECONDS보다 짧게)
-NAMESPACE = os.getenv("CONTROLLER_NAMESPACE", "job-placement")
+NAMESPACE = os.getenv("CONTROLLER_NAMESPACE", "platform")
 
 
 def _now():
@@ -42,7 +42,7 @@ class Elector:
     def __init__(self, api, name, identity=None, clock=time.monotonic, start=True):
         self.enabled = os.getenv("LEADER_ELECTION", "1") != "0"
         self.coord = client.CoordinationV1Api(api)
-        self.lease_name = f"job-placement-{name}"
+        self.lease_name = f"scheduling-{name}"
         self.identity = identity or os.getenv("POD_NAME") or f"{socket.gethostname()}-{os.getpid()}"
         self.clock = clock
         self.leading = not self.enabled

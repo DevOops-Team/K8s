@@ -5,7 +5,7 @@ reset
 trap 'reconnect worker2' EXIT
 
 say "2장 잡 train-b를 worker2에"
-submit train-b 2 lq-light 30m '"devoops/target-cluster": "worker2"'
+submit train-b 2 queue-light 30m '"devoops/target-cluster": "worker2"'
 wait_admitted train-b 120
 
 say "worker2 네트워크 끊기 + evacuateCluster 요청"
@@ -16,12 +16,12 @@ watch_for 90 15 show_rr
 
 say "복구 컨트롤러가 다른 방법으로 옛 실행 종료를 확인했다고 가정 -> 어노테이션"
 kubectl --context $MGR -n $NS annotate relocationrequest rr-evac devoops/old-execution-stopped=true --overwrite
-expect "train-b-g1이 worker1 또는 worker3에 재제출·입장"
+expect "job-train-b-g0002이 worker1 또는 worker3에 재제출·입장"
 watch_for 60 15 show_rr
 rr_times rr-evac
 
 say "새 일반 잡 제출 -> worker2로 가면 안 됨"
-submit after-evac 1 lq-light 20m
+submit after-evac 1 queue-light 20m
 wait_admitted after-evac 60 || true
 kubectl --context $MGR get multikueueclusters -L devoops/fenced
 

@@ -60,10 +60,10 @@ t1() {
 
 t2() {
   say "2. 큐 정하기 (입력: 잡 투입기 규칙)"
-  check "1장 -> lq-light" eq "$(queue_for 1)" lq-light
-  check "2장 -> lq-light" eq "$(queue_for 2)" lq-light
-  check "3장 -> lq-heavy" eq "$(queue_for 3)" lq-heavy
-  check "4장 -> lq-heavy" eq "$(queue_for 4)" lq-heavy
+  check "1장 -> queue-light" eq "$(queue_for 1)" queue-light
+  check "2장 -> queue-light" eq "$(queue_for 2)" queue-light
+  check "3장 -> queue-heavy" eq "$(queue_for 3)" queue-heavy
+  check "4장 -> queue-heavy" eq "$(queue_for 4)" queue-heavy
   queue_for 5 >/dev/null; check "5장 -> 거부" eq "$?" 2
   submit_auto route-3 3 5m
   wait_until 60 has_quota route-3

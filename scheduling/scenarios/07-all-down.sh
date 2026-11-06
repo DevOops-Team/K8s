@@ -11,7 +11,7 @@ watch_for 90 15 kubectl --context $MGR get multikueueclusters
 
 say "잡 제출"
 expect "NOMINATED 비어 있음, 디스패처 로그 '전부 끊김 -> 지명 중단'"
-submit while-down 1 lq-light 20m
+submit while-down 1 queue-light 20m
 sleep 30
 show
 

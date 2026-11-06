@@ -8,7 +8,7 @@
 #   SKIP_BOOTSTRAP=1                준비(bootstrap.sh) 건너뛰기
 #
 # 실험          바꾸는 것 (A = 현재 구성 / B = 대조군)                         상황
-#   queue       A Heavy/Light 분리 / B 큰 잡도 lq-light에 넣음 (= 큐 1개 12장 BestEffortFIFO)
+#   queue       A Heavy/Light 분리 / B 큰 잡도 queue-light에 넣음 (= 큐 1개 12장 BestEffortFIFO)
 #                                                                              Light 12장 꽉 참 + 1장 잡이 계속 옴 -> 4장 잡
 #   hold        A 디스패처 비워 두기 켬 / B 끔 (STARVE_SECONDS 아주 크게)       워커마다 1장 잡 3개(target 고정)로 조각남 + 1장 잡이 계속 옴 -> 4장 잡
 #   aging       A allocator 켬 / B 끔 (dispatcher·relocator만)                Light 꽉 참 + 1장 잡이 계속 옴 -> 2장 잡(Light)
@@ -70,7 +70,7 @@ fill_fragmented() {  # 워커마다 1장 잡 3개를 target으로 고정 -> 각 
   local i w
   for i in $(seq 1 9); do
     w=${WORKERS[$(( (i - 1) % 3 ))]}
-    submit "frag-$i" 1 lq-light "$((120 + 10 * i))s" "devoops/target-cluster: $w" >/dev/null
+    submit "frag-$i" 1 queue-light "$((120 + 10 * i))s" "devoops/target-cluster: $w" >/dev/null
   done
   wait_until 120 eval '[ "$(wlq placed frag-)" = 9 ]' || echo "  경고: frag 9개가 다 입장 못 함 ($(wlq by_cluster frag-))"
   echo "  워커별: $(wlq by_cluster frag-)"
@@ -105,14 +105,14 @@ exp_queue() {
   start_ctl queue-A
   fill_light_full; start_feeder; sleep 20
   submit_auto big 4 20m
-  track queue "A 분리 (big -> lq-heavy)" big
+  track queue "A 분리 (big -> queue-heavy)" big
   stop_ctl; reset_all
 
-  say "queue B: 큐 1개 (big도 lq-light)"
+  say "queue B: 큐 1개 (big도 queue-light)"
   start_ctl queue-B
   fill_light_full; start_feeder; sleep 20
-  submit big 4 lq-light 20m
-  track queue "B 큐 1개 (big -> lq-light)" big
+  submit big 4 queue-light 20m
+  track queue "B 큐 1개 (big -> queue-light)" big
   stop_ctl; reset_all
 }
 

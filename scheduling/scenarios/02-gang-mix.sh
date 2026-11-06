@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 2. 갱 스케줄링: 1~4장 잡을 섞어 넣었을 때 반쪽만 배치된 잡 0건
 #    1차 방어 = 디스패처가 노드 단위로 다 들어가는 곳만 지명
-#    2차 방어 = 워커 Kueue waitForPodsReady (반쪽이면 2분 뒤 통째로 내림)
+#    2차 방어 = 워커 Kueue waitForPodsReady (반쪽이면 2분 뒤 통째로 내리고, 다시 큐에 넣지 않음 = backoffLimitCount 0)
 source "$(dirname "$0")/lib.sh"
 reset
 

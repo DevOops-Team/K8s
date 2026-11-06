@@ -5,12 +5,12 @@ source "$(dirname "$0")/lib.sh"
 reset
 
 say "1장 잡 14개 제출 -> 12개 입장, 2개 대기 (일반 잡은 학습 몫 12장까지)"
-for i in $(seq 1 14); do submit "fill-$i" 1 lq-light 20m; done
+for i in $(seq 1 14); do submit "fill-$i" 1 queue-light 20m; done
 sleep 30
 show
 
-say "복구 잡 제출 (lq-recovery)"
+say "복구 잡 제출 (queue-recovery)"
 expect "fill-13, fill-14보다 먼저 입장. 워커의 예비 노드(gpu-node-5)에 올라감. PRIO 1000"
-submit rescue 1 lq-recovery 20m
+submit rescue 1 queue-recovery 20m
 wait_admitted rescue 60 || true
 show

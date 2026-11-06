@@ -2,6 +2,7 @@ resources:
   - ../../base
 patches:
   # kind 전용: GPU가 KWOK 가짜 노드에만 있으므로 그 노드로 가도록 flavor에서 주입
+  # (nvidia.com/gpu taint toleration은 JobSet 템플릿에 있음. 여기선 KWOK taint만)
   - target:
       kind: ResourceFlavor
       name: gpu
@@ -12,7 +13,7 @@ patches:
         name: gpu
       spec:
         nodeLabels:
-          node-role: gpu
+          node-role.devoops.site/gpu: "true"
         tolerations:
         - key: kwok.x-k8s.io/node
           operator: Equal

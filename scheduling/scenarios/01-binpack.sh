@@ -5,7 +5,7 @@ reset
 
 say "1장 잡 6개 제출 (3초 간격)"
 expect "worker1에 4개, worker2에 2개, worker3는 비어 있음 (이름순 동률 -> worker1부터)"
-for i in 1 2 3 4 5 6; do submit "bin-$i" 1 lq-light 20m; sleep 3; done
+for i in 1 2 3 4 5 6; do submit "bin-$i" 1 queue-light 20m; sleep 3; done
 
 sleep 20
 show

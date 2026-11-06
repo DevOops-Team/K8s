@@ -7,13 +7,16 @@ metadata:
     kwok.x-k8s.io/node: fake
   labels:
     type: kwok
-    node-role: gpu
+    node-role.devoops.site/gpu: "true"
     kubernetes.io/hostname: gpu-node-1
 
 spec:
   taints:
     - key: kwok.x-k8s.io/node
       value: fake
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: present
       effect: NoSchedule
 status:
   capacity:    {cpu: "4", memory: 16Gi, pods: "110", nvidia.com/gpu: "1"}
@@ -27,13 +30,16 @@ metadata:
     kwok.x-k8s.io/node: fake
   labels:
     type: kwok
-    node-role: gpu
+    node-role.devoops.site/gpu: "true"
     kubernetes.io/hostname: gpu-node-2
 
 spec:
   taints:
     - key: kwok.x-k8s.io/node
       value: fake
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: present
       effect: NoSchedule
 status:
   capacity:    {cpu: "4", memory: 16Gi, pods: "110", nvidia.com/gpu: "1"}
@@ -47,13 +53,16 @@ metadata:
     kwok.x-k8s.io/node: fake
   labels:
     type: kwok
-    node-role: gpu
+    node-role.devoops.site/gpu: "true"
     kubernetes.io/hostname: gpu-node-3
 
 spec:
   taints:
     - key: kwok.x-k8s.io/node
       value: fake
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: present
       effect: NoSchedule
 status:
   capacity:    {cpu: "4", memory: 16Gi, pods: "110", nvidia.com/gpu: "1"}
@@ -67,13 +76,16 @@ metadata:
     kwok.x-k8s.io/node: fake
   labels:
     type: kwok
-    node-role: gpu
+    node-role.devoops.site/gpu: "true"
     kubernetes.io/hostname: gpu-node-4
 
 spec:
   taints:
     - key: kwok.x-k8s.io/node
       value: fake
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: present
       effect: NoSchedule
 status:
   capacity:    {cpu: "4", memory: 16Gi, pods: "110", nvidia.com/gpu: "1"}
@@ -87,13 +99,16 @@ metadata:
     kwok.x-k8s.io/node: fake
   labels:
     type: kwok
-    node-role: gpu
+    node-role.devoops.site/gpu: "true"
     kubernetes.io/hostname: gpu-node-5
     devoops/spare: "true"
 spec:
   taints:
     - key: kwok.x-k8s.io/node
       value: fake
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: present
       effect: NoSchedule
 status:
   capacity:    {cpu: "4", memory: 16Gi, pods: "110", nvidia.com/gpu: "1"}

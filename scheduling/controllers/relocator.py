@@ -13,12 +13,18 @@ action:
 
 자리는 정하지 않는다. 재제출한 잡도 디스패처를 다시 거친다.
 
-단계마다 status에 시각을 남기고, 다음 루프에서 비어 있는 단계부터 이어서 한다.
-그래서 실행기가 중간에 죽었다 살아나도 끝난 단계를 두 번 하지 않는다.
+복구 컨트롤러와 나누는 일 (체크포인트 규약 5·8절, JobSet 템플릿 2·6절):
+  복구 컨트롤러  판단 -> DynamoDB 세대 +1 (recovery_phase=GENERATION_ADVANCED, recovery_id·from/to gen) -> 이 요청 생성
+  재배치 실행기  요청의 requestId = 펜싱 기록 recovery_id 인지 확인
+                 -> 격리 -> 옛 실행이 멈춘 걸 확인하면 OLD_RUN_STOPPED
+                 -> 복구 원본(S3 code/{job_id}/jobset.json)에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
+                 -> NEW_RUN_SUBMITTED + new_jobset_name·uid (전부 조건부 갱신)
+  RESUMING·COMPLETED는 복구 컨트롤러 몫.
+
+단계마다 요청 status에 시각을 남기고, 다음 루프에서 비어 있는 단계부터 이어서 한다.
+펜싱 기록 갱신과 JobSet 생성도 같은 이름·조건으로 다시 해도 결과가 같아서, 실행기가 중간에 죽었다 살아나도 두 번 하지 않는다.
   acceptedAt -> isolatedAt -> stoppedAt -> resubmittedAt -> admittedAt (Done)
 """
-import copy
-import json
 import os
 import time
 
@@ -27,22 +33,25 @@ from kubernetes import client
 import keys as K
 import kube
 import leader
+import recovery_render as R
+import recovery_store
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 내려가길 기다리는 최대 시간
 ADMIT_TIMEOUT_SECONDS = int(os.getenv("ADMIT_TIMEOUT_SECONDS", "900"))
-CONTROLLER_NS = os.getenv("CONTROLLER_NAMESPACE", "job-placement")   # 재제출용 잡 사본 보관
+FENCING_WAIT_SECONDS = int(os.getenv("FENCING_WAIT_SECONDS", "300"))   # 복구 컨트롤러의 세대 +1을 기다리는 최대 시간
+# EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔). 없으면 MultiKueue Secret
+OWN_SECRET = os.getenv("RELOCATOR_KUBECONFIG_SECRET", "{name}-relocator-kubeconfig")
 
 kube.setup_logging("relocator")
 log = kube.logging.getLogger("relocator")
 
 FINAL = {"Done", "Failed", "Duplicate"}
-KUEUE_PREFIX = "kueue.x-k8s.io/"
 
 
 class Ctx:
-    def __init__(self, mgr, workers, rr):
-        self.mgr, self.workers, self.rr = mgr, workers, rr
+    def __init__(self, mgr, workers, store, rr):
+        self.mgr, self.workers, self.store, self.rr = mgr, workers, store, rr
         self.co = kube.kueue(mgr)
         self.ns = rr["metadata"]["namespace"]
         self.name = rr["metadata"]["name"]
@@ -61,14 +70,17 @@ class Ctx:
             raise PermissionError(f"jobRef 네임스페이스 {ns} != 요청 네임스페이스 {self.ns}")
         return ns, name
 
-    def snapshot_name(self):
-        return f"rr-snapshot-{self.rr['metadata']['uid']}"
+    def job_id(self):
+        return self.st["jobId"]
+
+    def to_gen(self):
+        return int(self.st["toGeneration"])
 
 
 # ---------- 단계
 
 def accept(x: Ctx, all_rrs):
-    rid = x.spec["requestId"]
+    rid = x.spec["requestId"]   # = 펜싱 기록 recovery_id
     older = [r for r in all_rrs if r["spec"]["requestId"] == rid and r["metadata"]["uid"] != x.rr["metadata"]["uid"]
              and (r["metadata"]["creationTimestamp"], r["metadata"]["name"]) <
              (x.rr["metadata"]["creationTimestamp"], x.name)]
@@ -77,13 +89,43 @@ def accept(x: Ctx, all_rrs):
         log.info("%s: 중복 요청 (%s) -> 무시", x.name, rid)
         return False
     ns, name = x.job()
+    job_id, old_gen = R.parse_name(name)
+    if not job_id:
+        x.save(phase="Failed", message=f"잡 이름 {name}이 job-<작업ID>-g<세대 4자리> 형식이 아님",
+               acceptedAt=kube.now_rfc3339())
+        return False
+    verdict, why, to_gen = R.check_fencing(x.store.get_fencing(job_id), rid, old_gen)
+    if verdict == "wait":
+        if kube.since(x.rr["metadata"]["creationTimestamp"]) > FENCING_WAIT_SECONDS:
+            x.save(phase="Failed", message=f"{FENCING_WAIT_SECONDS}s 동안 세대 +1이 안 보임: {why}",
+                   acceptedAt=kube.now_rfc3339())
+        elif x.st.get("message") != f"대기: {why}":
+            x.save(phase="Pending", message=f"대기: {why}")
+            log.info("%s: 대기 - %s", x.name, why)
+        return False
+    if verdict == "done":
+        x.save(phase="Done", message=f"펜싱 기록이 {why} -> 재배치 할 일 없음", acceptedAt=kube.now_rfc3339())
+        return False
+    if verdict == "fail":
+        x.save(phase="Failed", message=f"펜싱 기록: {why}", acceptedAt=kube.now_rfc3339())
+        return False
     wl = kube.workload_for_jobset(x.mgr, ns, name)
     source = (wl or {}).get("status", {}).get("clusterName") or ""
-    if not wl:
+    old_exclude = ""
+    try:
+        old = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        old_exclude = (old["metadata"].get("annotations") or {}).get(K.ANN_EXCLUDE, "")
+    except client.ApiException as e:
+        if e.status != 404:
+            raise
+    # 옛 잡이 벌써 없으면 원래 클러스터를 모른다. 단계가 OLD_RUN_STOPPED 이후(실행기가 이미 지운 뒤 재시작)일 때만 진행
+    if not wl and why == "GENERATION_ADVANCED":
         x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
         return False
-    x.save(phase="Accepted", sourceCluster=source, acceptedAt=kube.now_rfc3339(), message="")
-    log.info("%s: 접수 %s %s/%s (지금 %s)", x.name, x.spec["action"], ns, name, source or "워커 미정")
+    x.save(phase="Accepted", sourceCluster=source, jobId=job_id, fromGeneration=old_gen, toGeneration=to_gen,
+           oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message=f"펜싱 기록 {why}")
+    log.info("%s: 접수 %s %s/%s (지금 %s, 세대 %s -> %s)", x.name, x.spec["action"], ns, name,
+             source or "워커 미정", old_gen, to_gen)
     return True
 
 
@@ -168,7 +210,8 @@ def stop_old(x: Ctx):
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
     if (mgr_gone and worker_gone) or confirmed:
         how = f"옛 Workload 삭제 확인 ({why})" if (mgr_gone and worker_gone) else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
-        log.info("%s: 옛 실행 멈춤 (%s)", x.name, how)
+        advance(x, ("GENERATION_ADVANCED", "OLD_RUN_STOPPED"), "OLD_RUN_STOPPED")
+        log.info("%s: 옛 실행 멈춤 (%s) -> OLD_RUN_STOPPED", x.name, how)
         x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=how)
         return
     # 멈춘 게 확인되지 않으면 재제출하지 않는다 (contracts.md: 종료 확인 전 restart 금지 = 이중 실행 방지)
@@ -180,84 +223,50 @@ def stop_old(x: Ctx):
         x.save(phase="WaitingForStop", message=msg)
 
 
-def _strip_meta(meta):
-    for field in ("annotations", "labels"):
-        d = (meta or {}).get(field)
-        if d:
-            for k in [k for k in d if k.startswith(KUEUE_PREFIX)]:
-                del d[k]
+PHASE_ORDER = ["GENERATION_ADVANCED", "OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED", "RESUMING", "COMPLETED"]
 
 
-def strip_kueue_injected(spec):
-    """입장할 때 Kueue가 템플릿에 붙인 것(kueue.x-k8s.io/workload 어노테이션, podset·큐 라벨)을 지운다.
-    그대로 두면 새 Workload 입장 때 'conflict for key=kueue.x-k8s.io/workload'로 unsuspend가 실패하고
-    새 Workload가 바로 Finished 처리된다 (스냅샷이 실행 중인 잡에서 떠진 것이라 이미 붙어 있음)"""
-    for rj in spec.get("replicatedJobs") or []:
-        tmpl = rj.get("template") or {}
-        _strip_meta(tmpl.get("metadata"))
-        _strip_meta(((tmpl.get("spec") or {}).get("template") or {}).get("metadata"))
+def advance(x: Ctx, allowed_from, new_phase, extra=None):
+    """펜싱 기록 recovery_phase를 new_phase로 (조건부). 이미 그 단계 이후면 그대로 둠"""
+    rid = x.spec["requestId"]
+    if x.store.set_phase(x.job_id(), rid, x.to_gen(), allowed_from, new_phase, extra):
+        return
+    rec = x.store.get_fencing(x.job_id()) or {}
+    cur = rec.get("recovery_phase")
+    if (rec.get("recovery_id") == rid and cur in PHASE_ORDER
+            and PHASE_ORDER.index(cur) >= PHASE_ORDER.index(new_phase)):
+        return
+    raise PermissionError(f"펜싱 기록을 {new_phase}로 못 바꿈 (recovery_id={rec.get('recovery_id')}, "
+                          f"phase={cur}, to_gen={rec.get('recovery_to_gen')}) - 다른 복구가 진행 중")
 
 
-LEAVE_SOURCE = {"moveToOtherCluster", "evacuateCluster"}   # 원래 클러스터를 떠나는 action
-
-
-def placement_hints(action, src, old_exclude_csv, extra_exclude):
-    """재제출 잡의 (target-cluster, exclude-clusters 목록). 순수 함수 (test_relocator.py)
-    restartInPlace·moveToSpare: 원래 클러스터로 고정 / moveToOtherCluster·evacuateCluster: 원래 클러스터를 뺌"""
-    exclude = {c for c in (old_exclude_csv or "").split(",") if c} | set(extra_exclude or [])
-    if action in LEAVE_SOURCE:
-        if src:
-            exclude.add(src)
-        return None, sorted(exclude)
-    return (src or None), sorted(exclude - {src})
-
-
-def build_new(x: Ctx, old):
-    ns, old_name = x.job()
-    labels = old["metadata"].get("labels") or {}
-    job_id = labels.get(K.LABEL_JOB_ID, old_name)
-    gen = int(labels.get(K.LABEL_GENERATION, "0")) + 1
-    new = {"apiVersion": f"{K.JOBSET_GROUP}/{K.JOBSET_VERSION}", "kind": "JobSet",
-           "metadata": {"name": f"{job_id}-g{gen}", "namespace": ns,
-                        "labels": {**{k: v for k, v in labels.items() if not k.startswith("jobset.sigs")},
-                                   K.LABEL_JOB_ID: job_id, K.LABEL_GENERATION: str(gen),
-                                   K.LABEL_REQUEST_ID: x.spec["requestId"],
-                                   K.LABEL_QUEUE: K.RECOVERY_QUEUE, K.LABEL_PRIORITY: K.PRIORITY_RECOVERY},
-                        "annotations": dict(old["metadata"].get("annotations") or {})},
-           "spec": copy.deepcopy(old["spec"])}
-    strip_kueue_injected(new["spec"])
-    new["metadata"]["annotations"].pop("kubectl.kubernetes.io/last-applied-configuration", None)
-    new["metadata"]["annotations"].pop(K.ANN_MANUAL, None)
-    new["spec"]["suspend"] = True
-    new["spec"].pop("managedBy", None)   # Kueue 웹훅이 다시 채움
-    ann = new["metadata"]["annotations"]
-    target, exclude = placement_hints(x.spec["action"], x.st.get("sourceCluster"),
-                                      ann.get(K.ANN_EXCLUDE), x.spec.get("excludeClusters"))
-    if target:
-        ann[K.ANN_TARGET] = target
-    elif x.spec["action"] in LEAVE_SOURCE:
-        ann.pop(K.ANN_TARGET, None)
-    ann.pop(K.ANN_EXCLUDE, None)
-    if exclude:
-        ann[K.ANN_EXCLUDE] = ",".join(exclude)
+def build_new(x: Ctx):
+    target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
+                                        x.st.get("oldExclude"), x.spec.get("excludeClusters"))
+    new = R.render(x.store.get_jobset(x.job_id()), x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude)
+    new["metadata"]["namespace"] = x.ns
     return new
 
 
 def resubmit(x: Ctx):
     ns, _ = x.job()
-    # 옛 잡 원본은 접수 때 컨트롤러 네임스페이스 ConfigMap에 저장해 둔 것을 쓴다
-    # (요청 status는 다른 주체도 쓸 수 있어서 거기 두면 재제출 내용을 바꿔치기할 수 있음)
-    cm = client.CoreV1Api(x.mgr).read_namespaced_config_map(x.snapshot_name(), CONTROLLER_NS)
-    old = json.loads(cm.data["jobset"])
-    new = build_new(x, old)
+    new = build_new(x)
+    name = new["metadata"]["name"]
     try:
-        x.co.create_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", new)
+        made = x.co.create_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", new)
     except client.ApiException as e:
-        if e.status != 409:   # 이미 있음 = 지난 루프에서 만들고 status 저장 전에 죽은 경우
+        if e.status != 409:
             raise
-    x.save(resubmittedAt=kube.now_rfc3339(), newJob=f"{ns}/{new['metadata']['name']}")
-    log.info("%s: 재제출 %s (%s, exclude=%s, target=%s)", x.name, new["metadata"]["name"], K.RECOVERY_QUEUE,
-             new["metadata"]["annotations"].get(K.ANN_EXCLUDE, "-"), new["metadata"]["annotations"].get(K.ANN_TARGET, "-"))
+        # 이미 있음 = 지난 루프에서 만들고 기록 전에 죽은 경우. 같은 복구가 만든 것인지 확인
+        made = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        if (made["metadata"].get("annotations") or {}).get(K.ANN_RECOVERY_ID) != x.spec["requestId"]:
+            raise PermissionError(f"{name}이 이미 있는데 다른 복구가 만든 것") from e
+    advance(x, ("OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"), "NEW_RUN_SUBMITTED",
+            {"new_jobset_name": name, "new_jobset_uid": made["metadata"]["uid"]})
+    x.save(resubmittedAt=kube.now_rfc3339(), newJob=f"{ns}/{name}")
+    ann = new["metadata"]["annotations"]
+    log.info("%s: 재제출 %s (%s, exclude=%s, target=%s) -> NEW_RUN_SUBMITTED", x.name, name, K.RECOVERY_QUEUE,
+             ann.get(K.ANN_EXCLUDE, "-"), ann.get(K.ANN_TARGET, "-"))
 
 
 def watch_admit(x: Ctx):
@@ -275,28 +284,11 @@ def watch_admit(x: Ctx):
         x.save(phase="Failed", message=f"재제출 잡이 {ADMIT_TIMEOUT_SECONDS}s 안에 입장 못 함")
 
 
-def snapshot(x: Ctx):
-    ns, name = x.job()
-    old = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
-    snap = {"metadata": {"labels": old["metadata"].get("labels") or {},
-                         "annotations": old["metadata"].get("annotations") or {}},
-            "spec": old["spec"]}
-    body = client.V1ConfigMap(metadata=client.V1ObjectMeta(
-        name=x.snapshot_name(), labels={"app": "relocator", K.LABEL_REQUEST_ID: x.spec["requestId"]}),
-        data={"jobset": json.dumps(snap)})
-    try:
-        client.CoreV1Api(x.mgr).create_namespaced_config_map(CONTROLLER_NS, body)
-    except client.ApiException as e:
-        if e.status != 409:
-            raise
-
-
 def step(x: Ctx, all_rrs):
     st = x.st
     if not st.get("acceptedAt"):
         if not accept(x, all_rrs):
             return
-        snapshot(x)
     if not st.get("isolatedAt"):
         return isolate(x)
     if not st.get("stoppedAt"):
@@ -306,13 +298,13 @@ def step(x: Ctx, all_rrs):
     return watch_admit(x)
 
 
-def reconcile(mgr, workers):
+def reconcile(mgr, workers, store):
     co = kube.kueue(mgr)
     rrs = co.list_cluster_custom_object(K.RR_GROUP, K.RR_VERSION, K.RR_PLURAL)["items"]
     for rr in rrs:
         if (rr.get("status") or {}).get("phase") in FINAL:
             continue
-        x = Ctx(mgr, workers, rr)
+        x = Ctx(mgr, workers, store, rr)
         try:
             step(x, rrs)
         except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
@@ -329,14 +321,15 @@ def reconcile(mgr, workers):
 def main():
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "relocator")
-    workers = kube.Workers(mgr)
-    log.info("시작: interval=%ss", INTERVAL)
+    workers = kube.Workers(mgr, own_secret=OWN_SECRET)
+    store = recovery_store.from_env(mgr)
+    log.info("시작: interval=%ss store=%s", INTERVAL, type(store).__name__)
     while True:
         if not elector.is_leader():
             time.sleep(1)
             continue
         try:
-            reconcile(mgr, workers)
+            reconcile(mgr, workers, store)
         except Exception:  # noqa: BLE001
             log.exception("루프 실패")
         time.sleep(INTERVAL)

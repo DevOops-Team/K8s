@@ -2,13 +2,14 @@
 
 # ---------- 조회
 WLQ='
-import json, sys
+import json, re, sys
 from collections import Counter
 mode = sys.argv[1]; arg = sys.argv[2] if len(sys.argv) > 2 else ""
 items = json.load(sys.stdin)["items"]
-def owner(w):
+def owner(w):   # JobSet 이름 job-<작업ID>-g<세대> -> 작업ID (시나리오는 작업ID로 부름)
     for o in w["metadata"].get("ownerReferences") or []:
-        return o["name"]
+        m = re.match(r"^job-(.+)-g[0-9]{4}$", o["name"])
+        return m.group(1) if m else o["name"]
     return ""
 def ok(w, t):
     return any(c["type"] == t and c["status"] == "True" for c in (w.get("status") or {}).get("conditions") or [])
@@ -34,7 +35,7 @@ wl_cluster() { wlq one "$1" | awk '{print $2}'; }
 wl_cq()      { wlq one "$1" | awk '{print $3}'; }
 has_quota()  { [ "$(wl_quota "$1")" = True ]; }
 is_placed()  { [ "$(wl_cluster "$1")" != - ] && [ -n "$(wl_cluster "$1")" ]; }
-prio_of()    { kubectl --context $MGR -n $NS get jobset "$1" -o jsonpath='{.metadata.labels.kueue\.x-k8s\.io/priority-class}' 2>/dev/null; }
+prio_of()    { kubectl --context $MGR -n $NS get jobset "$(jsname "$1")" -o jsonpath='{.metadata.labels.kueue\.x-k8s\.io/priority-class}' 2>/dev/null; }
 is_aged()    { [ "$(prio_of "$1")" = training-aged ]; }
 cq_get()     { kubectl --context $MGR get clusterqueue "$1" -o jsonpath="$2" 2>/dev/null; }
 light_limit(){ cq_get cq-light '{.spec.resourceGroups[0].flavors[0].resources[0].borrowingLimit}'; }

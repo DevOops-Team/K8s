@@ -1,6 +1,9 @@
-# 시나리오 1~9 (실습 전용)
+# 시나리오 1~10 (실습 전용)
 
-전제: 다른 터미널에서 `../controllers/run-local.sh` 실행 중. 각 스크립트는 시작할 때 `reset`으로 잡·요청·노드 상태를 원상복구한다.
+전제: `../cluster/setup.sh`로 클러스터를 만들고 `./bootstrap.sh`로 큐를 깐 뒤, 다른 터미널에서 `../controllers/run-local.sh` 실행 중. 각 스크립트는 시작할 때 `reset`으로 잡·요청·노드 상태를 원상복구한다.
+
+이름은 JobSet 템플릿 합의안을 따른다: 네임스페이스 `training`, 큐 `queue-heavy/light/recovery`, 잡 `job-<작업ID>-g<세대 4자리>`. 스크립트에서는 작업ID만 쓰고 `jsname`이 이름으로 바꾼다(`jsname train-a 2` = `job-train-a-g0002`).
+`submit`은 백엔드처럼 복구 원본·펜싱 기록(kind에서는 platform ConfigMap)을 남기고, `relocate`는 복구 컨트롤러처럼 세대 +1(`GENERATION_ADVANCED`)을 한 뒤 재배치 요청을 만든다.
 
 | # | 스크립트 | 기대 결과 |
 |---|---|---|
@@ -50,6 +53,6 @@ FAST=1 ./control.sh hold     # 골라서, 시간 값 축소
 
 | 실험 | A (현재) | B (대조군) | 보는 것 |
 |---|---|---|---|
-| queue | Heavy/Light 분리 | 큰 잡도 lq-light (= 큐 1개) | 작은 잡이 계속 올 때 4장 잡이 쿼터를 받는지 |
+| queue | Heavy/Light 분리 | 큰 잡도 queue-light (= 큐 1개) | 작은 잡이 계속 올 때 4장 잡이 쿼터를 받는지 |
 | hold | 디스패처 비워 두기 켬 | 끔 | 워커마다 1장씩 조각났을 때 4장 잡이 입장하는지 |
 | aging | allocator 켬 | 끔 | Light 2장 잡이 1장 잡들에 밀릴 때 대기 시간 차이 |

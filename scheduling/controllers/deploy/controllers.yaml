@@ -1,31 +1,29 @@
-# 관리 클러스터에 올리는 컨트롤러 3개. 네임스페이스 job-placement (11/04 확정)
+# 관리 클러스터에 올리는 컨트롤러 3개. 네임스페이스 platform (11/05 K8s 아키텍처: 앱은 전부 platform, 권한은 앱별 SA)
 # HA: 컨트롤러마다 레플리카 3개를 platform-worker=true 노드(worker1~3)에 하나씩.
-#     Lease(job-placement-<이름>)로 리더 하나만 일하고 나머지 둘은 대기 (leader.py)
+#     Lease(platform/scheduling-<이름>)로 리더 하나만 일하고 나머지 둘은 대기 (leader.py)
 #     노드 하나가 죽어도 남은 둘 중 하나가 LEASE_SECONDS(15s) 안에 이어받음
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: job-placement
----
+# platform 네임스페이스는 kueue/base가 만듦 (우리 망 온프레미스는 Argo CD gpu-foundation)
+
 # 컨트롤러마다 ServiceAccount를 따로 둔다: 필요한 권한만
 #   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
-#   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기 + 잡 사본 ConfigMap
+#   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기
+#               + 복구 원본·펜싱 기록 (우리 망: S3·DynamoDB를 IAM으로, kind: ConfigMap)
 #   allocator : JobSet 우선순위 라벨 (배분 조정 컨트롤러)
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: dispatcher, namespace: job-placement}
+metadata: {name: dispatcher, namespace: platform}
 ---
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: relocator, namespace: job-placement}
+metadata: {name: relocator, namespace: platform}
 ---
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: allocator, namespace: job-placement}
+metadata: {name: allocator, namespace: platform}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: job-placement-dispatcher}
+metadata: {name: scheduling-dispatcher}
 rules:
 - apiGroups: [kueue.x-k8s.io]
   resources: [workloads]
@@ -45,7 +43,7 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: job-placement-relocator}
+metadata: {name: scheduling-relocator}
 rules:
 - apiGroups: [kueue.x-k8s.io]
   resources: [workloads]
@@ -65,7 +63,7 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: job-placement-allocator}
+metadata: {name: scheduling-allocator}
 rules:
 - apiGroups: [kueue.x-k8s.io]
   resources: [workloads]
@@ -76,60 +74,65 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: job-placement-dispatcher}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-dispatcher}
-subjects: [{kind: ServiceAccount, name: dispatcher, namespace: job-placement}]
+metadata: {name: scheduling-dispatcher}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-dispatcher}
+subjects: [{kind: ServiceAccount, name: dispatcher, namespace: platform}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: job-placement-relocator}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-relocator}
-subjects: [{kind: ServiceAccount, name: relocator, namespace: job-placement}]
+metadata: {name: scheduling-relocator}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-relocator}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: {name: job-placement-allocator}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: job-placement-allocator}
-subjects: [{kind: ServiceAccount, name: allocator, namespace: job-placement}]
+metadata: {name: scheduling-allocator}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-allocator}
+subjects: [{kind: ServiceAccount, name: allocator, namespace: platform}]
 ---
-# 워커 kubeconfig: MultiKueue가 쓰는 Secret 중 이름을 지정한 것만 (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
+# 워커 kubeconfig: 이름을 지정한 Secret만 (Kueue와 같은 platform 네임스페이스)
+#   dispatcher: MultiKueue가 쓰는 Secret (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
+#   relocator : EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔, IAM 답변 11/05)
+#               kind에서는 Secret이 없으면 MultiKueue Secret으로 대신함 (RELOCATOR_KUBECONFIG_SECRET 참고)
 # MultiKueueCluster 목록 조회도 필요하지만 그건 위 ClusterRole에 있음
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: job-placement-worker-kubeconfig, namespace: kueue-system}
+metadata: {name: scheduling-worker-kubeconfig, namespace: platform}
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [worker1-secret, worker2-secret, worker3-secret]
+  resourceNames: [worker1-secret, worker2-secret, worker3-secret,
+                  worker1-relocator-kubeconfig, worker2-relocator-kubeconfig, worker3-relocator-kubeconfig]
   verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: job-placement-worker-kubeconfig, namespace: kueue-system}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-placement-worker-kubeconfig}
+metadata: {name: scheduling-worker-kubeconfig, namespace: platform}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: scheduling-worker-kubeconfig}
 subjects:
-- {kind: ServiceAccount, name: dispatcher, namespace: job-placement}
-- {kind: ServiceAccount, name: relocator, namespace: job-placement}
+- {kind: ServiceAccount, name: dispatcher, namespace: platform}
+- {kind: ServiceAccount, name: relocator, namespace: platform}
 ---
-# 재배치 실행기의 잡 사본 보관소 (자기 네임스페이스 ConfigMap만)
+# kind 전용 복구 기록 저장소 (RECOVERY_STORE=configmap): S3 code/{job_id}/jobset.json, DynamoDB 펜싱 테이블 대신
+# ConfigMap recovery-code-<job_id> · recovery-fencing-<job_id>. 우리 망(RECOVERY_STORE=aws)에서는 이 Role 빼도 됨
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: relocator-snapshots, namespace: job-placement}
+metadata: {name: relocator-local-store, namespace: platform}
 rules:
 - apiGroups: [""]
   resources: [configmaps]
-  verbs: [get, create, delete]
+  verbs: [get, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: relocator-snapshots, namespace: job-placement}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: relocator-snapshots}
-subjects: [{kind: ServiceAccount, name: relocator, namespace: job-placement}]
+metadata: {name: relocator-local-store, namespace: platform}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: relocator-local-store}
+subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
 ---
 # 리더 선출 Lease (자기 네임스페이스, 컨트롤러별 이름)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: job-placement-leader-election, namespace: job-placement}
+metadata: {name: scheduling-leader-election, namespace: platform}
 rules:
 - apiGroups: [coordination.k8s.io]
   resources: [leases]
@@ -137,18 +140,18 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: job-placement-leader-election, namespace: job-placement}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-placement-leader-election}
+metadata: {name: scheduling-leader-election, namespace: platform}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: scheduling-leader-election}
 subjects:
-- {kind: ServiceAccount, name: dispatcher, namespace: job-placement}
-- {kind: ServiceAccount, name: relocator, namespace: job-placement}
-- {kind: ServiceAccount, name: allocator, namespace: job-placement}
+- {kind: ServiceAccount, name: dispatcher, namespace: platform}
+- {kind: ServiceAccount, name: relocator, namespace: platform}
+- {kind: ServiceAccount, name: allocator, namespace: platform}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dispatcher
-  namespace: job-placement
+  namespace: platform
 spec:
   replicas: 3
   strategy:                      # 노드 3대에 하나씩이라 하나 내리고 하나 올림 (maxSurge 0)
@@ -168,7 +171,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: main
-        image: job-placement:dev
+        image: scheduling-controllers:dev
         imagePullPolicy: IfNotPresent
         command: ["python", "dispatcher.py"]
         env:
@@ -178,7 +181,7 @@ spec:
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
-metadata: {name: dispatcher, namespace: job-placement}
+metadata: {name: dispatcher, namespace: platform}
 spec:
   maxUnavailable: 1              # 노드 drain 때도 둘은 남김
   selector: {matchLabels: {app: dispatcher}}
@@ -187,7 +190,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: relocator
-  namespace: job-placement
+  namespace: platform
 spec:
   replicas: 3
   strategy:                      # 노드 3대에 하나씩이라 하나 내리고 하나 올림 (maxSurge 0)
@@ -207,17 +210,21 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: main
-        image: job-placement:dev
+        image: scheduling-controllers:dev
         imagePullPolicy: IfNotPresent
         command: ["python", "relocator.py"]
         env:
         - name: POD_NAME         # Lease holderIdentity
           valueFrom: {fieldRef: {fieldPath: metadata.name}}
+        # 복구 원본(jobset.json)·펜싱 기록 저장소. kind = configmap
+        # 우리 망: aws + CKPT_BUCKET=devoops-prod-ckpt-354363695096-us-east-2, FENCING_TABLE=devoops-prod-fencing,
+        #          AWS_REGION=us-east-2, 자격 증명은 박기현 님이 만드는 온프레 인증 경로 (체크포인트 규약 13절)
+        - {name: RECOVERY_STORE, value: configmap}
         resources: {requests: {cpu: 50m, memory: 64Mi}}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
-metadata: {name: relocator, namespace: job-placement}
+metadata: {name: relocator, namespace: platform}
 spec:
   maxUnavailable: 1              # 노드 drain 때도 둘은 남김
   selector: {matchLabels: {app: relocator}}
@@ -226,7 +233,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: allocator
-  namespace: job-placement
+  namespace: platform
 spec:
   replicas: 3
   strategy:                      # 노드 3대에 하나씩이라 하나 내리고 하나 올림 (maxSurge 0)
@@ -246,7 +253,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: main
-        image: job-placement:dev
+        image: scheduling-controllers:dev
         imagePullPolicy: IfNotPresent
         command: ["python", "allocator.py"]
         env:
@@ -256,7 +263,7 @@ spec:
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
-metadata: {name: allocator, namespace: job-placement}
+metadata: {name: allocator, namespace: platform}
 spec:
   maxUnavailable: 1              # 노드 drain 때도 둘은 남김
   selector: {matchLabels: {app: allocator}}
