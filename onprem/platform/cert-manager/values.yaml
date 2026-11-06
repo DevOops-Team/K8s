@@ -1,6 +1,11 @@
 crds:
   enabled: true
-replicaCount: 2
+replicaCount: 3
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
 nodeSelector: &id001
   platform-worker: 'true'
 tolerations: &id002 []
@@ -12,7 +17,12 @@ affinity:
           app.kubernetes.io/name: cert-manager
       topologyKey: kubernetes.io/hostname
 webhook:
-  replicaCount: 2
+  replicaCount: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   nodeSelector: *id001
   tolerations: *id002
   affinity:
@@ -29,7 +39,7 @@ webhook:
     failureThreshold: 3
     successThreshold: 1
 cainjector:
-  replicaCount: 2
+  replicaCount: 3
   nodeSelector: *id001
   tolerations: *id002
   affinity:

@@ -8,7 +8,7 @@ Kafka 수신 → DynamoDB 영속 inbox → 중복 확인 → 복구 판단 → �
 - config.kafka.example.json: Kafka/DynamoDB에 연결하되 기본 mode=observe, execution_enabled=false. 이벤트를 OBSERVED로 기록하고 recovery.action에 결과 발행. 실행 번호 변경·재시작 없음.
 - 실제 실행은 mode=execute, execution_enabled=true를 함께 지정. A 정책을 실제 스케줄링 설정에 반영·검토한 후 redispatch_policy=controller-only, scheduler_policy_confirmed=true도 지정해야 합니다. executor_url·자격증명·규약 구현을 먼저 준비. observe로 이미 처리한 사건을 같은 그룹/테이블에서 execute로 바꿔 자동 재실행하지 않습니다. 새 실험·사건 ID를 사용하세요.
 
-현재 단일 Pod/단일 workflow worker, Recreate 배포 전략을 사용합니다. 리더 선출을 구현하지 않았으므로 복제 수는 1개만 지원합니다. DynamoDB는 재시작 시 상태를 보존하고 작업별 CAS 잠금을 사용합니다. HTTP 실행기는 반드시 Idempotency-Key를 영속 중복 제거해야 합니다.
+배포 시 Pod 3개를 서로 다른 워커에 배치합니다. Kafka 모드에서는 Kubernetes Lease를 얻은 리더 한 개만 Kafka를 소비하고 복구를 실행합니다. 대기 Pod는 Lease를 확인하며, 인계 시 DynamoDB inbox와 진행 상태를 읽어 작업을 이어갑니다. 리더는 12초 안에 Lease를 갱신하지 못하면 종료하고, 대기 Pod는 마지막으로 관찰한 갱신 이후 30초가 지나면 인계를 시도합니다. 전환 중 처리 중이던 외부 요청은 같은 Idempotency-Key로 재시도될 수 있으므로, HTTP 실행기는 해당 키를 영속적으로 중복 제거해야 합니다. 운영 중 Lease를 삭제하거나 초기화하지 않습니다. 이미지 교체 시 Recreate 전략으로 기존 Pod를 먼저 종료합니다.
 
 ## 필요한 설정
 
@@ -17,7 +17,7 @@ Kafka 수신 → DynamoDB 영속 inbox → 중복 확인 → 복구 판단 → �
 3. recovery_table: 기존 우리 복구 진행/inbox 테이블. 문자열 PK=pk. 사건·단계·원본 JobSet 참조·배치 메타데이터용이며 승인본/실행 권한의 원본이 아닙니다. 두 테이블의 키 구조가 달라 분리합니다. 실제 이름은 인프라 담당과 연결합니다.
 4. 백엔드/작업 제어 서비스가 recovery_table에 job-record.example.json 형식의 원본 jobset_uri·jobset_sha256·GPU 수·실제 cluster/active_nodes를 먼저 등록해야 합니다. fencing-record.example.json은 현수 펜싱 테이블용 별도 예시입니다. 임의 사건의 경로·GPU 수를 신뢰하지 않습니다.
 5. HTTPS 재배치 실행기 API. fence/restart/status 계약은 contracts.md 참고.
-6. Kafka/AWS/실행기 자격증명. Pod ServiceAccount token은 사용하지 않습니다. 아래 Secret을 별도로 준비하고 Git에 실제 값을 저장하지 마세요.
+6. Kafka/AWS/실행기 자격증명. Pod ServiceAccount token은 전용 Kubernetes Lease의 읽기와 갱신에 사용합니다. 아래 Secret을 별도로 준비하고 Git에 실제 값을 저장하지 마세요.
 
 Secret 이름 platform/recovery-controller-credentials, 키:
 - KAFKA_CLIENT_CONFIG_JSON: confluent-kafka 공통 인증/TLS JSON. 예: security.protocol, sasl.mechanism, sasl.username, sasl.password. 사설 CA는 이미지 또는 별도 읽기 전용 볼륨으로 준비.

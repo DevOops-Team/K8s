@@ -1,5 +1,10 @@
 deployment:
-  replicas: 2
+  replicas: 3
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
 ingressClass:
   enabled: true
   isDefaultClass: false

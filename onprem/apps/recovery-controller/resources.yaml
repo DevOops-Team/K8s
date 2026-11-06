@@ -5,6 +5,40 @@ metadata:
   namespace: platform
 automountServiceAccountToken: false
 ---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: recovery-controller
+  namespace: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: '-1'
+spec: {}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: recovery-controller-lease
+  namespace: platform
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  resourceNames: [recovery-controller]
+  verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: recovery-controller-lease
+  namespace: platform
+subjects:
+- kind: ServiceAccount
+  name: recovery-controller
+  namespace: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: recovery-controller-lease
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -31,9 +65,16 @@ spec:
         app.kubernetes.io/name: recovery-controller
     spec:
       serviceAccountName: recovery-controller
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       nodeSelector:
         platform-worker: 'true'
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: recovery-controller
+            topologyKey: kubernetes.io/hostname
       imagePullSecrets:
       - name: ghcr-pull
       securityContext:
@@ -80,6 +121,10 @@ spec:
           readOnly: true
         imagePullPolicy: IfNotPresent
         env:
+        - name: RECOVERY_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
         - name: PYTHONDONTWRITEBYTECODE
           value: '1'
         - name: PYTHONUNBUFFERED

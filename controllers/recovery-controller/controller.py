@@ -62,7 +62,9 @@ class Health(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.dumps(HEALTH).encode()
-        ready = HEALTH['event_source']=='disabled' or (HEALTH['worker_ok'] and HEALTH['kafka_connected'])
+        ready = (HEALTH['event_source']=='disabled'
+                 or (HEALTH.get('lease_connected') and not HEALTH.get('leader'))
+                 or (HEALTH['worker_ok'] and HEALTH['kafka_connected']))
         self.send_response(200 if self.path=='/healthz' or ready else 503)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -93,7 +95,12 @@ def main():
     try:
         if config['event_source']=='kafka':
             from runtime import run
-            run(config,stop,HEALTH)
+            from os import environ
+            if environ.get('RECOVERY_POD_UID'):
+                from leadership import run_elected
+                run_elected(run, config, stop, HEALTH, environ['RECOVERY_POD_UID'])
+            else:
+                run(config,stop,HEALTH)
         else:
             stop.wait()
     finally:

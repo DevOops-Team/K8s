@@ -27,12 +27,12 @@ class ConfigurationTests(unittest.TestCase):
     def test_manual_render_requires_digest(self):
         from render import render
         with self.assertRaises(ValueError): render('ghcr.io/team/controller:latest', {})
-    def test_manual_render_is_single_observer(self):
+    def test_manual_render_uses_three_replicas_without_kafka_credentials(self):
         from render import render
         config=dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=False)
         docs=render('ghcr.io/team/controller@sha256:'+'a'*64, config)
         dep=next(d for d in docs if d['kind']=='Deployment')
-        self.assertEqual(dep['spec']['replicas'],1)
+        self.assertEqual(dep['spec']['replicas'],3)
         self.assertEqual(dep['spec']['strategy']['type'],'Recreate')
         self.assertFalse(dep['spec']['template']['spec']['automountServiceAccountToken'])
 

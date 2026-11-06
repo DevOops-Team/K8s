@@ -60,7 +60,9 @@ def main():
         path = ROOT/f'onprem/apps/{name}/overlays/onprem/kustomization.yaml'
         data = yaml.safe_load(path.read_text())
         data['images'][0].update(newName=repository,digest=digest)
-        data['replicas'][0]['count'] = 2
+        deployment_path = ROOT/f'onprem/apps/{name}/base/deployment.yaml'
+        deployment = yaml.safe_load(deployment_path.read_text())
+        data['replicas'][0]['count'] = deployment['spec']['replicas']
         save(path,data)
     if args.backend_port:
         for kind in ['deployment','service']:

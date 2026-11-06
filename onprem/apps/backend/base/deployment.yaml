@@ -4,7 +4,12 @@ metadata:
   name: backend
   namespace: platform
 spec:
-  replicas: 2
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   revisionHistoryLimit: 3
   selector:
     matchLabels:
@@ -17,13 +22,13 @@ spec:
       serviceAccountName: backend
       nodeSelector:
         platform-worker: 'true'
-      topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
-        labelSelector:
-          matchLabels:
-            app.kubernetes.io/name: backend
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: backend
+            topologyKey: kubernetes.io/hostname
       imagePullSecrets:
       - name: ghcr-pull
       securityContext:
