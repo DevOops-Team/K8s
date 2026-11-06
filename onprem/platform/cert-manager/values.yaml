@@ -1,0 +1,64 @@
+crds:
+  enabled: true
+replicaCount: 3
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+nodeSelector: &id001
+  platform-worker: 'true'
+tolerations: &id002 []
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: cert-manager
+      topologyKey: kubernetes.io/hostname
+webhook:
+  replicaCount: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  nodeSelector: *id001
+  tolerations: *id002
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: webhook
+        topologyKey: kubernetes.io/hostname
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+    successThreshold: 1
+cainjector:
+  replicaCount: 3
+  nodeSelector: *id001
+  tolerations: *id002
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: cainjector
+        topologyKey: kubernetes.io/hostname
+  enabled: false
+startupapicheck:
+  nodeSelector: *id001
+  tolerations: *id002
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 15
+  failureThreshold: 8
+  successThreshold: 1
+prometheus:
+  enabled: true

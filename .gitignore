@@ -1,0 +1,16 @@
+.env
+*.local.yaml
+*.local.yml
+*.vault.yml
+secrets/
+credentials/
+.venv/
+.build/
+__pycache__/
+.DS_Store
+
+# Local VS Code settings
+.vscode/
+
+# Recovery connection settings (local only)
+*.local.json

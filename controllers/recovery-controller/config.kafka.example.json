@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mode": "observe",
+  "event_source": "kafka",
+  "execution_enabled": false,
+  "aws_region": "ap-northeast-2",
+  "kafka_bootstrap_servers": "YOUR_KAFKA_HOST:9093",
+  "kafka_group_id": "recovery-controller-v1",
+  "fault_topic": "gpu.fault",
+  "result_topic": "recovery.action",
+  "reconcile_seconds": 5,
+  "executor_url": "https://YOUR_EXECUTOR_HOST",
+  "recovery_table": "YOUR_RECOVERY_TABLE",
+  "fencing_table": "devoops-job-fencing",
+  "redispatch_policy": "controller-only",
+  "scheduler_policy_confirmed": false
+}

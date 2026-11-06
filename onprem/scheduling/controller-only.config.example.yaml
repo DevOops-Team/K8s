@@ -1,0 +1,11 @@
+# Merge into the scheduling team owned Kueue Configuration, not kubectl apply directly.
+# A policy: long delay is NOT a permanent disable switch. Confirm workload/incident horizon.
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+multiKueue:
+  workerLostTimeout: 8760h
+waitForPodsReady:
+  timeout: 30m
+  recoveryTimeout: 5m
+  requeuingStrategy:
+    backoffLimitCount: 0

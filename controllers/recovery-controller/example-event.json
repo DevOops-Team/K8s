@@ -1,0 +1,8 @@
+{
+  "event_id": "example-001",
+  "job_id": "training-123",
+  "cluster": "eks-a",
+  "node": "gpu-node-2",
+  "generation": 1,
+  "fault_type": "node_hardware"
+}

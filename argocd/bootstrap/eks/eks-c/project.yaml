@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gpu-eks-c
+  namespace: argocd
+spec:
+  description: eks-c training queues only
+  sourceRepos:
+  - https://github.com/DevOops-Team/K8s.git
+  destinations:
+  - name: eks-c
+    namespace: training
+  - name: eks-c
+    namespace: kueue-system
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  - group: kueue.x-k8s.io
+    kind: ResourceFlavor
+  - group: kueue.x-k8s.io
+    kind: ClusterQueue
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRole
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRoleBinding

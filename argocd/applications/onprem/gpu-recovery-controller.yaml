@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-recovery-controller
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: '0'
+spec:
+  project: gpu-platform
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    syncOptions:
+    - RespectIgnoreDifferences=true
+    - CreateNamespace=false
+    - FailOnSharedResource=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+  - group: coordination.k8s.io
+    kind: Lease
+    name: recovery-controller
+    namespace: platform
+    jsonPointers:
+    - /spec
+  source:
+    repoURL: https://github.com/DevOops-Team/K8s.git
+    targetRevision: develop
+    path: onprem/apps/recovery-controller

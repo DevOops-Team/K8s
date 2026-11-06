@@ -1,0 +1,49 @@
+deployment:
+  replicas: 3
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik
+providers:
+  kubernetesIngress:
+    enabled: true
+    publishedService:
+      enabled: false
+  kubernetesCRD:
+    enabled: false
+service:
+  spec:
+    type: ClusterIP
+nodeSelector:
+  platform-worker: 'true'
+tolerations: []
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+      topologyKey: kubernetes.io/hostname
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+accessLog:
+  enabled: true
+  format: json
+livenessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1

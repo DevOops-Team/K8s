@@ -1,0 +1,15 @@
+{
+  "pk": "job#training-123",
+  "kind": "job",
+  "cluster": "eks-a",
+  "gpu_count": 4,
+  "active_nodes": [
+    "gpu-node-1",
+    "gpu-node-2",
+    "gpu-node-3",
+    "gpu-node-4"
+  ],
+  "jobset_uri": "s3://YOUR_TRAINING_BUCKET/code/training-123/jobset.json",
+  "jobset_sha256": "YOUR_SUBMITTED_JOBSET_SHA256",
+  "allow_restart_from_scratch": false
+}

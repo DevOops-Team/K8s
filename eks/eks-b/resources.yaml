@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: training
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: training
+  namespace: training
+  annotations: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: training-gpu
+spec:
+  nodeLabels:
+    node-role.devoops.site/gpu: 'true'
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: training-pool
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: training
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources:
+    - cpu
+    - memory
+    - nvidia.com/gpu
+    flavors:
+    - name: training-gpu
+      resources:
+      - name: cpu
+        nominalQuota: 32
+      - name: memory
+        nominalQuota: 128Gi
+      - name: nvidia.com/gpu
+        nominalQuota: 4
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: training-queue
+  namespace: training
+spec:
+  clusterQueue: training-pool
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multikueue-manager
+  namespace: kueue-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multikueue-manager
+rules:
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - workloads
+  - workloads/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - jobset.x-k8s.io
+  resources:
+  - jobsets
+  - jobsets/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - clusterqueues
+  - localqueues
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - jobs/status
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: multikueue-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multikueue-manager
+subjects:
+- kind: ServiceAccount
+  name: multikueue-manager
+  namespace: kueue-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devoops-cluster-info
+  namespace: training
+data:
+  CLUSTER_NAME: eks-b
