@@ -70,11 +70,18 @@ class Ctx:
             raise PermissionError(f"jobRef 네임스페이스 {ns} != 요청 네임스페이스 {self.ns}")
         return ns, name
 
+    # status(jobId·toGeneration)는 기록용. 다른 주체도 status를 쓸 수 있으므로 판단에는 쓰지 않고
+    # 매번 spec.jobRef(바꿀 수 없음)와 펜싱 기록에서 다시 구한다
     def job_id(self):
-        return self.st["jobId"]
+        return R.parse_name(self.job()[1])[0]
 
     def to_gen(self):
-        return int(self.st["toGeneration"])
+        """펜싱 기록을 새로 읽어 이 요청의 새 세대. 진행해도 되는 상태가 아니면 PermissionError"""
+        _, old_gen = R.parse_name(self.job()[1])
+        verdict, why, to_gen = R.check_fencing(self.store.get_fencing(self.job_id()), self.spec["requestId"], old_gen)
+        if verdict != "go":
+            raise PermissionError(f"펜싱 기록이 진행 상태가 아님 ({verdict}: {why})")
+        return to_gen
 
 
 # ---------- 단계
@@ -243,6 +250,7 @@ def advance(x: Ctx, allowed_from, new_phase, extra=None):
 def build_new(x: Ctx):
     target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
                                         x.st.get("oldExclude"), x.spec.get("excludeClusters"))
+    # 만들기 직전에 펜싱 기록을 다시 확인 (to_gen이 매번 새로 읽음)
     new = R.render(x.store.get_jobset(x.job_id()), x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude)
     new["metadata"]["namespace"] = x.ns
     return new

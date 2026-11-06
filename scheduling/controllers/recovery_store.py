@@ -1,7 +1,8 @@
 """복구 원본(jobset.json)과 펜싱 기록 읽기·쓰기 (체크포인트 규약 4·5·8절, IAM 답변 11/05).
 
 RECOVERY_STORE=aws       우리 망. S3 GetObject code/{job_id}/jobset.json, DynamoDB GetItem·UpdateItem(테이블 1개)
-RECOVERY_STORE=configmap kind. 관리 클러스터 platform 네임스페이스 ConfigMap으로 흉내
+RECOVERY_STORE=configmap kind. 관리 클러스터 전용 네임스페이스 scheduling-local-store의 ConfigMap으로 흉내
+                         (platform의 다른 ConfigMap에 권한이 닿지 않게 따로 둠)
                          recovery-code-<job_id>    data.jobset.json  (= S3 code/{job_id}/jobset.json)
                          recovery-fencing-<job_id> data.<필드>       (= DynamoDB 항목, 숫자도 문자열로)
                          시나리오(lib.sh)가 백엔드·복구 컨트롤러 몫을 대신 쓴다.
@@ -69,7 +70,7 @@ class AwsStore:
 class ConfigMapStore:
     def __init__(self, api, namespace=None):
         self.core = client.CoreV1Api(api)
-        self.ns = namespace or os.getenv("CONTROLLER_NAMESPACE", "platform")
+        self.ns = namespace or os.getenv("LOCAL_STORE_NAMESPACE", "scheduling-local-store")
 
     def _read(self, name):
         try:

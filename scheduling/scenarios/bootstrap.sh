@@ -12,6 +12,8 @@ say() { echo; echo "[$(date +%H:%M:%S)] === $*"; }
 say "관리 클러스터"
 kubectl --context $MGR apply -k "$ROOT/queues/manager" >/dev/null
 kubectl --context $MGR apply -f "$ROOT/controllers/deploy/crd-relocationrequest.yaml" >/dev/null
+# kind 전용: S3·DynamoDB 대신 복구 원본·펜싱 기록 ConfigMap을 두는 곳
+kubectl --context $MGR create namespace scheduling-local-store --dry-run=client -o yaml | kubectl --context $MGR apply -f - >/dev/null
 kubectl --context $MGR get clusterqueues
 kubectl --context $MGR get multikueueclusters
 

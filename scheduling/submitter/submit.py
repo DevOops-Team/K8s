@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend.platform.svc:8000")
 MODEL = os.getenv("MODEL", "gpt2")
 DATASET = {"id": os.getenv("DATASET_ID", "ds-demo"), "version": int(os.getenv("DATASET_VERSION", "1"))}
+STORE_NS = "scheduling-local-store"   # kind: 복구 원본·펜싱 기록 ConfigMap 자리 (controllers/recovery_store.py)
 HEAVY_MIN_GPUS, MAX_JOB_GPUS = 3, 4   # 백엔드 공용 함수와 같은 규칙 (스케줄링 문서): 3장↑ heavy, 5장↑ 거부
 
 
@@ -118,11 +119,11 @@ class KindSubmitter:
                               (f"recovery-fencing-{job_id}", {"job_id": job_id, "generation": "1", "retry_count": "0"})):
             body = V1.V1ConfigMap(metadata=V1.V1ObjectMeta(name=cm_name), data=data)
             try:
-                self.core.create_namespaced_config_map("platform", body)
+                self.core.create_namespaced_config_map(STORE_NS, body)
             except V1.ApiException as e:
                 if e.status != 409:
                     raise
-                self.core.replace_namespaced_config_map(cm_name, "platform", body)
+                self.core.replace_namespaced_config_map(cm_name, STORE_NS, body)
         try:
             self.co.create_namespaced_custom_object("jobset.x-k8s.io", "v1alpha2", "training", "jobsets", js)
             return job_id, name, q, "201"

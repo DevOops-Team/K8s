@@ -8,7 +8,7 @@
 
 - `keys.py`: 다른 파트와 맞물리는 이름(라벨·어노테이션·CRD). 이름 바꿀 땐 여기만.
 - `placement.py`·`allocation_rules.py`·`recovery_render.py`: 디스패처(빈 패킹)·배분 조정 컨트롤러·재배치 실행기 판단만 떼어 낸 순수 함수. `python -m unittest test_*.py`
-- 재배치 실행기는 복구 컨트롤러가 DynamoDB 세대 +1(`GENERATION_ADVANCED`)을 한 요청만 처리한다. 복구 원본(S3 `code/{job_id}/jobset.json`)에서 JobSet 템플릿 6절 값만 바꿔 `job-{id}-g{4자리}`로 제출하고, `OLD_RUN_STOPPED`·`NEW_RUN_SUBMITTED`·`new_jobset_name/uid`를 조건부로 기록한다(체크포인트 규약 5·8절). 저장소는 `recovery_store.py`: 우리 망 `RECOVERY_STORE=aws`, kind `configmap`(platform의 `recovery-code-<id>`·`recovery-fencing-<id>`를 시나리오가 백엔드·복구 컨트롤러 대신 씀).
+- 재배치 실행기는 복구 컨트롤러가 DynamoDB 세대 +1(`GENERATION_ADVANCED`)을 한 요청만 처리한다. 복구 원본(S3 `code/{job_id}/jobset.json`)에서 JobSet 템플릿 6절 값만 바꿔 `job-{id}-g{4자리}`로 제출하고, `OLD_RUN_STOPPED`·`NEW_RUN_SUBMITTED`·`new_jobset_name/uid`를 조건부로 기록한다(체크포인트 규약 5·8절). 저장소는 `recovery_store.py`: 우리 망 `RECOVERY_STORE=aws`, kind `configmap`(전용 네임스페이스 `scheduling-local-store`의 `recovery-code-<id>`·`recovery-fencing-<id>`를 시나리오가 백엔드·복구 컨트롤러 대신 씀).
 - 워커 접속: 재배치 실행기는 `platform/<워커>-relocator-kubeconfig`(EKS별 relocator SA, `deploy/worker/relocator-rbac.yaml`)를 먼저 쓰고, 없으면 MultiKueue Secret.
 - 셋 다 "N초마다 전체를 다시 보고 하나를 바꾼다"(폴링 루프). 상태는 쿠버네티스 객체에만 있어서 재시작해도 이어서 동작.
 - HA: 컨트롤러마다 레플리카 3개를 `platform-worker=true` 노드(worker1~3)에 하나씩 둠. `leader.py`가 Lease `platform/scheduling-<이름>`으로 리더 하나만 일하게 함(`python -m unittest -v test_leader.py`). 리더 노드가 죽으면 15s(`LEASE_SECONDS`) 안에 넘어가고, 정상 종료면 Lease를 내려놓아 바로 넘어감. `run-local.sh`도 같은 Lease를 다투므로 클러스터 안 Deployment와 동시에 돌려도 하나만 일함.

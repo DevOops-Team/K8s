@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # scheduling/
 MGR=kind-manager
 WORKERS=(worker1 worker2 worker3)
 NS=training          # 학습 잡·재배치 요청 (JobSet 템플릿 합의안)
-CTL_NS=platform      # 컨트롤러·Kueue. kind에서는 S3·DynamoDB 대신 여기 ConfigMap (recovery_store.py)
+CTL_NS=scheduling-local-store   # kind에서 S3·DynamoDB 대신 쓰는 ConfigMap 자리 (recovery_store.py)
 GPU_SEL=node-role.devoops.site/gpu=true
 
 ts() { date +%H:%M:%S; }
@@ -23,7 +23,7 @@ jsname() {
 
 # submit 작업ID GPU수 큐 [유지시간] [추가 어노테이션 "k: v" ...]
 # 백엔드 흉내: JobSet 템플릿 합의안 모양(이름·라벨·subdomain·GENERATION·--master-addr·toleration)으로 1세대를 제출하고
-#   복구 원본(S3 code/{id}/jobset.json 대신 ConfigMap recovery-code-<id>)과
+#   복구 원본(S3 code/{id}/jobset.json 대신 ConfigMap $CTL_NS/recovery-code-<id>)과
 #   펜싱 기록(DynamoDB 대신 ConfigMap recovery-fencing-<id>, generation=1)을 남긴다.
 # Pod GPU수개 x GPU 1장 (노드당 GPU 1개 모양에 맞춤). 학습 대신 KWOK이 유지시간 뒤 Pod를 끝냄
 submit() {

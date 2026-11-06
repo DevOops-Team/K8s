@@ -114,10 +114,15 @@ subjects:
 - {kind: ServiceAccount, name: relocator, namespace: platform}
 ---
 # kind 전용 복구 기록 저장소 (RECOVERY_STORE=configmap): S3 code/{job_id}/jobset.json, DynamoDB 펜싱 테이블 대신
-# ConfigMap recovery-code-<job_id> · recovery-fencing-<job_id>. 우리 망(RECOVERY_STORE=aws)에서는 이 Role 빼도 됨
+# ConfigMap recovery-code-<job_id> · recovery-fencing-<job_id>를 전용 네임스페이스에 둬서 platform ConfigMap에는 권한 없음.
+# 우리 망(RECOVERY_STORE=aws)에서는 이 네임스페이스·Role·RoleBinding을 빼고 배포
+apiVersion: v1
+kind: Namespace
+metadata: {name: scheduling-local-store}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: relocator-local-store, namespace: platform}
+metadata: {name: relocator-local-store, namespace: scheduling-local-store}
 rules:
 - apiGroups: [""]
   resources: [configmaps]
@@ -125,7 +130,7 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: relocator-local-store, namespace: platform}
+metadata: {name: relocator-local-store, namespace: scheduling-local-store}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: relocator-local-store}
 subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
 ---

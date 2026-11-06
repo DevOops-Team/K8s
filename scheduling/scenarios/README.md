@@ -3,7 +3,7 @@
 전제: `../cluster/setup.sh`로 클러스터를 만들고 `./bootstrap.sh`로 큐를 깐 뒤, 다른 터미널에서 `../controllers/run-local.sh` 실행 중. 각 스크립트는 시작할 때 `reset`으로 잡·요청·노드 상태를 원상복구한다.
 
 이름은 JobSet 템플릿 합의안을 따른다: 네임스페이스 `training`, 큐 `queue-heavy/light/recovery`, 잡 `job-<작업ID>-g<세대 4자리>`. 스크립트에서는 작업ID만 쓰고 `jsname`이 이름으로 바꾼다(`jsname train-a 2` = `job-train-a-g0002`).
-`submit`은 백엔드처럼 복구 원본·펜싱 기록(kind에서는 platform ConfigMap)을 남기고, `relocate`는 복구 컨트롤러처럼 세대 +1(`GENERATION_ADVANCED`)을 한 뒤 재배치 요청을 만든다.
+`submit`은 백엔드처럼 복구 원본·펜싱 기록(kind에서는 `scheduling-local-store` 네임스페이스 ConfigMap)을 남기고, `relocate`는 복구 컨트롤러처럼 세대 +1(`GENERATION_ADVANCED`)을 한 뒤 재배치 요청을 만든다.
 
 | # | 스크립트 | 기대 결과 |
 |---|---|---|
