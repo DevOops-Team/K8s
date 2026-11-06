@@ -16,6 +16,7 @@ from kubernetes import client
 
 import keys as K
 import kube
+import leader
 from placement import Cluster, choose, reserve_for_starving, take
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
@@ -213,10 +214,14 @@ def reconcile(mgr, workers, starving_holder):
 
 def main():
     mgr = kube.manager_client()
+    elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)
     log.info("시작: interval=%ss renominate=%ss starve=%ss", INTERVAL, RENOMINATE_SECONDS, STARVE_SECONDS)
     holder = None
     while True:
+        if not elector.leading:
+            time.sleep(1)
+            continue
         try:
             holder = reconcile(mgr, workers, holder)
         except Exception:  # noqa: BLE001

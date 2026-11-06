@@ -21,6 +21,7 @@ import time
 
 import keys as K
 import kube
+import leader
 from allocation_rules import aged
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "10"))
@@ -68,8 +69,12 @@ def reconcile_priority(mgr, wls):
 
 def main():
     mgr = kube.manager_client()
+    elector = leader.Elector(kube.manager_client(), "allocator")
     log.info("시작: interval=%ss aging=%s GPU·s", INTERVAL, AGING_GPU_SECONDS)
     while True:
+        if not elector.leading:
+            time.sleep(1)
+            continue
         try:
             reconcile_priority(mgr, kube.list_workloads(mgr))
         except Exception:  # noqa: BLE001

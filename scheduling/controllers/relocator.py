@@ -26,6 +26,7 @@ from kubernetes import client
 
 import keys as K
 import kube
+import leader
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 내려가길 기다리는 최대 시간
@@ -327,9 +328,13 @@ def reconcile(mgr, workers):
 
 def main():
     mgr = kube.manager_client()
+    elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr)
     log.info("시작: interval=%ss", INTERVAL)
     while True:
+        if not elector.leading:
+            time.sleep(1)
+            continue
         try:
             reconcile(mgr, workers)
         except Exception:  # noqa: BLE001
