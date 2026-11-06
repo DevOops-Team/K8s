@@ -38,3 +38,18 @@ FAST=1 ./normal-training.sh     # 시간 값 축소 (240 GPU·s / 60s), 약 10�
 | 5 | 앞의 4장 잡이 막히면 뒤 3장 잡도 대기 | 배분(1) |
 | 6 | 4장·2장·1장 잡이 대기 시간 x GPU 수 순서로 aged | 배분(3) |
 | 7 | 작은 잡이 계속 와도 4장 잡 입장 (big 대기 중 Light가 몫 4 넘게 새로 못 받음) | 배분(2)·배치(1) |
+
+## 대조군 실험 (`control.sh`)
+
+한 가지만 바꿔 두 번 돌리고 큰 잡의 쿼터·입장 시각과 논 GPU·초를 나란히 찍는다. 판정은 없다. 측정 함수는 `measure-lib.sh`(normal-training.sh와 공용).
+
+```bash
+./control.sh                 # queue, hold, aging 전부 (약 1시간)
+FAST=1 ./control.sh hold     # 골라서, 시간 값 축소
+```
+
+| 실험 | A (현재) | B (대조군) | 보는 것 |
+|---|---|---|---|
+| queue | Heavy/Light 분리 | 큰 잡도 lq-light (= 큐 1개) | 작은 잡이 계속 올 때 4장 잡이 쿼터를 받는지 |
+| hold | 디스패처 비워 두기 켬 | 끔 | 워커마다 1장씩 조각났을 때 4장 잡이 입장하는지 |
+| aging | allocator 켬 | 끔 | Light 2장 잡이 1장 잡들에 밀릴 때 대기 시간 차이 |
