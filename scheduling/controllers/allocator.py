@@ -72,7 +72,7 @@ def main():
     elector = leader.Elector(kube.manager_client(), "allocator")
     log.info("시작: interval=%ss aging=%s GPU·s", INTERVAL, AGING_GPU_SECONDS)
     while True:
-        if not elector.leading:
+        if not elector.is_leader():
             time.sleep(1)
             continue
         try:

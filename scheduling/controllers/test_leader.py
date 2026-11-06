@@ -20,13 +20,13 @@ class FakeCoord:
         if self.down:
             raise OSError("api down")
 
-    def read_namespaced_lease(self, name, ns):
+    def read_namespaced_lease(self, name, ns, **_):
         self._check()
         if self.lease is None:
             raise client.ApiException(status=404)
         return copy.deepcopy(self.lease)
 
-    def create_namespaced_lease(self, ns, body):
+    def create_namespaced_lease(self, ns, body, **_):
         self._check()
         if self.lease is not None:
             raise client.ApiException(status=409)
@@ -34,7 +34,7 @@ class FakeCoord:
         body.metadata.resource_version = str(self.rv)
         self.lease = copy.deepcopy(body)
 
-    def replace_namespaced_lease(self, name, ns, body):
+    def replace_namespaced_lease(self, name, ns, body, **_):
         self._check()
         if body.metadata.resource_version != self.lease.metadata.resource_version:
             raise client.ApiException(status=409)
@@ -119,6 +119,13 @@ class TestElector(unittest.TestCase):
         with mock.patch.object(leader.os, "_exit", side_effect=SystemExit):
             with self.assertRaises(SystemExit):
                 self.a.step()
+
+    def test_is_leader_false_after_stale_renew(self):
+        self.a.step()
+        self.assertTrue(self.a.is_leader())
+        self.clock.t += leader.LEASE_SECONDS     # 갱신 스레드가 멈춘 상황
+        self.assertTrue(self.a.leading)
+        self.assertFalse(self.a.is_leader())
 
 
 if __name__ == "__main__":

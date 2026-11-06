@@ -219,7 +219,7 @@ def main():
     log.info("시작: interval=%ss renominate=%ss starve=%ss", INTERVAL, RENOMINATE_SECONDS, STARVE_SECONDS)
     holder = None
     while True:
-        if not elector.leading:
+        if not elector.is_leader():
             time.sleep(1)
             continue
         try:

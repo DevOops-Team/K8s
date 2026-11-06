@@ -332,7 +332,7 @@ def main():
     workers = kube.Workers(mgr)
     log.info("시작: interval=%ss", INTERVAL)
     while True:
-        if not elector.leading:
+        if not elector.is_leader():
             time.sleep(1)
             continue
         try:

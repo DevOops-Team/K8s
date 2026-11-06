@@ -2,13 +2,14 @@
 
     elector = leader.Elector(kube.manager_client(), "dispatcher")   # 갱신 스레드가 바로 시작
     while True:
-        if elector.leading:     # 리더일 때만 일함
+        if elector.is_leader(): # 리더 + 갱신이 기간 안일 때만 일함
             reconcile(...)
         time.sleep(INTERVAL)
 
 - 갱신은 따로 도는 스레드가 RENEW_SECONDS마다 한다. 워커가 끊겨 reconcile 한 바퀴가 길어져도 리더를 안 잃음.
 - 갱신은 resourceVersion을 실은 replace라서 두 개가 동시에 잡으려 하면 하나는 409로 진다.
 - 남의 Lease가 만료됐는지는 상대 시계(renewTime)가 아니라 "내가 본 값이 마지막으로 바뀐 뒤 지난 시간"으로 판단 (노드 시계 차이 무시).
+- Lease 요청은 REQUEST_TIMEOUT(3s)으로 끊고, 갱신 기준 시각은 요청을 보내기 전. 감시 스레드가 마지막 갱신 뒤 LEASE_SECONDS가 지나면 끝냄.
 - 리더가 갱신에 실패하거나 남에게 넘어간 걸 보면 프로세스를 바로 끝낸다(os._exit).
   다른 레플리카가 이미 이어받았을 수 있어서, 하던 reconcile이 한 번 더 바꾸는 일을 막으려는 것. 재시작은 Deployment가 함.
 - SIGTERM·SIGINT를 받으면 리더였을 때 Lease를 비우고(holderIdentity 없음) 바로 끝낸다.
@@ -29,6 +30,7 @@ log = logging.getLogger("leader")
 
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "15"))
 RENEW_SECONDS = int(os.getenv("RENEW_SECONDS", "5"))
+REQUEST_TIMEOUT = 3  # Lease 요청이 멈춰 리더 표시만 남는 일 막음 (RENEW_SECONDS보다 짧게)
 NAMESPACE = os.getenv("CONTROLLER_NAMESPACE", "job-placement")
 
 
@@ -47,9 +49,24 @@ class Elector:
         self.renewed_at = None              # 내가 마지막으로 갱신에 성공한 시각
         self._seen, self._seen_at = None, None
         if self.enabled and start:
+            threading.Thread(target=self._watchdog, daemon=True).start()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, self._on_signal)
             threading.Thread(target=self._loop, daemon=True).start()
+
+    def is_leader(self) -> bool:
+        """리더 표시 + 마지막 갱신이 Lease 기간 안. 메인 루프는 매번 이걸로 확인."""
+        if not self.enabled:
+            return True
+        return self.leading and self.renewed_at is not None and self.clock() - self.renewed_at < LEASE_SECONDS
+
+    def _watchdog(self):
+        """갱신 스레드가 요청에서 멈춰도, Lease 기간이 지나면 하던 reconcile째 끝냄."""
+        while True:
+            if self.leading and self.renewed_at is not None and self.clock() - self.renewed_at >= LEASE_SECONDS:
+                log.error("리더인데 %ss 넘게 갱신 못 함 -> 종료", LEASE_SECONDS)
+                os._exit(1)
+            time.sleep(0.5)
 
     def _on_signal(self, signum, _frame):
         if self.leading:
@@ -59,11 +76,11 @@ class Elector:
     def release(self):
         """내가 잡고 있으면 Lease를 비운다. 실패해도 LEASE_SECONDS 뒤엔 남이 가져감."""
         try:
-            lease = self.coord.read_namespaced_lease(self.lease_name, NAMESPACE)
+            lease = self.coord.read_namespaced_lease(self.lease_name, NAMESPACE, _request_timeout=REQUEST_TIMEOUT)
             if lease.spec and lease.spec.holder_identity == self.identity:
                 lease.spec.holder_identity = None
                 lease.spec.renew_time = _now()
-                self.coord.replace_namespaced_lease(self.lease_name, NAMESPACE, lease)
+                self.coord.replace_namespaced_lease(self.lease_name, NAMESPACE, lease, _request_timeout=REQUEST_TIMEOUT)
                 log.info("Lease %s 내려놓음", self.lease_name)
         except Exception as e:  # noqa: BLE001
             log.warning("Lease %s 내려놓기 실패: %s", self.lease_name, e)
@@ -93,7 +110,7 @@ class Elector:
 
     def _try(self) -> bool:
         try:
-            lease = self.coord.read_namespaced_lease(self.lease_name, NAMESPACE)
+            lease = self.coord.read_namespaced_lease(self.lease_name, NAMESPACE, _request_timeout=REQUEST_TIMEOUT)
         except client.ApiException as e:
             if e.status != 404:
                 raise
@@ -114,6 +131,7 @@ class Elector:
                 return False                          # 남이 살아 있음
             log.info("Lease %s: %s 가 %ss 넘게 갱신 안 함 -> 가져옴", self.lease_name, holder, duration)
 
+        sent = self.clock()
         t = _now()
         if holder != self.identity:
             spec.acquire_time = t
@@ -123,25 +141,26 @@ class Elector:
         spec.renew_time = t
         lease.spec = spec
         try:
-            self.coord.replace_namespaced_lease(self.lease_name, NAMESPACE, lease)
+            self.coord.replace_namespaced_lease(self.lease_name, NAMESPACE, lease, _request_timeout=REQUEST_TIMEOUT)
         except client.ApiException as e:
             if e.status == 409:                       # 그 사이 남이 먼저 바꿈
                 return False
             raise
-        self.renewed_at = self.clock()
+        self.renewed_at = sent
         return True
 
     def _create(self) -> bool:
+        sent = self.clock()
         t = _now()
         body = client.V1Lease(
             metadata=client.V1ObjectMeta(name=self.lease_name, namespace=NAMESPACE),
             spec=client.V1LeaseSpec(holder_identity=self.identity, lease_duration_seconds=LEASE_SECONDS,
                                     acquire_time=t, renew_time=t, lease_transitions=0))
         try:
-            self.coord.create_namespaced_lease(NAMESPACE, body)
+            self.coord.create_namespaced_lease(NAMESPACE, body, _request_timeout=REQUEST_TIMEOUT)
         except client.ApiException as e:
             if e.status == 409:                       # 동시에 만든 쪽이 이김
                 return False
             raise
-        self.renewed_at = self.clock()
+        self.renewed_at = sent
         return True
