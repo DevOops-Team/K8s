@@ -17,7 +17,7 @@ from kubernetes import client
 import keys as K
 import kube
 import leader
-from placement import Cluster, choose, reserve_for_starving, take
+from placement import Cluster, choose, reserve_for_starving
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
@@ -144,9 +144,7 @@ def reconcile(mgr, workers, starving_holder):
     for wl in wls:
         for n in (wl["status"].get("nominatedClusterNames") or []):
             if n in by_name:
-                c, pods = by_name[n], kube.workload_pods(wl)
-                c.use(sum(pods), is_recovery(wl))
-                c.node_free = [f for f in take(pods, c.nodes_for(is_recovery(wl))) if f > 0]
+                by_name[n].place(kube.workload_pods(wl), is_recovery(wl))
 
     # 우선순위 높은 순, 같으면 먼저 온 순
     wls.sort(key=lambda w: (-(w["spec"].get("priority") or 0), w["metadata"]["creationTimestamp"]))
@@ -156,14 +154,22 @@ def reconcile(mgr, workers, starving_holder):
     for wl in wls:
         qr = kube.cond(wl, "QuotaReserved")
         if kube.since(qr["lastTransitionTime"]) > STARVE_SECONDS and not wl["status"].get("nominatedClusterNames"):
+            ann = kube.owner_annotations(mgr, wl)
+            if ann.get(K.ANN_MANUAL) == "true":   # 디스패처가 지명하지 않는 잡 -> 비워 둬도 소용없음
+                continue
             holder = wl["metadata"]["uid"]
-            r = reserve_for_starving(kube.workload_pods(wl), clusters)
+            prev = starving_holder[1] if starving_holder and starving_holder[0] == holder else None
+            # 그 잡이 갈 수 있는 곳만 비워 둔다 (target 고정 복구 잡인데 다른 클러스터를 비우면 둘 다 막힘)
+            r = reserve_for_starving(kube.workload_pods(wl), clusters, recovery=is_recovery(wl),
+                                     target=ann.get(K.ANN_TARGET), exclude=csv(ann.get(K.ANN_EXCLUDE)), prev=prev)
             if r:
                 blocked.add(r)
                 if starving_holder != (holder, r):
                     log.info("굶주림 방지: %s (GPU %d) 몫으로 %s 비워 둠",
                              wl["metadata"]["name"], sum(kube.workload_pods(wl)), r)
                 starving_holder = (holder, r)
+            else:   # 갈 수 있는 곳이 하나도 없음 (전부 펜싱·exclude) -> 아무것도 비워 두지 않음
+                starving_holder = None
             break
     else:
         starving_holder = None
@@ -205,8 +211,7 @@ def reconcile(mgr, workers, starving_holder):
             continue
         patch_nomination(mgr, wl, pick, tried)
         c = by_name[pick]
-        c.use(sum(pods), rec)
-        c.node_free = [f for f in take(pods, c.nodes_for(rec)) if f > 0]
+        c.place(pods, rec)
         log.info("%s (GPU %d%s) -> %s  [남은 쿼터 학습 %d / 복구 %d]", name, sum(pods), ", 복구" if rec else "",
                  pick, c.quota_free, c.recovery_free)
     return starving_holder

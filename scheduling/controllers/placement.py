@@ -27,6 +27,24 @@ class Cluster:
             gpus -= own
         self.quota_free -= gpus
 
+    def place(self, pods: list, recovery: bool):
+        """잡 하나가 이 클러스터에 들어갔다고 기록 (쿼터 + 노드). 같은 루프 안 이중 배정 방지.
+        노드는 일반 빈자리와 예비 자리를 따로 셈: 복구 잡은 둘 다 쓸 수 있지만(같은 크기면 예비부터),
+        쓰고 남은 예비 자리가 일반 빈자리로 섞이면 학습 잡이 예비 노드를 빈자리로 보게 된다."""
+        self.use(sum(pods), recovery)
+        slots = [[f, False] for f in self.node_free]
+        if recovery:
+            slots += [[f, True] for f in self.spare_free]
+        slots.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        for need in sorted(pods, reverse=True):
+            for s in slots:
+                if s[0] >= need:
+                    s[0] -= need
+                    break
+        self.node_free = [f for f, spare in slots if not spare and f > 0]
+        if recovery:
+            self.spare_free = [f for f, spare in slots if spare and f > 0]
+
 
 def fits(pods: list, nodes: list) -> bool:
     """Pod별 GPU 요청(pods)이 노드별 남은 GPU(nodes)에 전부 들어가는지. 큰 것부터 first-fit."""
@@ -39,17 +57,6 @@ def fits(pods: list, nodes: list) -> bool:
         else:
             return False
     return True
-
-
-def take(pods: list, nodes: list) -> list:
-    """fits와 같은 방식으로 자리를 차지한 뒤 남은 노드 목록을 돌려준다 (같은 루프 안 이중 배정 방지)."""
-    free = sorted(nodes, reverse=True)
-    for need in sorted(pods, reverse=True):
-        for i, f in enumerate(free):
-            if f >= need:
-                free[i] -= need
-                break
-    return free
 
 
 def eligible(c: Cluster, target=None, exclude=frozenset(), blocked=frozenset()) -> bool:
@@ -75,14 +82,19 @@ def choose(pods: list, clusters: list, *, recovery=False, target=None,
     return best[1].name if best else None
 
 
-def reserve_for_starving(pods: list, clusters: list, exclude=frozenset()):
-    """오래 기다린 큰 잡을 위해 비워 둘 클러스터: 지금 가장 많이 비어 있는 곳.
-    그 클러스터에는 다른 잡을 새로 보내지 않아서, 돌던 잡이 끝나면 큰 잡이 들어간다."""
+def reserve_for_starving(pods: list, clusters: list, *, recovery=False, target=None,
+                         exclude=frozenset(), prev=None):
+    """오래 기다린 큰 잡을 위해 비워 둘 클러스터: 그 잡이 갈 수 있는 곳(target·exclude·펜싱) 중 가장 많이 비어 있는 곳.
+    그 클러스터에는 다른 잡을 새로 보내지 않아서, 돌던 잡이 끝나면 큰 잡이 들어간다.
+    prev(지난 루프에 비워 두던 곳)가 아직 갈 수 있는 곳이면 그대로 둔다 (루프마다 바뀌면 어느 곳도 안 비워짐)."""
+    by_name = {c.name: c for c in clusters}
+    if prev in by_name and eligible(by_name[prev], target, exclude):
+        return prev
     best = None
     for c in clusters:
-        if not eligible(c, exclude=exclude):
+        if not eligible(c, target, exclude):
             continue
-        key = (-min(c.quota_free, sum(c.node_free)), c.name)
+        key = (-min(c.quota_for(recovery), sum(c.nodes_for(recovery))), c.name)
         if best is None or key < best[0]:
             best = (key, c)
     return best[1].name if best else None

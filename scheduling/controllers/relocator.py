@@ -10,6 +10,7 @@ action:
   moveToOtherCluster  (예비 소진, SDC) 의심 노드 cordon·taint -> 원래 클러스터를 빼고 재제출.
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
   evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
+                   잡이 아직 워커에 안 보내졌으면 펜싱은 건너뛰고 재제출만
 
 자리는 정하지 않는다. 재제출한 잡도 디스패처를 다시 거친다.
 
@@ -161,6 +162,10 @@ def isolate(x: Ctx):
         if not src:
             raise PermissionError(f"잡이 아직 워커에 안 보내져서 {nodes}를 어느 클러스터에서 격리할지 모름")
         cordon_nodes(x, src, nodes)
+    elif action == "evacuateCluster" and not src:
+        # 잡이 아직 워커에 안 보내졌음 -> 어느 클러스터를 펜싱할지 모름. 펜싱은 건너뛰고
+        # 옛 잡 내리기·재제출만 한다 (재제출본은 spec.excludeClusters를 피해서 감)
+        log.warning("%s: 잡이 워커에 보내지기 전이라 펜싱할 클러스터 없음 -> 펜싱 건너뜀", x.name)
     elif action == "evacuateCluster":
         x.co.patch_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", src,
                                          {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
@@ -269,12 +274,41 @@ def resubmit(x: Ctx):
         made = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
         if (made["metadata"].get("annotations") or {}).get(K.ANN_RECOVERY_ID) != x.spec["requestId"]:
             raise PermissionError(f"{name}이 이미 있는데 다른 복구가 만든 것") from e
-    advance(x, ("OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"), "NEW_RUN_SUBMITTED",
-            {"new_jobset_name": name, "new_jobset_uid": made["metadata"]["uid"]})
+    try:
+        advance(x, ("OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"), "NEW_RUN_SUBMITTED",
+                {"new_jobset_name": name, "new_jobset_uid": made["metadata"]["uid"]})
+    except PermissionError as e:
+        # 만든 사이 펜싱 기록이 다른 복구로 넘어감 -> 이 JobSet은 기록에 없는 실행. 남겨 두면 이중 실행이라 지운다.
+        # (끊김 같은 일시 오류는 여기 안 옴: 다음 루프에서 409 -> 같은 복구 확인 -> 다시 기록)
+        if withdraw(x, ns, name, made["metadata"]["uid"]):
+            raise PermissionError(f"{e} -> 만든 {name} 철회함") from e
+        raise PermissionError(f"{e} -> 만든 {ns}/{name} 철회 실패, 손으로 지울 것") from e
     x.save(resubmittedAt=kube.now_rfc3339(), newJob=f"{ns}/{name}")
     ann = new["metadata"]["annotations"]
     log.info("%s: 재제출 %s (%s, exclude=%s, target=%s) -> NEW_RUN_SUBMITTED", x.name, name, K.RECOVERY_QUEUE,
              ann.get(K.ANN_EXCLUDE, "-"), ann.get(K.ANN_TARGET, "-"))
+
+
+def withdraw(x: Ctx, ns, name, uid):
+    """이 요청이 만든 JobSet만 지운다 (uid 전제조건: 그 사이 같은 이름으로 다시 만든 남의 것은 안 지움).
+    지웠거나 이미 없으면 True. 요청은 곧 Failed로 끝나 다시 안 오므로 여기서 몇 번 더 시도한다"""
+    for i in range(3):
+        try:
+            x.co.delete_namespaced_custom_object(
+                K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name,
+                body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid),
+                                            propagation_policy="Background"))
+            log.warning("%s: 기록 못 한 재제출 잡 %s/%s 철회", x.name, ns, name)
+            return True
+        except client.ApiException as e:
+            if e.status in (404, 409):   # 404 이미 없음 / 409 uid가 다름 = 남의 것
+                return True
+            err = e.status
+        except Exception as e:  # noqa: BLE001  끊김
+            err = type(e).__name__
+        time.sleep(1 + i)
+    log.error("%s: 재제출 잡 %s/%s 철회 실패 (%s) - 손으로 지울 것", x.name, ns, name, err)
+    return False
 
 
 def watch_admit(x: Ctx):
