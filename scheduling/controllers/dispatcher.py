@@ -6,8 +6,7 @@
 
 추가 규칙:
   - 지명했는데 RENOMINATE_SECONDS 안에 워커에서 입장 못 하면 다른 곳으로 다시 지명
-  - 못 들어간 시간 x GPU 수가 STARVE_GPU_SECONDS를 넘은 잡이 있으면, 가장 빈 워커 하나를 그 잡 몫으로 비워 둠 (굶주림 방지)
-    (기본 480 = 4장 2분, 2장 4분, 1장 8분. aging과 같은 단위라 큰 잡일수록 빨리 비워 둔다)
+  - STARVE_SECONDS 넘게 못 들어간 큰 잡이 있으면, 가장 빈 워커 하나를 그 잡 몫으로 비워 둠 (굶주림 방지)
   - 워커가 전부 끊기면 아무것도 안 함 (pfSense 장애처럼 "우리 쪽 문제"일 수 있음)
 """
 import os
@@ -19,11 +18,10 @@ import keys as K
 import kube
 import leader
 from placement import Cluster, choose, reserve_for_starving
-from allocation_rules import aged
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
-STARVE_GPU_SECONDS = int(os.getenv("STARVE_GPU_SECONDS", "480"))
+STARVE_SECONDS = int(os.getenv("STARVE_SECONDS", "120"))
 
 kube.setup_logging("dispatcher")
 log = kube.logging.getLogger("dispatcher")
@@ -151,12 +149,11 @@ def reconcile(mgr, workers, starving_holder):
     # 우선순위 높은 순, 같으면 먼저 온 순
     wls.sort(key=lambda w: (-(w["spec"].get("priority") or 0), w["metadata"]["creationTimestamp"]))
 
-    # 굶주림: 가장 오래 기다린 잡이 대기 시간 x GPU 수로 STARVE_GPU_SECONDS를 넘으면 워커 하나를 그 잡 몫으로 잡아 둔다
+    # 굶주림: 가장 오래 기다린 잡이 STARVE_SECONDS를 넘으면 워커 하나를 그 잡 몫으로 잡아 둔다
     blocked, holder = set(), None
     for wl in wls:
         qr = kube.cond(wl, "QuotaReserved")
-        if (not wl["status"].get("nominatedClusterNames")
-                and aged(kube.since(qr["lastTransitionTime"]), sum(kube.workload_pods(wl)), STARVE_GPU_SECONDS)):
+        if kube.since(qr["lastTransitionTime"]) > STARVE_SECONDS and not wl["status"].get("nominatedClusterNames"):
             ann = kube.owner_annotations(mgr, wl)
             if ann.get(K.ANN_MANUAL) == "true":   # 디스패처가 지명하지 않는 잡 -> 비워 둬도 소용없음
                 continue
@@ -224,7 +221,7 @@ def main():
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)
-    log.info("시작: interval=%ss renominate=%ss starve=%s GPU·s", INTERVAL, RENOMINATE_SECONDS, STARVE_GPU_SECONDS)
+    log.info("시작: interval=%ss renominate=%ss starve=%ss", INTERVAL, RENOMINATE_SECONDS, STARVE_SECONDS)
     holder = None
     while True:
         if not elector.is_leader():

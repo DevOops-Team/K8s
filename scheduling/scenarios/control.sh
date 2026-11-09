@@ -10,7 +10,7 @@
 # 실험          바꾸는 것 (A = 현재 구성 / B = 대조군)                         상황
 #   queue       A Heavy/Light 분리 / B 큰 잡도 queue-light에 넣음 (= 큐 1개 12장 BestEffortFIFO)
 #                                                                              Light 12장 꽉 참 + 1장 잡이 계속 옴 -> 4장 잡
-#   hold        A 디스패처 비워 두기 켬 / B 끔 (STARVE_GPU_SECONDS 아주 크게)       워커마다 1장 잡 3개(target 고정)로 조각남 + 1장 잡이 계속 옴 -> 4장 잡
+#   hold        A 디스패처 비워 두기 켬 / B 끔 (STARVE_SECONDS 아주 크게)       워커마다 1장 잡 3개(target 고정)로 조각남 + 1장 잡이 계속 옴 -> 4장 잡
 #   aging       A allocator 켬 / B 끔 (dispatcher·relocator만)                Light 꽉 참 + 1장 잡이 계속 옴 -> 2장 잡(Light)
 #
 # queue B에서 큐 설정은 안 바꾼다. 큰 잡이 Light로 가면 Heavy 몫을 빌려야 하므로 KEP-83 막기가 안 걸리고,
@@ -23,11 +23,11 @@ set +e
 source "$HERE/measure-lib.sh"
 
 if [ "${FAST:-0}" = 1 ]; then
-  export AGING_GPU_SECONDS=240 STARVE_GPU_SECONDS=240
+  export AGING_GPU_SECONDS=240 STARVE_SECONDS=60
 else
-  export AGING_GPU_SECONDS=${AGING_GPU_SECONDS:-720} STARVE_GPU_SECONDS=${STARVE_GPU_SECONDS:-480}
+  export AGING_GPU_SECONDS=${AGING_GPU_SECONDS:-720} STARVE_SECONDS=${STARVE_SECONDS:-120}
 fi
-DEFAULT_STARVE=$STARVE_GPU_SECONDS
+DEFAULT_STARVE=$STARVE_SECONDS
 MAX_WAIT=${MAX_WAIT:-600}   # 큰 잡을 이만큼 기다려도 못 들어가면 "못 들어감"으로 기록
 
 LOG="$HERE/logs/control-$(date +%m%d-%H%M)"
@@ -117,8 +117,8 @@ exp_queue() {
 }
 
 exp_hold() {
-  say "hold A: 비워 두기 켬 (STARVE_GPU_SECONDS=$DEFAULT_STARVE)"
-  STARVE_GPU_SECONDS=$DEFAULT_STARVE start_ctl hold-A
+  say "hold A: 비워 두기 켬 (STARVE_SECONDS=$DEFAULT_STARVE)"
+  STARVE_SECONDS=$DEFAULT_STARVE start_ctl hold-A
   fill_fragmented; start_feeder
   submit_auto big 4 20m
   track hold "A 비워 두기 켬" big
@@ -126,7 +126,7 @@ exp_hold() {
   stop_ctl; reset_all
 
   say "hold B: 비워 두기 끔"
-  STARVE_GPU_SECONDS=100000000 start_ctl hold-B
+  STARVE_SECONDS=100000000 start_ctl hold-B
   fill_fragmented; start_feeder
   submit_auto big 4 20m
   track hold "B 비워 두기 끔" big
@@ -155,7 +155,7 @@ if [ "${SKIP_BOOTSTRAP:-0}" != 1 ]; then
   echo "[$(ts)] 준비 중... (진행: tail -f $LOG/bootstrap.log)"
   bash "$HERE/bootstrap.sh" > "$LOG/bootstrap.log" 2>&1 || { echo "준비 실패 -> $LOG/bootstrap.log"; exit 1; }
 fi
-echo "시간 값: aging=${AGING_GPU_SECONDS} GPU·s starve=${DEFAULT_STARVE} GPU·s 최대 대기=${MAX_WAIT}s"
+echo "시간 값: aging=${AGING_GPU_SECONDS} GPU·s starve=${DEFAULT_STARVE}s 최대 대기=${MAX_WAIT}s"
 
 pick=("$@")
 [ ${#pick[@]} -eq 0 ] && pick=(queue hold aging)
