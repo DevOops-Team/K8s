@@ -4,7 +4,7 @@
   "event_source": "kafka",
   "execution_enabled": false,
   "aws_region": "us-east-2",
-  "kafka_bootstrap_servers": "YOUR_KAFKA_HOST:9093",
+  "kafka_bootstrap_servers": "172.30.0.40:9092,172.30.0.41:9092,172.30.0.42:9092",
   "kafka_group_id": "recovery-controller-v1",
   "fault_topic": "gpu.fault",
   "result_topic": "recovery.action",
@@ -15,8 +15,8 @@
   "scheduler_policy_confirmed": false,
   "job_namespace": "training",
   "watchdog": {
-    "enabled": true,
-    "url": "http://172.30.0.35:9093/api/v2/alerts",
+    "enabled": false,
+    "url": "http://YOUR_ALERTMANAGER_HOST:9093/api/v2/alerts",
     "timeout_seconds": 300,
     "poll_seconds": 30
   },

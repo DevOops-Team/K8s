@@ -6,7 +6,6 @@
 |---|---|
 | frontend / backend | 현재 열린 HTTP 포트 TCP 검사. startupProbe 성공 후 적용 |
 | recovery-controller | /healthz HTTP. Kafka/worker 연결 상태는 /readyz로 분리 |
-| cloudflared | 로컬 metrics 포트 TCP. 터널 연결 여부는 기존 /ready로 분리 |
 | Traefik | 공식 차트의 /ping 기반 프로브 |
 | cert-manager controller / webhook | 공식 차트의 /livez 기반 프로브 |
 | cert-manager cainjector | metrics 포트 TCP. 별도 매니페스트로 관리 |

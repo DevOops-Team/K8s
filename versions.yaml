@@ -4,5 +4,4 @@ externalControllers:
   jobset: 0.13.0
 traefikChart: 42.2.0
 certManagerChart: v1.21.3
-cloudflaredImage: cloudflare/cloudflared:2026.10.7
 argocdBootstrap: 3.5.7

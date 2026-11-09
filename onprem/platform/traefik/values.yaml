@@ -18,7 +18,16 @@ providers:
     enabled: false
 service:
   spec:
-    type: ClusterIP
+    type: NodePort
+    externalTrafficPolicy: Cluster
+ports:
+  web:
+    expose:
+      default: false
+  websecure:
+    expose:
+      default: true
+    nodePort: 30443
 nodeSelector:
   platform-worker: 'true'
 tolerations: []

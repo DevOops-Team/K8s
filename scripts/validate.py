@@ -16,6 +16,21 @@ def suffix(target):return 'onprem' if target=='onprem' else 'eks/'+target
 
 def applications(target):return build(ROOT/'argocd/applications'/suffix(target))
 
+def check_recovery_identity(resources, app):
+    """Keep Deployment, Lease and cross-namespace RBAC on the documented identity."""
+    assert app['spec']['destination']['namespace']=='platform', 'Recovery Argo destination must be platform'
+    lease_ignore=next(x for x in app['spec']['ignoreDifferences'] if x['kind']=='Lease')
+    assert lease_ignore['namespace']=='platform' and lease_ignore['name']=='recovery-controller'
+    for resource in resources:
+        expected='training' if resource['metadata']['name']=='recovery-controller-relocation' else 'platform'
+        assert resource['metadata']['namespace']==expected, ('Recovery namespace mismatch',resource['kind'])
+        if resource['kind']=='Deployment':
+            assert resource['spec']['template']['spec']['serviceAccountName']=='recovery-controller'
+        if resource['kind']=='RoleBinding':
+            assert resource['subjects']==[{'kind':'ServiceAccount','name':'recovery-controller','namespace':'platform'}]
+            role=next(x for x in resources if x['kind']=='Role' and x['metadata']['name']==resource['roleRef']['name'])
+            assert role['metadata']['namespace']==resource['metadata']['namespace']
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--target',choices=['all']+TARGETS,default='all');p.add_argument('--ready',action='store_true')
@@ -83,6 +98,13 @@ def main():
             assert type(q['nominalQuota']) is int and 1<=q['nominalQuota']<=4
             assert any(d['kind']=='ResourceFlavor' and d['spec']['nodeLabels'] for d in resources)
     if 'onprem' in targets:
+        recovery_app=next(a for a in apps if a['metadata']['name']=='gpu-recovery-controller')
+        check_recovery_identity(build(ROOT/'onprem/apps/recovery-controller'), recovery_app)
+        assert not any(a['metadata']['name']=='gpu-cloudflared' for a in apps)
+        traefik=yaml.safe_load((ROOT/'onprem/platform/traefik/values.yaml').read_text())
+        assert traefik['service']['spec']['type']=='NodePort'
+        assert traefik['ports']['websecure']['nodePort']==30443
+        assert traefik['ports']['web']['expose']['default'] is False
         web=build(ROOT/'onprem/platform/web');ingress=next(d for d in web if d['kind']=='Ingress')
         assert ingress['spec']['rules'][0]['host']=='devoops.site'
         assert ingress['spec']['rules'][0]['http']['paths'][0]['backend']['service']['name']=='frontend'

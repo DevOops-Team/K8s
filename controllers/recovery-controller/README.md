@@ -6,7 +6,7 @@ RelocationRequest 생성 → DynamoDB 단계 확인 → 학습 진행 확인 →
 
 ## 배포와 인증
 
-Deployment·ServiceAccount는 platform/recovery-controller입니다.
+Deployment·ServiceAccount는 platform/recovery-controller입니다. 최신 스케줄링 문서와 일치하는 현재 배포 기준이며, 과거 IAM 요청에 적힌 recovery namespace를 추가하지 않습니다. 이름을 바꾸려면 Argo destination·Lease·RBAC subject·Secret·온프레 AWS 인증 연결을 함께 검토해야 합니다. [팀 정합성 기준](../../docs/team-contract.md)을 참고합니다.
 기본 매니페스트는 replicas=0이고 렌더러는 실제 digest로 고정된 이미지와 3개 복제본을 생성합니다.
 Kafka 모드에서는 Lease 리더만 소비·복구 작업을 실행합니다.
 관찰 모드의 사건은 OBSERVED로 끝나며 실행 모드 전환 뒤 자동 재실행하지 않습니다.
@@ -21,7 +21,9 @@ AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 �
 리전은 예시 us-east-2, fencing_table은 devoops-prod-fencing입니다.
 recovery_table의 실제 이름과 초기 job 배치 메타데이터는 별도 준비합니다.
 DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateItem/Scan입니다.
-Kafka 인증은 recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
+Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
+config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.
+모니터링 서비스 VIP 172.30.0.35는 예약 상태이므로 watchdog은 기본 비활성화입니다. Alertmanager의 실제 URL·포트와 접근 경로를 확인한 뒤 URL을 입력하고 활성화합니다.
 이 컨트롤러는 EC2/S3/SQS API나 EKS API를 직접 호출하지 않습니다.
 
 ## 로컬 테스트·빌드

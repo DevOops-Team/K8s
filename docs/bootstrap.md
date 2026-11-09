@@ -19,7 +19,7 @@ root/Application 리소스는 중앙 Argo가 있는 온프레미스 argocd names
 6. Argo CLI 등으로 EKS를 eks-a라는 이름으로 등록합니다. cluster registration credential과 MultiKueue 전용 kubeconfig는 다릅니다.
 7. eks/seed-registry.yml, eks/register-root.yml을 EKS A 입력으로 실행하고 gpu-root-eks-a → gpu-queues-eks-a를 sync합니다. B/C는 해당 파일로 각각 실행합니다.
 8. onprem/register-worker-credential.yml은 선택한 EKS의 MultiKueue kubeconfig를 매니저에만 등록합니다. 이후 매니저의 gpu-multikueue를 sync합니다.
-9. Cloudflare의 외부 API 구성과 cloudflared-token 공급 후 gpu-cloudflared를 sync합니다.
+9. [DNS 진입점 전환](dns-entrypoint.md)에 따라 pfSense → Traefik:30443의 HTTPS 연결을 외부에서 확인한 뒤 gpu-iac DNS 플레이북을 실행합니다.
 
 EKS가 없거나 접근·인증이 준비되지 않았으면 관련 명령은 성공하지 않습니다. 예시만으로 AWS 자원을 생성하지 않으며 실제 값·권한을 요구합니다.
 AppProject/root 변경은 해당 bootstrap 경로로 register-root를 다시 실행합니다. 자식 Application 정의 변경은 해당 root를 sync하고, 이미지 digest 같은 소스 변경은 자동 sync를 켠 해당 자식 앱이 읽습니다.

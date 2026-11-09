@@ -6,7 +6,7 @@ GitHub: https://github.com/DevOops-Team/K8s.git / develop.
 ```text
 onprem/
 ├─ apps/frontend, backend/   # 플랫폼 앱; backend는 내부 ClusterIP만 사용
-├─ platform/                # namespace·Traefik·cert-manager·웹·cloudflared
+├─ platform/                # namespace·Traefik·cert-manager·웹
 └─ scheduling/              # 매니저 큐·MultiKueue
 
 eks/
@@ -23,7 +23,7 @@ argocd/
 ├─ bootstrap/eks/eks-b/
 ├─ bootstrap/eks/eks-c/
 └─ applications/
-   ├─ onprem/               # 온프레미스 구성 요소 Application 8개
+   ├─ onprem/               # 온프레미스 구성 요소 Application
    └─ eks/eks-{a,b,c}/       # EKS별 Application 1개
 ```
 
@@ -43,7 +43,6 @@ Argo CD는 여전히 온프레미스 관리 클러스터에서 실행하며 등�
 |---|---|---|
 | `platform` | Frontend, Backend, 복구 컨트롤러. 재배치·우선순위 컨트롤러를 별도 Pod로 배포할 때도 사용 | `gpu-foundation` |
 | `ingress-system` | Traefik | `gpu-foundation` |
-| `cloudflare-system` | cloudflared | `gpu-foundation` |
 | `cert-manager` | cert-manager, webhook, cainjector | `gpu-foundation` |
 | `monitoring` | node-exporter, Alloy, Prometheus Agent, Kafka 탐지기를 Pod로 배포할 때 사용 | `gpu-foundation` |
 | `data-system` | Kafka 수집기를 Pod로 배포할 때 사용 | `gpu-foundation` |
@@ -114,7 +113,7 @@ CPU 32 / 메모리 128Gi는 예시입니다. 실제 선택한 GPU 노드에서 *
 5. EKS를 Argo CD에 eks-a/b/c 이름으로 등록하고 각 registry Secret·전용 root를 따로 등록합니다.
 6. gpu-root-eks-a → gpu-queues-eks-a를 sync합니다. B/C도 각각 실행합니다.
 7. 각 EKS의 MultiKueue 전용 kubeconfig를 매니저 Secret으로 등록한 뒤 gpu-multikueue를 sync합니다.
-8. production frontend 인증서·endpoint 준비 후 gpu-iac에서 Cloudflare 외부 리소스를 구성하고 gpu-cloudflared를 sync합니다.
+8. [DNS 진입점 전환](docs/dns-entrypoint.md)에 따라 Traefik NodePort·pfSense TCP 전달을 확인한 뒤 gpu-iac에서 DNS-only 레코드를 구성합니다.
 
 ```bash
 # 온프레미스만
@@ -142,3 +141,5 @@ Application의 sync-wave는 자식 앱 건강 상태까지 자동 보장하지 �
 CI는 변경 대상 환경의 경로만 수정합니다. 예: frontend 이미지는 onprem/apps/frontend/overlays/onprem/kustomization.yaml. 자동 sync가 켜진 해당 자식 앱이 반영합니다.
 
 [부트스트랩](docs/bootstrap.md) · [비밀값](docs/secrets.md) · [기존 구성 인계](docs/migration.md)
+
+팀 문서와 namespace·계정·주소의 대조 기준은 [docs/team-contract.md](docs/team-contract.md)를 따릅니다.
