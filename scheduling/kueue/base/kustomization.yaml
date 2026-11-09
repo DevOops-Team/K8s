@@ -58,3 +58,22 @@ replacements:
           name: kueue-validating-webhook-configuration
         fieldPaths:
           - webhooks.*.namespaceSelector.matchExpressions.[key=kubernetes.io/metadata.name].values.1
+      # kube-system에 남는 아래 RoleBinding은 namespace 변환이 subject를 안 고쳐서 kueue-system SA를 가리킴
+      - select:
+          kind: RoleBinding
+          name: kueue-visibility-server-auth-reader
+        fieldPaths:
+          - subjects.[name=kueue-controller-manager].namespace
+  # visibility 서버 RoleBinding은 kube-system의 Role(extension-apiserver-authentication-reader)을 참조하므로
+  # kube-system에 있어야 함. 위 namespace: platform이 옮겨 버리면 Kueue가 시작 못 하고 CrashLoopBackOff.
+  # replacements는 namespace 변환 뒤에 돌기 때문에 여기서 되돌린다 (값은 웹훅의 첫 번째 제외 값 kube-system).
+  - source:
+      kind: MutatingWebhookConfiguration
+      name: kueue-mutating-webhook-configuration
+      fieldPath: webhooks.0.namespaceSelector.matchExpressions.[key=kubernetes.io/metadata.name].values.0
+    targets:
+      - select:
+          kind: RoleBinding
+          name: kueue-visibility-server-auth-reader
+        fieldPaths:
+          - metadata.namespace
