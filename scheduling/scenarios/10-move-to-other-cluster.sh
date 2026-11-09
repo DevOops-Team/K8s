@@ -8,7 +8,7 @@ say "2장 잡 train-d를 worker2에"
 submit train-d 2 queue-light 30m '"devoops/target-cluster": "worker2"'
 wait_admitted train-d 120
 sleep 10
-bad=$(kubectl --context kind-worker2 -n $NS get pods -l jobset.sigs.k8s.io/jobset-name=train-d -o jsonpath='{.items[0].spec.nodeName}')
+bad=$(kubectl --context kind-worker2 -n $NS get pods -l jobset.sigs.k8s.io/jobset-name=$(jsname train-d) -o jsonpath='{.items[0].spec.nodeName}')
 
 say "$bad SDC 의심 -> moveToOtherCluster 요청"
 expect "$bad cordon + devoops/faulty, worker2 펜싱 라벨 없음, job-train-d-g0002이 worker1 또는 worker3에 입장 (exclude=worker2)"

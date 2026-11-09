@@ -222,7 +222,7 @@ reset() {
   say "초기화 (잡·요청 삭제, 노드·펜싱·네트워크 원상복구)"
   kubectl --context $MGR -n $NS delete relocationrequests --all --ignore-not-found >/dev/null 2>&1 || true
   kubectl --context $MGR -n $NS delete jobsets --all --ignore-not-found --wait=false >/dev/null
-  kubectl --context $MGR -n $CTL_NS get cm -o name 2>/dev/null | grep -E '/recovery-(code|fencing)-' \
+  kubectl --context $MGR -n $CTL_NS get cm -o name 2>/dev/null | { grep -E '/recovery-(code|fencing)-' || true; } \
     | xargs -r kubectl --context $MGR -n $CTL_NS delete --ignore-not-found >/dev/null
   for w in "${WORKERS[@]}"; do
     reconnect "$w"

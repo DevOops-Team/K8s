@@ -11,7 +11,7 @@ say "4장 잡 train-a를 worker2에"
 submit train-a 4 queue-heavy 30m '"devoops/target-cluster": "worker2"'
 wait_admitted train-a 120
 sleep 10
-bad=$(kubectl --context kind-worker2 -n $NS get pods -l jobset.sigs.k8s.io/jobset-name=train-a -o jsonpath='{.items[0].spec.nodeName}')
+bad=$(kubectl --context kind-worker2 -n $NS get pods -l jobset.sigs.k8s.io/jobset-name=$(jsname train-a) -o jsonpath='{.items[0].spec.nodeName}')
 
 say "$bad 고장 가정 -> moveToSpare 요청"
 expect "job-train-a-g0002이 재제출되지만 노드가 3대뿐이라 지명 안 됨 (반쪽 배치 대신 대기)"
