@@ -8,7 +8,6 @@
 #   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
 #   relocator : JobSet 삭제·생성 + 펜싱 라벨 + 워커 kubeconfig 읽기
 #               + 복구 원본·펜싱 기록 (우리 망: S3·DynamoDB를 IAM으로, kind: ConfigMap)
-#   allocator : JobSet 우선순위 라벨 (배분 조정 컨트롤러)
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: dispatcher, namespace: platform}
@@ -16,10 +15,6 @@ metadata: {name: dispatcher, namespace: platform}
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: relocator, namespace: platform}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: {name: allocator, namespace: platform}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -62,17 +57,6 @@ rules:
   verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: {name: scheduling-allocator}
-rules:
-- apiGroups: [kueue.x-k8s.io]
-  resources: [workloads]
-  verbs: [get, list, watch]
-- apiGroups: [jobset.x-k8s.io]
-  resources: [jobsets]
-  verbs: [get, list, watch, patch]
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: scheduling-dispatcher}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-dispatcher}
@@ -83,12 +67,6 @@ kind: ClusterRoleBinding
 metadata: {name: scheduling-relocator}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-relocator}
 subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: scheduling-allocator}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-allocator}
-subjects: [{kind: ServiceAccount, name: allocator, namespace: platform}]
 ---
 # 워커 kubeconfig: 이름을 지정한 Secret만 (Kueue와 같은 platform 네임스페이스)
 #   dispatcher: MultiKueue가 쓰는 Secret (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
@@ -150,7 +128,6 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: scheduling-lead
 subjects:
 - {kind: ServiceAccount, name: dispatcher, namespace: platform}
 - {kind: ServiceAccount, name: relocator, namespace: platform}
-- {kind: ServiceAccount, name: allocator, namespace: platform}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -233,42 +210,3 @@ metadata: {name: relocator, namespace: platform}
 spec:
   maxUnavailable: 1              # 노드 drain 때도 둘은 남김
   selector: {matchLabels: {app: relocator}}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: allocator
-  namespace: platform
-spec:
-  replicas: 3
-  strategy:                      # 노드 3대에 하나씩이라 하나 내리고 하나 올림 (maxSurge 0)
-    type: RollingUpdate
-    rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
-  selector: {matchLabels: {app: allocator}}
-  template:
-    metadata: {labels: {app: allocator}}
-    spec:
-      serviceAccountName: allocator
-      nodeSelector: {platform-worker: 'true'}
-      affinity:
-        podAntiAffinity:         # 같은 노드에 둘 안 올림 -> worker1/2/3에 하나씩
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector: {matchLabels: {app: allocator}}
-            topologyKey: kubernetes.io/hostname
-      terminationGracePeriodSeconds: 10
-      containers:
-      - name: main
-        image: scheduling-controllers:dev
-        imagePullPolicy: IfNotPresent
-        command: ["python", "allocator.py"]
-        env:
-        - name: POD_NAME         # Lease holderIdentity
-          valueFrom: {fieldRef: {fieldPath: metadata.name}}
-        resources: {requests: {cpu: 50m, memory: 64Mi}}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata: {name: allocator, namespace: platform}
-spec:
-  maxUnavailable: 1              # 노드 drain 때도 둘은 남김
-  selector: {matchLabels: {app: allocator}}

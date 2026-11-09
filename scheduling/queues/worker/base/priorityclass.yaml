@@ -12,10 +12,3 @@ metadata:
   name: recovery
 value: 1000
 description: "장애 후 재제출 잡. 대기열 맨 앞"
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: WorkloadPriorityClass
-metadata:
-  name: training-aged
-value: 500
-description: "오래 기다린 일반 잡 (우선순위 조정 컨트롤러가 올림). 복구 잡보다는 낮음"

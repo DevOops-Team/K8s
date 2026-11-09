@@ -42,6 +42,5 @@ PLACEHOLDER_PRIORITY_CLASS = "spare-placeholder"   # 예비 노드 자리 표시
 NAMESPACE = os.getenv("JOB_NAMESPACE", "training")
 RECOVERY_QUEUE = os.getenv("RECOVERY_QUEUE", "queue-recovery")
 PRIORITY_TRAINING = "training"
-PRIORITY_AGED = "training-aged"
 PRIORITY_RECOVERY = "recovery"
 RECOVERY_PRIORITY_VALUE = 1000

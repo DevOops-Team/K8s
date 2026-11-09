@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 컨트롤러 3개를 노트북(우분투 VM)에서 바로 실행. Ctrl-C로 셋 다 종료.
-#   ./run-local.sh                 셋 다
+# 컨트롤러 2개(dispatcher, relocator)를 노트북(우분투 VM)에서 바로 실행. Ctrl-C로 둘 다 종료.
+#   ./run-local.sh                 둘 다
 #   ./run-local.sh dispatcher      하나만
 # 이미지 빌드 없이 코드를 고치고 바로 다시 돌리는 용도. 클러스터 안 배포는 README 참고.
 set -euo pipefail
@@ -18,7 +18,7 @@ export PYTHONUNBUFFERED=1
 # CRD가 없으면 먼저 만듦 (platform 네임스페이스는 kueue/base 설치 때 생김)
 kubectl --context "$KUBE_CONTEXT" apply -f deploy/crd-relocationrequest.yaml >/dev/null
 
-names=("${@:-dispatcher relocator allocator}")
+names=("${@:-dispatcher relocator}")
 read -r -a names <<< "${names[*]}"
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait' INT TERM EXIT
