@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 전부 한 번에: 준비 -> 컨트롤러 3개 백그라운드 실행 -> 시나리오 1~11 -> 컨트롤러 종료
+# 전부 한 번에: 준비 -> 컨트롤러(dispatcher·relocator) 백그라운드 실행 -> 장애복구 시나리오 4~11 -> 컨트롤러 종료
 #   ./run-all.sh            전부 (30분 안팎)
-#   ./run-all.sh 1 5 9      골라서
+#   ./run-all.sh 5 9        골라서
 #   SKIP_BOOTSTRAP=1 ./run-all.sh   준비 건너뛰기
 # 결과: scenarios/logs/<시각>/ 아래 scenario-N.log, controllers.log
 set -uo pipefail
@@ -22,7 +22,7 @@ if ! kill -0 $ctl 2>/dev/null; then echo "컨트롤러가 바로 죽음:"; tail 
 grep "시작:" "$LOG/controllers.log" || true
 
 pick=("$@")
-[ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7 8 9 10 11)
+[ ${#pick[@]} -eq 0 ] && pick=(4 5 6 7 8 9 10 11)
 results=()
 for n in "${pick[@]}"; do
   f=$(ls "$HERE"/$(printf %02d "$n")-*.sh)

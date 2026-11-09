@@ -1,4 +1,7 @@
-# 시나리오 1~11 (실습 전용)
+# 장애복구 시나리오 4~11 (실습 전용)
+
+평소 학습 스케줄링(큐 설정, 빈 패킹, 갱 배치, 큰 잡 입장 등)은 `../e2e/`로 옮겼다 (pytest, 자동 판정).
+여기 남은 것은 장애복구 시나리오이고 아직 결과를 눈으로 비교한다. 번호는 예전 그대로 둔다.
 
 전제: `../cluster/setup.sh`로 클러스터를 만들고 `./bootstrap.sh`로 큐를 깐 뒤, 다른 터미널에서 `../controllers/run-local.sh` 실행 중. 각 스크립트는 시작할 때 `reset`으로 잡·요청·노드 상태를 원상복구한다.
 
@@ -7,9 +10,6 @@
 
 | # | 스크립트 | 기대 결과 |
 |---|---|---|
-| 1 | `01-binpack.sh` | 1장 잡 6개 -> worker1 4, worker2 2, worker3 0 |
-| 2 | `02-gang-mix.sh` | 1~4장 섞어서 -> 반쪽 배치 0건 |
-| 3 | `03-starvation.sh` | 1장 잡이 계속 와도 4장 잡이 일정 시간 안에 입장 |
 | 4 | `04-recovery-first.sh` | 대기열이 찬 상태에서 복구 잡이 먼저 입장 |
 | 5 | `05-move-to-spare.sh` | 고장 노드 격리, 자리 표시 Pod 밀려나고 잡이 예비 노드에 |
 | 6 | `06-evacuate.sh` | worker2 끊고 대피 -> 다른 워커로, worker2엔 새 잡 안 감 |
@@ -20,40 +20,3 @@
 | 11 | `11-recovery-under-load.sh` | 학습 12장이 찬 상태 + Heavy 대기 잡에서 4장 잡 moveToSpare -> 복구 잡이 먼저 쿼터를 받는지 (끝 줄 OK/PROBLEM). `FIX=B`면 복구 몫 4로 비교 |
 
 6·7번은 `docker network disconnect`를 쓴다 (sudo 없이 docker가 되는 사용자 기준).
-
-## 평소 학습 자동 검증 (`normal-training.sh`)
-
-위 1~9는 결과를 눈으로 비교하지만, 이 스크립트는 PASS/FAIL을 스스로 판정한다. 준비와 컨트롤러 실행까지 한 번에 한다.
-
-```bash
-./normal-training.sh            # 설계 기본값 (aging 720 GPU·s, 비워 두기 120s), 약 20분
-FAST=1 ./normal-training.sh     # 시간 값 축소 (240 GPU·s / 60s), 약 10분
-./normal-training.sh 5 7        # 골라서
-```
-
-7번은 컨트롤러 도움 없이 Kueue 설정만으로 통과해야 한다. Heavy 잡이 자기 몫 안에서 기다리는 동안 Kueue가 같은 cohort의 새 빌려 쓰기를 막기 때문이다(KEP-83). 11/05 대조군 실행(배분 조정 컨트롤러 없이)에서 big이 146s에 쿼터를 받는 걸 확인하고 Light 조이기 기능을 뺐다. 큐 설정(cohort, 선점, 큐 전략)을 바꾸면 7번을 다시 돌린다. 7번은 big 자리를 모으는 동안 논 GPU·초도 찍는다(판정 없음, 정보).
-
-| # | 확인 | 문서 위치 |
-|---|---|---|
-| 1 | 큐 몫 8/4/3, Heavy StrictFIFO, Recovery lendingLimit 0 | 배분(1) |
-| 2 | 3장 이상 Heavy, 5장 이상 거부 (`lib.sh`의 `queue_for`가 잡 투입기 흉내) | 입력 |
-| 3 | 1장 6개 -> worker1 4, worker2 2 | 배치(1) |
-| 4 | Heavy 대기 없으면 Light가 12장까지 빌려 씀 | 배분(1)·(2) |
-| 5 | 앞의 4장 잡이 막히면 뒤 3장 잡도 대기 | 배분(1) |
-| 6 | 4장·2장·1장 잡이 대기 시간 x GPU 수 순서로 aged | 배분(3) |
-| 7 | 작은 잡이 계속 와도 4장 잡 입장 (big 대기 중 Light가 몫 4 넘게 새로 못 받음) | 배분(2)·배치(1) |
-
-## 대조군 실험 (`control.sh`)
-
-한 가지만 바꿔 두 번 돌리고 큰 잡의 쿼터·입장 시각과 논 GPU·초를 나란히 찍는다. 판정은 없다. 측정 함수는 `measure-lib.sh`(normal-training.sh와 공용).
-
-```bash
-./control.sh                 # queue, hold, aging 전부 (약 1시간)
-FAST=1 ./control.sh hold     # 골라서, 시간 값 축소
-```
-
-| 실험 | A (현재) | B (대조군) | 보는 것 |
-|---|---|---|---|
-| queue | Heavy/Light 분리 | 큰 잡도 queue-light (= 큐 1개) | 작은 잡이 계속 올 때 4장 잡이 쿼터를 받는지 |
-| hold | 디스패처 비워 두기 켬 | 끔 | 워커마다 1장씩 조각났을 때 4장 잡이 입장하는지 |
-| aging | allocator 켬 | 끔 | Light 2장 잡이 1장 잡들에 밀릴 때 대기 시간 차이 |
