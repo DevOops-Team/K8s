@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render manual observe-only deployment to stdout; never contacts an API."""
+"""Render a recovery controller deployment to stdout without contacting an API."""
 import argparse
 import hashlib
 import json
@@ -19,10 +19,11 @@ def render(image, config):
     cm=next(d for d in docs if d['kind']=='ConfigMap')
     cm['data']['config.json']=json.dumps(config,sort_keys=True)
     deployment=next(d for d in docs if d['kind']=='Deployment')
-    deployment['spec']['replicas']=1
+    deployment['spec']['replicas']=3
     pod=deployment['spec']['template']
     pod['metadata']['annotations']={'checksum/config':hashlib.sha256(cm['data']['config.json'].encode()).hexdigest()}
     pod['spec']['containers'][0]['image']=image
+    pod['spec']['automountServiceAccountToken']=config['event_source']=='kafka'
     if config['event_source']=='kafka':
         pod['spec']['containers'][0]['envFrom']=[{'secretRef':{'name':'recovery-controller-credentials'}}]
     return docs

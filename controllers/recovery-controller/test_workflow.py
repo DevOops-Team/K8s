@@ -7,7 +7,7 @@ EVENT=dict(event_id='e1',job_id='j1',cluster='eks-a',node='gpu1',generation=1,fa
 class MemoryStore:
     def __init__(self):
         self.events={}
-        self.job=dict(generation=1,cluster='eks-a',gpu_count=4,checkpoint_uri='s3://bucket/approved')
+        self.job=dict(generation=1,cluster='eks-a',gpu_count=4,jobset_uri='s3://bucket/code/j1/jobset.json',jobset_sha256='a'*64)
     def accept(self,e,digest):
         if e['event_id'] in self.events:
             if self.events[e['event_id']]['digest']!=digest: raise ValueError('collision')
@@ -17,6 +17,7 @@ class MemoryStore:
     def save(self,rid,**values):
         self.events[rid].update(values)
         return self.get(rid)
+    def owner_matches(self,*_): return getattr(self, "owner_ok", True)
     def claim(self,e):
         if self.job.get('recovery_id')==e['event_id']: return self.job.copy()
         if self.job['generation']!=e['generation']: return None
@@ -34,7 +35,7 @@ class Executor:
         if op=='restart':
             if self.fail_restart: raise TimeoutError()
             return dict(accepted=True,target_cluster='eks-a')
-        return dict(generation=payload['generation'],target_cluster='eks-a',checkpoint_loaded=self.resumed,step_completed=self.resumed)
+        return dict(generation=payload['generation'],target_cluster='eks-a',checkpoint_loaded=self.resumed,step_completed=self.resumed,active_nodes=['new1','new2','new3','new4'])
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -81,3 +82,22 @@ class WorkflowTests(unittest.TestCase):
     def test_missing_node_rejected(self):
         e=EVENT.copy();del e['node']
         with self.assertRaises(ValueError): self.flow.accept(e)
+
+    def test_owner_mismatch_blocks_success(self):
+        self.tick();self.tick();self.store.owner_ok=False
+        self.assertEqual(self.tick()['state'],'SUBMITTED')
+    def test_request_contains_jobset_reference_not_checkpoint_uri(self):
+        seen=[]
+        original=self.executor.call
+        def call(operation,payload):
+            seen.append(payload.copy())
+            return original(operation,payload)
+        self.executor.call=call
+        self.tick()
+        self.assertEqual(seen[0]['checkpoint_source'],'dynamodb-approved')
+        self.assertNotIn('checkpoint_uri',seen[0])
+        self.assertEqual(seen[0]['jobset_sha256'],'a'*64)
+    def test_missing_new_node_evidence_blocks_success(self):
+        self.tick();self.tick()
+        self.executor.call=lambda op,payload: dict(generation=2,target_cluster='eks-a',checkpoint_loaded=True,step_completed=True)
+        self.assertEqual(self.tick()['state'],'SUBMITTED')

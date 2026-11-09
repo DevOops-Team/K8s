@@ -2,6 +2,7 @@
 import hashlib
 import json
 from controller import plan
+from adapters import RecoveryBlocked
 
 TERMINAL = {'RECOVERED', 'REJECTED', 'REVIEW', 'STALE', 'OBSERVED'}
 
@@ -36,15 +37,17 @@ class Workflow:
         if action in ('REVIEW', 'REJECT'):
             return self.store.save(rid, state='REJECTED' if action == 'REJECT' else 'REVIEW', action=action)
         # The authoritative job record, not the event, supplies checkpoint/GPU count.
-        job = self.store.claim(e)
+        try:
+            job = self.store.claim(e)
+        except RecoveryBlocked as exc:
+            return self.store.save(rid, state='REVIEW', reason=str(exc))
         if job is None:
             return self.store.save(rid, state='STALE')
-        if not job.get('checkpoint_uri', '').startswith('s3://'):
-            return self.store.save(rid, state='REVIEW', reason='No approved checkpoint; manual review required')
         request = dict(recovery_id=rid, job_id=e['job_id'], source_cluster=e['cluster'],
                        failed_node=e['node'], old_generation=int(e['generation']),
-                       generation=int(job['generation']), checkpoint_uri=job['checkpoint_uri'],
-                       gpu_count=int(job['gpu_count']), action=action)
+                       generation=int(job['generation']), gpu_count=int(job['gpu_count']),
+                       jobset_uri=job['jobset_uri'], jobset_sha256=job['jobset_sha256'],
+                       checkpoint_source='dynamodb-approved', action=action)
         if state == 'RECEIVED':
             # CAS already revoked old result authority. This must confirm actual execution stop.
             result = self.executor.call('fence', request)
@@ -72,7 +75,15 @@ class Workflow:
                     and result.get('checkpoint_loaded') is True
                     and result.get('step_completed') is True):
                 return record
+            nodes=result.get('active_nodes')
+            if (not isinstance(nodes,list) or len(nodes)!=int(job['gpu_count'])
+                    or any(not isinstance(n,str) or not n for n in nodes) or len(set(nodes))!=len(nodes)):
+                return record
+            if action in ('RELOCATE_SAME_CLUSTER','HOLD_FOR_FENCING') and e['node'] in nodes:
+                return record
+            if not self.store.owner_matches(e['job_id'],int(job['generation']),record['target_cluster']):
+                return record
             # Keep job lock until durable terminal record exists; replay can finish unlock.
             return self.store.save(rid, state='RECOVERED', action=action,
-                                   generation=int(job['generation']), target_cluster=record['target_cluster'])
+                                   generation=int(job['generation']), target_cluster=record['target_cluster'], active_nodes=nodes)
         raise ValueError('unknown recovery state')

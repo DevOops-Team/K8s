@@ -37,6 +37,23 @@ Argo CD는 여전히 온프레미스 관리 클러스터에서 실행하며 등�
 - AWS 담당: EKS·Managed Node Group·GPU AMI/드라이버·device plugin·IAM·접근 경로·Node Auto Repair·Node Monitoring Agent.
 - 스케줄링 담당: 각 클러스터의 Kueue v0.20.0·JobSet v0.13.0 컨트롤러와 매니저 디스패처·MAP 정책. 이 저장소는 설치하지 않습니다.
 
+## 온프레미스 Pod 네임스페이스
+
+| 네임스페이스 | 구성 요소 | 생성 경로 |
+|---|---|---|
+| `platform` | Frontend, Backend, 복구 컨트롤러. 재배치·우선순위 컨트롤러를 별도 Pod로 배포할 때도 사용 | `gpu-foundation` |
+| `ingress-system` | Traefik | `gpu-foundation` |
+| `cloudflare-system` | cloudflared | `gpu-foundation` |
+| `cert-manager` | cert-manager, webhook, cainjector | `gpu-foundation` |
+| `monitoring` | node-exporter, Alloy, Prometheus Agent, Kafka 탐지기를 Pod로 배포할 때 사용 | `gpu-foundation` |
+| `data-system` | Kafka 수집기를 Pod로 배포할 때 사용 | `gpu-foundation` |
+| `argocd` | Argo CD | `gpu-iac`의 Argo CD bootstrap |
+| `kueue-system` | Kueue 및 MultiKueue 컨트롤러 | 스케줄링 파트 설치 |
+| `jobset-system` | JobSet 컨트롤러 | 스케줄링 파트 설치 |
+| `training` | 제출된 학습 JobSet, LocalQueue | `gpu-foundation` |
+
+`monitoring`과 `data-system`에는 네임스페이스만 준비합니다. 각 워크로드의 배포 매니페스트와 필요한 경우 Argo CD 대상 권한은 해당 파트가 배포를 연결할 때 설정합니다. 중앙 Prometheus와 Kafka 브로커 등 VM에서 실행하는 구성 요소에는 Kubernetes 네임스페이스를 적용하지 않습니다.
+
 ## 로컬 준비·검증
 
 ```bash
@@ -60,7 +77,7 @@ python3.12 -m venv .venv
 .venv/bin/python scripts/validate.py --target onprem --ready
 ```
 
-이미지가 없는 앱은 replicas=0을 유지합니다. 실제 이미지를 넣은 앱만 2개로 바뀝니다. 자동 sync는 기본 꺼져 있고 --enable-auto-sync를 쓰면 --scope에 지정한 환경의 자식 Application만 켭니다(기본 scope=onprem). root는 수동 sync, prune은 꺼진 상태입니다.
+이미지가 없는 앱은 replicas=0을 유지합니다. 실제 이미지를 지정하면 기본 Deployment의 복제 수를 사용합니다(현재 3개). 자동 sync는 기본 꺼져 있고 --enable-auto-sync를 쓰면 --scope에 지정한 환경의 자식 Application만 켭니다(기본 scope=onprem). root는 수동 sync, prune은 꺼진 상태입니다.
 브라우저는 backend ClusterIP를 직접 호출할 수 없으므로 frontend 서버/BFF 등의 내부 연결은 앱 담당과 맞춥니다. backend Ingress는 없습니다.
 
 ## EKS 하나씩 설정

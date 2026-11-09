@@ -4,7 +4,12 @@ metadata:
   name: cloudflared
   namespace: cloudflare-system
 spec:
-  replicas: 2
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: cloudflared
@@ -63,6 +68,18 @@ spec:
             - ALL
           seccompProfile:
             type: RuntimeDefault
+        livenessProbe:
+          tcpSocket:
+            port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        startupProbe:
+          tcpSocket:
+            port: metrics
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 24
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

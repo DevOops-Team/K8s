@@ -130,3 +130,11 @@ subjects:
 - kind: ServiceAccount
   name: multikueue-manager
   namespace: kueue-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devoops-cluster-info
+  namespace: training
+data:
+  CLUSTER_NAME: eks-c

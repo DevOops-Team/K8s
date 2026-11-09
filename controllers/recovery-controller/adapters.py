@@ -6,9 +6,14 @@ import urllib.request
 import urllib.parse
 
 
+class RecoveryBlocked(ValueError):
+    """A decision that needs review, not an endlessly retried write."""
+
+
 class Store:
-    def __init__(self, table):
-        self.table = table
+    def __init__(self, table, fencing_table):
+        self.table = table  # Our durable event inbox and placement/template metadata.
+        self.fencing = fencing_table  # Hyunsu's table: PK job_id, sole generation/owner authority.
 
     def accept(self, event, digest):
         key = 'event#' + event['event_id']
@@ -35,48 +40,88 @@ class Store:
             ExpressionAttributeNames=names, ExpressionAttributeValues=vals,
             ReturnValues='ALL_NEW')['Attributes']
 
+    def context(self, event):
+        item = self.table.get_item(Key={'pk':'job#'+event['job_id']}, ConsistentRead=True).get('Item')
+        if not item:
+            raise RecoveryBlocked('registered recovery job metadata missing')
+        if item.get('cluster') != event['cluster'] or event['node'] not in item.get('active_nodes',[]):
+            return None
+        if not 1 <= int(item.get('gpu_count',0)) <= 4:
+            raise RecoveryBlocked('GPU count must be 1..4')
+        uri=item.get('jobset_uri','')
+        digest=item.get('jobset_sha256','')
+        import re
+        if not uri.startswith('s3://') or not re.fullmatch('[a-f0-9]{64}',digest):
+            raise RecoveryBlocked('submitted jobset.json URI and sha256 are required')
+        return item
+
     def claim(self, event):
-        key = {'pk':'job#'+event['job_id']}
-        current = self.table.get_item(Key=key, ConsistentRead=True).get('Item')
-        if current and current.get('recovery_id') == event['event_id']:
-            return current  # Crash after CAS: do not advance generation twice.
+        metadata = self.context(event)
+        if metadata is None:
+            return None
+        key = {'job_id':event['job_id']}
+        current = self.fencing.get_item(Key=key, ConsistentRead=True).get('Item')
         if not current:
-            raise ValueError('authoritative job record missing')
-        if (int(current.get('generation',0)) != event['generation']
-                or current.get('cluster') != event['cluster']):
+            raise RecoveryBlocked('fencing job record missing')
+        if current.get('recovery_id') == event['event_id']:
+            if (int(current.get('generation',0)) != event['generation']+1
+                    or int(current.get('recovery_from_gen',0)) != event['generation']):
+                raise RecoveryBlocked('recovery record generation mismatch')
+            # Do not REMOVE owner again: a new init may already have acquired it.
+            return dict(metadata, generation=current['generation'])
+        if int(current.get('generation',0)) != event['generation']:
             return None
         if current.get('recovery_id'):
-            raise RuntimeError('another recovery holds job lock')
-        if event['node'] not in current.get('active_nodes',[]):
-            return None  # A reported node must belong to this authoritative execution.
-        if type(current.get('gpu_count')) not in (int,) and not str(current.get('gpu_count','')).isdigit():
-            raise ValueError('invalid authoritative gpu_count')
-        if not 1 <= int(current['gpu_count']) <= 4 or not current.get('checkpoint_uri','').startswith('s3://'):
-            raise ValueError('approved checkpoint and GPU count 1..4 required')
-        return self.table.update_item(Key=key,
-            UpdateExpression='SET generation = :new, recovery_id = :rid',
-            ConditionExpression='generation = :old AND #cluster = :cluster AND contains(active_nodes, :node) AND attribute_not_exists(recovery_id)',
-            ExpressionAttributeNames={'#cluster':'cluster'},
+            raise RecoveryBlocked('another recovery holds job lock')
+        if 'owner' in current and current['owner'] != event['cluster']:
+            raise RecoveryBlocked('source cluster does not own this generation')
+        approved = ('approved_gen' in current, 'approved_step' in current)
+        if approved[0] != approved[1]:
+            raise RecoveryBlocked('incomplete approved checkpoint fields')
+        if not all(approved) and metadata.get('allow_restart_from_scratch') is not True:
+            raise RecoveryBlocked('no approved checkpoint; explicit from-scratch policy required')
+        if all(approved) and not (1 <= int(current['approved_gen']) <= event['generation']
+                                  and int(current['approved_step']) >= 0):
+            raise RecoveryBlocked('invalid approved checkpoint fields')
+        updated = self.fencing.update_item(Key=key,
+            UpdateExpression='SET generation = :new, recovery_id = :rid, recovery_from_gen = :old, recovery_to_gen = :new REMOVE #owner',
+            ConditionExpression='generation = :old AND (attribute_not_exists(#owner) OR #owner = :source) AND attribute_not_exists(recovery_id)',
+            ExpressionAttributeNames={'#owner':'owner'},
             ExpressionAttributeValues={':new':event['generation']+1, ':old':event['generation'],
-                                       ':rid':event['event_id'], ':cluster':event['cluster'], ':node':event['node']},
+                                       ':rid':event['event_id'], ':source':event['cluster']},
             ReturnValues='ALL_NEW')['Attributes']
+        # approved_gen, approved_step and heartbeat are never overwritten here.
+        return dict(metadata, generation=updated['generation'])
+
+    def owner_matches(self, job_id, generation, cluster):
+        item=self.fencing.get_item(Key={'job_id':job_id},ConsistentRead=True).get('Item',{})
+        return int(item.get('generation',0))==generation and item.get('owner')==cluster
 
     def finish(self, record):
         if record['state'] != 'RECOVERED':
             return
-        key={'pk':'job#'+record['event']['job_id']}
-        current=self.table.get_item(Key=key,ConsistentRead=True).get('Item',{})
-        if (current.get('recovery_id') != record['event']['event_id']
-                and (current.get('generation',0) > record['generation']
-                     or (current.get('generation') == record['generation']
-                         and current.get('cluster') == record['target_cluster']))):
-            return
-        self.table.update_item(Key=key,
-            UpdateExpression='SET #cluster = :cluster REMOVE recovery_id',
-            ConditionExpression='recovery_id = :rid AND generation = :generation',
+        event=record['event'];generation=int(record['generation']);target=record['target_cluster']
+        key={'job_id':event['job_id']}
+        current=self.fencing.get_item(Key=key,ConsistentRead=True).get('Item',{})
+        if int(current.get('generation',0))>generation:
+            return  # A later completed recovery already advanced the job.
+        if int(current.get('generation',0))!=generation or current.get('owner')!=target:
+            raise RecoveryBlocked('new owner/generation not confirmed')
+        if current.get('recovery_id') not in (None,event['event_id']):
+            raise RecoveryBlocked('different recovery owns job lock')
+        # Placement is controller metadata, never a second fencing authority.
+        self.table.update_item(Key={'pk':'job#'+event['job_id']},
+            UpdateExpression='SET #cluster = :cluster, active_nodes = :nodes, placement_generation = :generation',
+            ConditionExpression='attribute_not_exists(placement_generation) OR placement_generation <= :generation',
             ExpressionAttributeNames={'#cluster':'cluster'},
-            ExpressionAttributeValues={':cluster':record['target_cluster'], ':rid':record['event']['event_id'],
-                                       ':generation':record['generation']})
+            ExpressionAttributeValues={':cluster':target, ':nodes':record['active_nodes'], ':generation':generation})
+        if current.get('recovery_id')==event['event_id']:
+            self.fencing.update_item(Key=key,
+                UpdateExpression='REMOVE recovery_id, recovery_from_gen, recovery_to_gen',
+                ConditionExpression='recovery_id = :rid AND generation = :generation AND #owner = :target',
+                ExpressionAttributeNames={'#owner':'owner'},
+                ExpressionAttributeValues={':rid':event['event_id'], ':generation':generation, ':target':target})
+        # owner and approved checkpoint fields remain owned by init/sidecar.
 
     def records(self):
         # Foundation-scale scan; replace with a pending/outbox GSI for larger workloads.
