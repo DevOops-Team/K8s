@@ -31,7 +31,8 @@ metadata:
   name: recovery-cq
 spec:
   cohortName: training
-  namespaceSelector: {}
+  namespaceSelector:   # 복구 몫은 학습 잡 네임스페이스에서만
+    matchLabels: {kubernetes.io/metadata.name: training}
   resourceGroups:
   - coveredResources: ["nvidia.com/gpu"]
     flavors:

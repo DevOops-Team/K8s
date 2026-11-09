@@ -65,8 +65,12 @@ class Ctx:
             K.RR_GROUP, K.RR_VERSION, self.ns, K.RR_PLURAL, self.name, {"status": self.st})
 
     def job(self):
-        # 요청이 있는 네임스페이스의 잡만 다룬다 (다른 네임스페이스 잡을 지우게 만드는 요청 차단)
+        # 학습 잡 네임스페이스(training)에 있는 요청이, 같은 네임스페이스의 잡만 다룬다.
+        # 복구 원본·펜싱 기록은 job_id로만 찾으므로(S3 code/{job_id}, DynamoDB job_id) 다른 네임스페이스에서
+        # 같은 job_id를 대면 남의 기록을 쓰게 된다 -> 요청 자체를 training에서만 받는다
         ns, _, name = self.spec["jobRef"].partition("/")
+        if self.ns != K.NAMESPACE:
+            raise PermissionError(f"요청 네임스페이스 {self.ns} != 학습 잡 네임스페이스 {K.NAMESPACE}")
         if ns != self.ns:
             raise PermissionError(f"jobRef 네임스페이스 {ns} != 요청 네임스페이스 {self.ns}")
         return ns, name
@@ -90,6 +94,7 @@ class Ctx:
 def accept(x: Ctx, all_rrs):
     rid = x.spec["requestId"]   # = 펜싱 기록 recovery_id
     older = [r for r in all_rrs if r["spec"]["requestId"] == rid and r["metadata"]["uid"] != x.rr["metadata"]["uid"]
+             and r["metadata"]["namespace"] == x.ns   # 다른 네임스페이스 요청이 진짜 요청을 Duplicate로 막지 못하게
              and (r["metadata"]["creationTimestamp"], r["metadata"]["name"]) <
              (x.rr["metadata"]["creationTimestamp"], x.name)]
     if older:
@@ -155,8 +160,22 @@ def cordon_nodes(x: Ctx, src, nodes):
         log.info("%s: %s/%s cordon + taint", x.name, src, node)
 
 
+def current_source(x: Ctx):
+    """옛 잡이 지금 보내져 있는 워커 (관리 클러스터 Workload 기준). Workload가 없거나 아직 안 보내졌으면 빈 문자열"""
+    ns, name = x.job()
+    wl = kube.workload_for_jobset(x.mgr, ns, name)
+    return ((wl or {}).get("status") or {}).get("clusterName") or ""
+
+
 def isolate(x: Ctx):
-    action, src = x.spec["action"], x.st.get("sourceCluster")
+    # 노드 cordon·클러스터 펜싱은 되돌리기 어려운 일이라 status(다른 주체도 쓸 수 있음)를 믿지 않는다:
+    # 펜싱 기록을 다시 확인하고, 대상 클러스터도 Workload에서 다시 구한다
+    x.to_gen()
+    action, src = x.spec["action"], current_source(x)
+    if src != (x.st.get("sourceCluster") or ""):
+        # 접수 뒤 디스패처가 막 보냈거나(빈 값 -> 워커), status가 바뀐 경우. 어느 쪽이든 Workload가 맞다
+        log.warning("%s: status의 sourceCluster=%r 대신 Workload 기준 %r 사용", x.name, x.st.get("sourceCluster"), src)
+        x.save(sourceCluster=src)
     nodes = x.spec.get("excludeNodes") or []
     if action in ("moveToSpare", "moveToOtherCluster") and nodes:
         if not src:
@@ -256,7 +275,15 @@ def build_new(x: Ctx):
     target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
                                         x.st.get("oldExclude"), x.spec.get("excludeClusters"))
     # 만들기 직전에 펜싱 기록을 다시 확인 (to_gen이 매번 새로 읽음)
-    new = R.render(x.store.get_jobset(x.job_id()), x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude)
+    orig = x.store.get_jobset(x.job_id())
+    # 복구 원본이 이 요청의 잡 것인지 확인 (job_id만으로 찾으므로 네임스페이스·작업 ID를 한 번 더 맞춰 본다)
+    ometa = orig.get("metadata") or {}
+    if ometa.get("namespace") and ometa["namespace"] != x.ns:
+        raise PermissionError(f"복구 원본 네임스페이스 {ometa['namespace']} != 요청 네임스페이스 {x.ns}")
+    oid = (ometa.get("labels") or {}).get(K.LABEL_JOB_ID)
+    if oid and oid != x.job_id():
+        raise PermissionError(f"복구 원본 {K.LABEL_JOB_ID}={oid} != 요청 잡 {x.job_id()}")
+    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude)
     new["metadata"]["namespace"] = x.ns
     return new
 

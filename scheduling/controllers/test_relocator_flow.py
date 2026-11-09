@@ -111,21 +111,80 @@ class Resubmit(unittest.TestCase):
         self.assertIn("손으로 지울 것", str(e.exception))
 
 
+def on_worker(cluster):
+    """관리 클러스터 Workload가 cluster에 보내져 있는 것처럼 (None = Workload 없음)"""
+    wl = None if cluster is None else {"status": {"clusterName": cluster}}
+    return mock.patch.object(relocator.kube, "workload_for_jobset", return_value=wl)
+
+
 class Isolate(unittest.TestCase):
     def test_evacuate_without_source_skips_fencing(self):
         co = FakeCO()
         x = ctx(FakeStore(fencing("GENERATION_ADVANCED")), co, action="evacuateCluster", sourceCluster="")
-        relocator.isolate(x)
+        with on_worker(""):
+            relocator.isolate(x)
         self.assertEqual(co.cluster_patches, [])
         self.assertEqual(co.status["phase"], "Executing")
         self.assertIn("isolatedAt", co.status)
 
     def test_evacuate_with_source_fences(self):
         co = FakeCO()
-        relocator.isolate(ctx(FakeStore(fencing("GENERATION_ADVANCED")), co, action="evacuateCluster",
-                              sourceCluster="worker2"))
+        with on_worker("worker2"):
+            relocator.isolate(ctx(FakeStore(fencing("GENERATION_ADVANCED")), co, action="evacuateCluster",
+                                  sourceCluster="worker2"))
         self.assertEqual(co.cluster_patches[0][2:], ("multikueueclusters", "worker2",
                                                      {"metadata": {"labels": {"devoops/fenced": "true"}}}))
+
+    def test_tampered_status_source_is_ignored(self):
+        # status를 worker3으로 바꿔도 Workload가 worker2에 있으면 worker2를 펜싱
+        co = FakeCO()
+        with on_worker("worker2"):
+            relocator.isolate(ctx(FakeStore(fencing("GENERATION_ADVANCED")), co, action="evacuateCluster",
+                                  sourceCluster="worker3"))
+        self.assertEqual([p[3] for p in co.cluster_patches], ["worker2"])
+        self.assertEqual(co.status["sourceCluster"], "worker2")
+
+    def test_status_source_without_workload_does_not_fence(self):
+        co = FakeCO()
+        with on_worker(None):
+            relocator.isolate(ctx(FakeStore(fencing("GENERATION_ADVANCED")), co, action="evacuateCluster",
+                                  sourceCluster="worker3"))
+        self.assertEqual(co.cluster_patches, [])
+
+    def test_lost_fencing_blocks_isolation(self):
+        co = FakeCO()
+        store = FakeStore(dict(fencing("GENERATION_ADVANCED"), recovery_id="other"))
+        with on_worker("worker2"), self.assertRaises(PermissionError):
+            relocator.isolate(ctx(store, co, action="evacuateCluster", sourceCluster="worker2"))
+        self.assertEqual(co.cluster_patches, [])
+
+
+class Scope(unittest.TestCase):
+    def test_request_outside_training_namespace_rejected(self):
+        r = rr()
+        r["metadata"]["namespace"] = "other"
+        r["spec"]["jobRef"] = "other/job-abc-g0001"
+        x = relocator.Ctx(None, None, FakeStore(fencing()), r)
+        with self.assertRaises(PermissionError):
+            x.job()
+
+    def test_duplicate_check_ignores_other_namespaces(self):
+        co, store = FakeCO(), FakeStore(fencing("GENERATION_ADVANCED"))
+        co.get_namespaced_custom_object = mock.Mock(side_effect=client.ApiException(status=404))
+        x = ctx(store, co)
+        intruder = rr()
+        intruder["metadata"].update(namespace="other", uid="u0", creationTimestamp="2026-11-05T00:00:00Z")
+        with on_worker("worker1"):
+            self.assertTrue(relocator.accept(x, [intruder, x.rr]))
+        self.assertEqual(co.status["phase"], "Accepted")
+
+    def test_original_from_other_namespace_rejected(self):
+        store = FakeStore(fencing())
+        orig = store.get_jobset("abc")
+        orig["metadata"]["namespace"] = "other"
+        store.get_jobset = lambda job_id: orig
+        with self.assertRaises(PermissionError):
+            relocator.build_new(ctx(store, FakeCO(), sourceCluster="worker1"))
 
 
 if __name__ == "__main__":

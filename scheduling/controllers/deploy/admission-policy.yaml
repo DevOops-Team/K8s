@@ -1,0 +1,113 @@
+# 관리 클러스터 입장 정책 (ValidatingAdmissionPolicy, K8s 1.30+ GA. 우리는 1.35)
+# RBAC만으로는 못 막는 것 3가지를 API 서버에서 거절한다 (보안 검토 11/09):
+#   1. RelocationRequest 만들기·고치기 = 복구 컨트롤러만
+#      (요청 하나로 노드 cordon·클러스터 펜싱·잡 삭제가 일어남)
+#   2. RelocationRequest status 쓰기 = 재배치 실행기만
+#      (실행기가 status의 sourceCluster로 옛 실행이 멈췄는지 확인함)
+#   3. 복구 큐·복구 우선순위를 새로 다는 것 = 재배치 실행기만
+#      (아무 잡이나 queue-recovery·recovery를 달면 예비 GPU를 차지함)
+# 셋 다 클러스터 관리자(kind·Kubespray kubeadm 관리자 kubeconfig)는 통과: 시나리오·run-local.sh·손 복구용
+# ServiceAccount 이름이 바뀌면 여기와 controllers.yaml을 같이 고칠 것
+#   복구 컨트롤러: platform/recovery-controller (onprem/apps/recovery-controller)
+#   재배치 실행기: platform/relocator
+#   JobSet 컨트롤러: platform/jobset-controller-manager (자식 Job을 만듦)
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: scheduling-relocation-request-writers}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [scheduling.devoops.site]
+      apiVersions: ["*"]
+      operations: [CREATE, UPDATE]
+      resources: [relocationrequests]
+  variables:
+  - name: admin
+    expression: "request.userInfo.groups.exists(g, g == 'system:masters' || g == 'kubeadm:cluster-admins')"
+  validations:
+  - expression: "variables.admin || request.userInfo.username == 'system:serviceaccount:platform:recovery-controller'"
+    messageExpression: "'RelocationRequest는 복구 컨트롤러(platform/recovery-controller)만 만들 수 있음: ' + request.userInfo.username"
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: scheduling-relocation-request-writers}
+spec:
+  policyName: scheduling-relocation-request-writers
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: scheduling-relocation-request-status}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [scheduling.devoops.site]
+      apiVersions: ["*"]
+      operations: [UPDATE]
+      resources: [relocationrequests/status]
+  variables:
+  - name: admin
+    expression: "request.userInfo.groups.exists(g, g == 'system:masters' || g == 'kubeadm:cluster-admins')"
+  validations:
+  - expression: "variables.admin || request.userInfo.username == 'system:serviceaccount:platform:relocator'"
+    messageExpression: "'RelocationRequest status는 재배치 실행기(platform/relocator)만 쓸 수 있음: ' + request.userInfo.username"
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: scheduling-relocation-request-status}
+spec:
+  policyName: scheduling-relocation-request-status
+  validationActions: [Deny]
+---
+# 복구 표시(queue-recovery 큐 또는 recovery 우선순위)가 "새로" 붙는 경우만 본다.
+# 이미 붙어 있던 잡의 수정(Kueue suspend 토글, 배분 조정 컨트롤러의 우선순위 맞추기)은 그대로 통과
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: scheduling-recovery-queue}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [jobset.x-k8s.io]
+      apiVersions: ["*"]
+      operations: [CREATE, UPDATE]
+      resources: [jobsets]
+    - apiGroups: [batch]
+      apiVersions: ["*"]
+      operations: [CREATE, UPDATE]
+      resources: [jobs]
+  variables:
+  - name: marked
+    expression: >-
+      has(object.metadata.labels) && (
+        ('kueue.x-k8s.io/queue-name' in object.metadata.labels
+          && object.metadata.labels['kueue.x-k8s.io/queue-name'] == 'queue-recovery') ||
+        ('kueue.x-k8s.io/priority-class' in object.metadata.labels
+          && object.metadata.labels['kueue.x-k8s.io/priority-class'] == 'recovery'))
+  - name: wasMarked
+    expression: >-
+      oldObject != null && has(oldObject.metadata.labels) && (
+        ('kueue.x-k8s.io/queue-name' in oldObject.metadata.labels
+          && oldObject.metadata.labels['kueue.x-k8s.io/queue-name'] == 'queue-recovery') ||
+        ('kueue.x-k8s.io/priority-class' in oldObject.metadata.labels
+          && oldObject.metadata.labels['kueue.x-k8s.io/priority-class'] == 'recovery'))
+  - name: allowed
+    expression: >-
+      request.userInfo.groups.exists(g, g == 'system:masters' || g == 'kubeadm:cluster-admins') ||
+      request.userInfo.username in ['system:serviceaccount:platform:relocator',
+                                    'system:serviceaccount:platform:jobset-controller-manager']
+  validations:
+  - expression: "!variables.marked || variables.wasMarked || variables.allowed"
+    messageExpression: "'queue-recovery 큐·recovery 우선순위는 재배치 실행기(platform/relocator)만 붙일 수 있음: ' + request.userInfo.username"
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: scheduling-recovery-queue}
+spec:
+  policyName: scheduling-recovery-queue
+  validationActions: [Deny]

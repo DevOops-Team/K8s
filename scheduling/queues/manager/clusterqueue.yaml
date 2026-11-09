@@ -69,7 +69,8 @@ spec:
   flavorFungibility:
     whenCanBorrow: MayStopSearch
     whenCanPreempt: TryNextFlavor
-  namespaceSelector: {}
+  namespaceSelector:   # 복구 몫은 학습 잡 네임스페이스에서만 (다른 네임스페이스 LocalQueue가 붙어도 못 씀)
+    matchLabels: {kubernetes.io/metadata.name: training}
   preemption:
     borrowWithinCohort:
       policy: Never
