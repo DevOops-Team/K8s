@@ -143,3 +143,27 @@ spec:
   strategy:
     type: Recreate
   progressDeadlineSeconds: 180
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: recovery-controller-relocation
+  namespace: training
+rules:
+- apiGroups: [scheduling.devoops.site]
+  resources: [relocationrequests]
+  verbs: [create, get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: recovery-controller-relocation
+  namespace: training
+subjects:
+- kind: ServiceAccount
+  name: recovery-controller
+  namespace: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: recovery-controller-relocation

@@ -16,6 +16,9 @@ def render(image, config):
         raise ValueError('Use an actual GHCR image pinned by sha256 digest')
     validate_config(config)
     docs=list(yaml.safe_load_all((ROOT/'onprem/apps/recovery-controller/resources.yaml').read_text()))
+    for document in docs:
+        if document['metadata'].get('name') == 'recovery-controller-relocation':
+            document['metadata']['namespace'] = config.get('job_namespace', 'training')
     cm=next(d for d in docs if d['kind']=='ConfigMap')
     cm['data']['config.json']=json.dumps(config,sort_keys=True)
     deployment=next(d for d in docs if d['kind']=='Deployment')

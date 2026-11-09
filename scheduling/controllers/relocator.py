@@ -217,9 +217,9 @@ def old_gone_on_worker(x: Ctx, ns, name):
             pods = client.CoreV1Api(api).list_namespaced_pod(
                 ns, label_selector=f"jobset.sigs.k8s.io/jobset-name={name}", _request_timeout=kube.TIMEOUT).items
         except client.ApiException as e:
-            if e.status != 403:   # MultiKueue SA(multikueue-sa-role)는 Pod 권한이 없을 수 있음 -> JobSet·Workload로 판단
+            if e.status != 403:   # 조회 권한 부족은 종료 증거가 아니다 (체크포인트 규약 8절)
                 raise
-            return True, f"{src}에서 JobSet·Workload 사라짐 (Pod 조회 권한 없음)"
+            return False, f"{src} Pod 종료 확인 불가 (조회 권한 없음)"
         if pods:
             return False, f"{src}에 Pod {len(pods)}개 남아 있음"
         return True, f"{src}에서도 사라짐"

@@ -6,17 +6,17 @@ class PolicyTests(unittest.TestCase):
         return dict(event_id='e1', job_id='j1', cluster='eks-a', fault_type=kind)
     def test_hardware_never_executes(self):
         result=plan(self.event('node_hardware'))
-        self.assertEqual(result['suggested_action'], 'RELOCATE_SAME_CLUSTER')
+        self.assertEqual(result['suggested_action'], 'QUARANTINE_AND_RETRY')
         self.assertFalse(result['executed'])
     def test_az_requires_fencing(self):
-        self.assertEqual(plan(self.event('az_failure'))['suggested_action'], 'HOLD_FOR_FENCING')
+        self.assertEqual(plan(self.event('az_failure'))['suggested_action'], 'FENCE_AND_EVACUATE')
     def test_permanent_error_rejected(self):
-        self.assertEqual(plan(self.event('software_permanent'))['suggested_action'], 'REJECT')
+        self.assertEqual(plan(self.event('software_permanent'))['suggested_action'], 'NEEDS_CONFIG_FIX')
     def test_bad_event_rejected(self):
         for event in ({}, self.event('unknown') | {'cluster':'onprem'}, self.event('unknown') | {'job_id':3}):
             with self.assertRaises(ValueError): plan(event)
     def test_unknown_requires_review(self):
-        self.assertEqual(plan(self.event('unknown'))['suggested_action'], 'REVIEW')
+        self.assertEqual(plan(self.event('unknown'))['suggested_action'], 'HOLD')
 
 
 class ConfigurationTests(unittest.TestCase):

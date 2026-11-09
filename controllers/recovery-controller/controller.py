@@ -8,18 +8,37 @@ from pathlib import Path
 
 
 def plan(event):
-    required = ('event_id', 'job_id', 'cluster', 'fault_type')
+    required = ('event_id', 'cluster')
     if not isinstance(event, dict) or any(not isinstance(event.get(k), str) or not event[k].strip() for k in required):
-        raise ValueError('event_id, job_id, cluster, fault_type must be nonempty strings')
+        raise ValueError('event_id and cluster must be nonempty strings')
+    if event.get('job_id') is not None and not isinstance(event['job_id'], str):
+        raise ValueError('job_id must be a string or null')
+    if not event.get('suggested_action') and not event.get('fault_type'):
+        raise ValueError('suggested_action or legacy fault_type required')
     if event['cluster'] not in ('eks-a', 'eks-b', 'eks-c'):
         raise ValueError('unknown cluster')
-    actions = {'software_transient': 'RESTART_SAME_CLUSTER',
-               'software_permanent': 'REJECT', 'node_hardware': 'RELOCATE_SAME_CLUSTER',
-               'spot_interruption': 'RELOCATE_SAME_CLUSTER',
-               'straggler': 'REVIEW', 'az_failure': 'HOLD_FOR_FENCING'}
-    return {'event_id': event['event_id'], 'job_id': event['job_id'],
-            'cluster': event['cluster'], 'suggested_action': actions.get(event['fault_type'], 'REVIEW'),
+    actions = {
+        'restart_in_place': 'RETRY_GROUP',
+        'isolate_migrate': 'QUARANTINE_AND_RETRY',
+        'reset_then_migrate': 'QUARANTINE_AND_RETRY',
+        'evacuate_preemptive': 'PLANNED_MIGRATE',
+        'fence_evacuate': 'FENCE_AND_EVACUATE',
+        'hold': 'HOLD', 'refuse': 'NEEDS_CONFIG_FIX', 'none': 'NONE',
+    }
+    legacy = {'software_transient': 'restart_in_place',
+              'software_permanent': 'refuse', 'node_hardware': 'isolate_migrate',
+              'spot_interruption': 'evacuate_preemptive', 'straggler': 'hold',
+              'az_failure': 'fence_evacuate'}
+    recommendation = event.get('suggested_action', legacy.get(event.get('fault_type'), 'hold'))
+    if recommendation not in actions:
+        raise ValueError('unknown suggested_action')
+    action = actions[recommendation]
+    if event.get('collector_healthy') is False and event.get('category') != 'site':
+        action = 'HOLD'
+    return {'event_id': event['event_id'], 'job_id': event.get('job_id'),
+            'cluster': event['cluster'], 'suggested_action': action,
             'mode': 'observe', 'executed': False}
+
 
 
 def validate_config(config):
@@ -47,9 +66,36 @@ def validate_config(config):
         if config['execution_enabled']:
             if config.get('redispatch_policy')!='controller-only' or config.get('scheduler_policy_confirmed') is not True:
                 raise ValueError('A policy must be configured and reviewed before execution')
-            from urllib.parse import urlparse
-            if urlparse(config.get('executor_url','')).scheme != 'https':
-                raise ValueError('HTTPS executor_url required')
+            import re
+            namespace = config.get('job_namespace', 'training')
+            if not isinstance(namespace, str) or not re.fullmatch('[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?', namespace):
+                raise ValueError('invalid job_namespace')
+
+    watchdog = config.get('watchdog', {})
+    if not isinstance(watchdog, dict) or type(watchdog.get('enabled', False)) is not bool:
+        raise ValueError('watchdog.enabled must be boolean')
+    if watchdog.get('enabled'):
+        from urllib.parse import urlparse
+        url = urlparse(watchdog.get('url', ''))
+        if (source != 'kafka' or url.scheme not in ('http', 'https') or not url.netloc
+                or url.username or url.password or url.path != '/api/v2/alerts'
+                or url.query or url.fragment):
+            raise ValueError('watchdog requires an Alertmanager /api/v2/alerts URL and Kafka')
+        timeout = watchdog.get('timeout_seconds', 300)
+        poll = watchdog.get('poll_seconds', 30)
+        if type(timeout) is not int or type(poll) is not int or not 1 <= poll < timeout:
+            raise ValueError('watchdog requires positive poll_seconds < timeout_seconds')
+    from retry_policy import DEFAULTS
+    policy = config.get('retry_policy', {})
+    if not isinstance(policy, dict) or set(policy) - set(DEFAULTS):
+        raise ValueError('unknown retry_policy field')
+    merged = dict(DEFAULTS, **policy)
+    if any(type(v) is not int or v <= 0 for v in merged.values()):
+        raise ValueError('retry policy values must be positive integers')
+    if merged['api_attempts'] != 3:
+        raise ValueError('API policy requires 3 total attempts')
+    if merged['kafka_max_backoff_seconds'] < merged['kafka_backoff_seconds']:
+        raise ValueError('Kafka maximum backoff must be >= initial backoff')
     return config
 
 

@@ -1,0 +1,25 @@
+{
+  "pk": "job#3f9a1c2e",
+  "kind": "job",
+  "cluster": "eks-b",
+  "placement_generation": 2,
+  "gpu_count": 4,
+  "active_nodes": [
+    "new-node-1",
+    "new-node-2",
+    "new-node-3",
+    "new-node-4"
+  ],
+  "jobset_uri": "s3://YOUR_TRAINING_BUCKET/code/3f9a1c2e/jobset.json",
+  "jobset_sha256": "YOUR_SUBMITTED_JOBSET_SHA256",
+  "progress": {
+    "recovery_id": "recovery-7c21",
+    "generation": 2,
+    "cluster": "eks-b",
+    "jobset_uid": "NEW_JOBSET_UID",
+    "checkpoint_loaded": true,
+    "restored_gen": 1,
+    "restored_step": 1200,
+    "completed_step": 1201
+  }
+}

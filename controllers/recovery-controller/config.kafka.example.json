@@ -3,15 +3,31 @@
   "mode": "observe",
   "event_source": "kafka",
   "execution_enabled": false,
-  "aws_region": "ap-northeast-2",
+  "aws_region": "us-east-2",
   "kafka_bootstrap_servers": "YOUR_KAFKA_HOST:9093",
   "kafka_group_id": "recovery-controller-v1",
   "fault_topic": "gpu.fault",
   "result_topic": "recovery.action",
   "reconcile_seconds": 5,
-  "executor_url": "https://YOUR_EXECUTOR_HOST",
   "recovery_table": "YOUR_RECOVERY_TABLE",
-  "fencing_table": "devoops-job-fencing",
+  "fencing_table": "devoops-prod-fencing",
   "redispatch_policy": "controller-only",
-  "scheduler_policy_confirmed": false
+  "scheduler_policy_confirmed": false,
+  "job_namespace": "training",
+  "watchdog": {
+    "enabled": true,
+    "url": "http://172.30.0.35:9093/api/v2/alerts",
+    "timeout_seconds": 300,
+    "poll_seconds": 30
+  },
+  "retry_policy": {
+    "api_attempts": 3,
+    "claim_timeout_seconds": 300,
+    "stop_timeout_seconds": 900,
+    "submit_timeout_seconds": 900,
+    "resume_timeout_seconds": 1800,
+    "kafka_backoff_seconds": 5,
+    "kafka_max_backoff_seconds": 300,
+    "max_recovery_attempts": 3
+  }
 }

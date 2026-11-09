@@ -24,3 +24,19 @@ class InboxTests(unittest.TestCase):
         class Consumer:
             def commit(self,**kw): raise AssertionError('must not commit')
         with self.assertRaises(OSError): accept_message(Consumer(),Workflow(),Message())
+
+    def test_envelope_and_rule_version_are_preserved(self):
+        seen=[]
+        class Message:
+            def value(self):
+                return b'{"occurred_at":"2026-11-09T00:00:00Z","payload":{"event_id":"e1"}}'
+            def headers(self):
+                return [('rule_version', b'abc1234')]
+        class Workflow:
+            def accept(self, event):
+                seen.append(event)
+        class Consumer:
+            def commit(self, **kw):
+                seen.append('committed')
+        accept_message(Consumer(), Workflow(), Message())
+        self.assertEqual(seen, [{'event_id':'e1','rule_version':'abc1234'}, 'committed'])
