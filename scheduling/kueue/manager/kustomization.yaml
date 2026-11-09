@@ -1,6 +1,7 @@
 resources:
   - ../base
   - kueue-v0.20.4-workload-map.yaml
+  - pdb.yaml
 configMapGenerator:
   - name: kueue-manager-config
     namespace: platform
@@ -10,6 +11,29 @@ configMapGenerator:
 generatorOptions:
   disableNameSuffixHash: true
 patches:
+  # 3중화 (11/09): 관리 worker 3대에 하나씩. 리더 1개만 입장·MultiKueue 일을 하고, 웹훅은 3개 모두 받음
+  # -> Pod 하나가 죽어도 training 잡 생성이 웹훅(failurePolicy Fail)에서 막히지 않음
+  - target:
+      kind: Deployment
+      name: kueue-controller-manager
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: kueue-controller-manager
+      spec:
+        replicas: 3
+        strategy:                # 노드 3대에 하나씩이라 하나 내리고 하나 올림 (maxSurge 0)
+          type: RollingUpdate
+          rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+        template:
+          spec:
+            nodeSelector: {platform-worker: 'true'}
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: {matchLabels: {app.kubernetes.io/name: kueue}}
+                  topologyKey: kubernetes.io/hostname
   # 1.35에는 MAP v1이 없음 (1.36 GA). v1beta1로 내려서 적용
   - target:
       group: admissionregistration.k8s.io

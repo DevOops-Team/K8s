@@ -4,7 +4,7 @@
 #   RECREATE=1 ./setup.sh 같은 이름의 kind 클러스터를 지우고 다시 (11/06 네임스페이스 변경 뒤 한 번 필요)
 #
 # 만드는 것 (11/05 K8s 아키텍처와 같은 배치):
-#   manager  컨트롤 플레인 1 + worker 3 (platform-worker=true)  Kueue(+MultiKueue, MAP) · JobSet  -> platform
+#   manager  컨트롤 플레인 1 + worker 3 (platform-worker=true)  Kueue(+MultiKueue, MAP) · JobSet 각 3중화 -> platform
 #   workerN  컨트롤 플레인 1 + KWOK 가짜 GPU 노드 5 (학습 4 + 예비 1)  Kueue · JobSet -> platform
 #   MultiKueue kubeconfig Secret workerN-secret (platform, 키 kubeconfig, 주소는 kind 내부망)
 # 그다음: scenarios/bootstrap.sh (큐·CRD·KWOK 노드), 컨트롤러는 controllers/run-local.sh 또는 README의 클러스터 안 배포
@@ -27,22 +27,22 @@ apply_retry() {
   echo "실패: $*" >&2; return 1
 }
 
-install_common() {   # context kueue-오버레이
+install_common() {   # context 오버레이(manager|worker, Kueue·JobSet 공통)
   local ctx=$1
   kubectl --context "$ctx" apply --server-side --force-conflicts -k "$ROOT/kueue/$2"
   kubectl --context "$ctx" -n platform rollout status deploy/kueue-controller-manager --timeout=300s
-  kubectl --context "$ctx" apply --server-side --force-conflicts -k "$ROOT/jobset/base"
+  kubectl --context "$ctx" apply --server-side --force-conflicts -k "$ROOT/jobset/$3"
   kubectl --context "$ctx" -n platform rollout status deploy/jobset-controller-manager --timeout=300s
 }
 
 say "관리 클러스터"
 create manager "$ROOT/cluster/kind/manager.yaml"
-install_common kind-manager manager
+install_common kind-manager manager manager
 
 for w in "${WORKERS[@]}"; do
   say "$w"
   create "$w" "$ROOT/cluster/kind/worker.yaml"
-  install_common "kind-$w" worker
+  install_common "kind-$w" worker base
   kubectl --context "kind-$w" apply -f "$ROOT/kwok/base/kwok.yaml"
   apply_retry kubectl --context "kind-$w" apply -f "$ROOT/kwok/base/stage-fast.yaml"
 done

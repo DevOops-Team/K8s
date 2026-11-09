@@ -32,6 +32,14 @@ patches:
                 resources:
                   requests:
                     cpu: 250m
+  # Service selector가 control-plane: controller-manager 하나뿐 -> 같은 platform ns의 JobSet Pod(같은 라벨)도 잡힘.
+  # 그러면 Kueue 웹훅 요청 일부가 JobSet Pod(다른 인증서)로 가서 실패 -> failurePolicy Fail이라 생성 거부.
+  - target:
+      kind: Service
+    patch: |-
+      - op: add
+        path: /spec/selector/app.kubernetes.io~1name
+        value: kueue
 replacements:
   # 웹훅은 kube-system·kueue-system을 제외하게 하드코딩돼 있음 -> 두 번째 값을 platform으로.
   # 안 바꾸면 failurePolicy Fail인 Kueue Pod 웹훅이 자기 네임스페이스(platform)의 Pod 생성까지 막을 수 있음
