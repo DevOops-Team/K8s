@@ -39,7 +39,7 @@ kubectl --context kind-manager -n platform get lease | grep scheduling-   # hold
 | 변수 | 기본 | 뜻 |
 |---|---|---|
 | `RENOMINATE_SECONDS` | 60 | 지명했는데 이 시간 안에 워커 입장 못 하면 다른 곳으로 |
-| `STARVE_SECONDS` | 120 | 이보다 오래 못 들어간 잡이 있으면 가장 빈 워커를 비워 둠 |
+| `STARVE_GPU_SECONDS` | 480 | 못 들어간 시간 x GPU 수가 이보다 크면 가장 빈 워커를 그 잡 몫으로 비워 둠 (4장 2분, 2장 4분, 1장 8분) |
 | `AGING_GPU_SECONDS` | 720 | 대기 시간 x GPU 수가 이보다 크면 `training-aged`(500)로 (4장 3분, 1장 12분) |
 | `LEASE_SECONDS` / `RENEW_SECONDS` | 15 / 5 | 리더가 이만큼 갱신 안 하면 남이 가져감 / 갱신 주기 |
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |

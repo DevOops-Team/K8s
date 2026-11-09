@@ -24,9 +24,9 @@ set +e   # 판정 실패로 스크립트가 멈추지 않게 (lib.sh의 -e 해�
 
 # ---------- 시간 값 (컨트롤러에도 같은 값을 넘김)
 if [ "${FAST:-0}" = 1 ]; then
-  export AGING_GPU_SECONDS=240 STARVE_SECONDS=60
+  export AGING_GPU_SECONDS=240 STARVE_GPU_SECONDS=240
 else
-  export AGING_GPU_SECONDS=${AGING_GPU_SECONDS:-720} STARVE_SECONDS=${STARVE_SECONDS:-120}
+  export AGING_GPU_SECONDS=${AGING_GPU_SECONDS:-720} STARVE_GPU_SECONDS=${STARVE_GPU_SECONDS:-480}
 fi
 SLACK=30   # 컨트롤러 루프 간격(10s) + Kueue 반영 지연 여유
 
@@ -182,7 +182,7 @@ if [ "${USE_RUNNING_CONTROLLERS:-0}" != 1 ]; then
   kill -0 "$CTL" 2>/dev/null || { echo "컨트롤러가 바로 죽음:"; tail -30 "$LOG/controllers.log"; exit 1; }
   grep "시작:" "$LOG/controllers.log"
 fi
-echo "시간 값: aging=${AGING_GPU_SECONDS} GPU·s starve=${STARVE_SECONDS}s"
+echo "시간 값: aging=${AGING_GPU_SECONDS} GPU·s starve=${STARVE_GPU_SECONDS} GPU·s"
 
 pick=("$@")
 [ ${#pick[@]} -eq 0 ] && pick=(1 2 3 4 5 6 7)
