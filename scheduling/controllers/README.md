@@ -45,7 +45,9 @@ kubectl --context kind-manager -n platform get lease | grep scheduling-   # hold
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
 | `RECOVERY_STORE` | configmap | 복구 원본·펜싱 기록 저장소 (`aws`면 `CKPT_BUCKET`·`FENCING_TABLE`·`AWS_REGION`) |
 | `FENCING_WAIT_SECONDS` | 300 | 요청을 받고 세대 +1 기록이 이 시간 안에 안 보이면 Failed |
-| `STOP_WAIT_SECONDS` | 60 | 재배치 때 옛 잡이 내려가길 기다리는 최대 시간 |
+| `STOP_WAIT_SECONDS` | 60 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
+| `STOP_HOLD_SECONDS` | 900 | 요청 생성부터 이 시간 안에 옛 실행 종료를 확인 못 하면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 (복구 컨트롤러 HOLD 15분과 맞춤) |
+| `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |
 
 ## 아직 없는 것
 

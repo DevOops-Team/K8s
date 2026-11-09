@@ -159,6 +159,74 @@ class Isolate(unittest.TestCase):
         self.assertEqual(co.cluster_patches, [])
 
 
+def elapsed(seconds):
+    """kube.since가 항상 seconds를 돌려주게 (요청 생성·격리·재제출 뒤 지난 시간)"""
+    return mock.patch.object(relocator.kube, "since", return_value=seconds)
+
+
+class StopOld(unittest.TestCase):
+    """옛 실행 종료 확인: 복구 컨트롤러 HOLD(15분) 뒤에는 자동 확인으로 재제출하지 않는다"""
+
+    def run_stop(self, seconds, gone, confirmed=False, phase="Executing"):
+        co, store = FakeCO(), FakeStore(fencing("GENERATION_ADVANCED"))
+        co.delete_namespaced_custom_object = mock.Mock()
+        x = ctx(store, co, phase=phase, sourceCluster="worker1", isolatedAt="2026-11-06T00:00:01Z")
+        if confirmed:
+            x.rr["metadata"]["annotations"] = {"devoops/old-execution-stopped": "true"}
+        with elapsed(seconds), on_worker(None),                 mock.patch.object(relocator, "old_gone_on_worker", return_value=(gone, "why")):
+            relocator.stop_old(x)
+        return co, store
+
+    def test_gone_before_hold_advances(self):
+        co, store = self.run_stop(30, gone=True)
+        self.assertEqual(store.rec["recovery_phase"], "OLD_RUN_STOPPED")
+        self.assertIn("stoppedAt", co.status)
+
+    def test_not_gone_after_wait_is_waiting(self):
+        co, store = self.run_stop(120, gone=False)
+        self.assertEqual(co.status["phase"], "WaitingForStop")
+        self.assertEqual(store.rec["recovery_phase"], "GENERATION_ADVANCED")
+
+    def test_gone_after_hold_does_not_advance(self):
+        co, store = self.run_stop(relocator.STOP_HOLD_SECONDS + 1, gone=True, phase="WaitingForStop")
+        self.assertEqual(co.status["phase"], "Held")
+        self.assertEqual(store.rec["recovery_phase"], "GENERATION_ADVANCED")
+        self.assertNotIn("stoppedAt", co.status)
+
+    def test_confirm_annotation_resumes_after_hold(self):
+        co, store = self.run_stop(relocator.STOP_HOLD_SECONDS + 1, gone=False, confirmed=True, phase="Held")
+        self.assertEqual(store.rec["recovery_phase"], "OLD_RUN_STOPPED")
+        self.assertEqual(co.status["phase"], "Executing")
+
+
+class WatchAdmit(unittest.TestCase):
+    """입장 대기 시간을 넘겨도 실패로 끝내지 않는다 (복구 판단은 복구 컨트롤러)"""
+
+    def run_watch(self, seconds, wl, jobset_404=False, phase="Executing"):
+        co = FakeCO()
+        co.get_namespaced_custom_object = (mock.Mock(side_effect=client.ApiException(status=404)) if jobset_404
+                                           else mock.Mock(return_value={}))
+        x = ctx(FakeStore(fencing("NEW_RUN_SUBMITTED")), co, phase=phase,
+                newJob="training/job-abc-g0002", resubmittedAt="2026-11-06T00:01:00Z")
+        with elapsed(seconds), mock.patch.object(relocator.kube, "workload_for_jobset", return_value=wl):
+            relocator.watch_admit(x)
+        return co
+
+    def test_timeout_marks_delayed_not_failed(self):
+        co = self.run_watch(relocator.ADMIT_TIMEOUT_SECONDS + 1, {"status": {}})
+        self.assertEqual(co.status["phase"], "AdmitDelayed")
+
+    def test_late_admission_is_done(self):
+        wl = {"status": {"clusterName": "worker1", "conditions": [{"type": "Admitted", "status": "True"}]}}
+        co = self.run_watch(relocator.ADMIT_TIMEOUT_SECONDS * 2, wl, phase="AdmitDelayed")
+        self.assertEqual(co.status["phase"], "Done")
+        self.assertEqual(co.status["targetCluster"], "worker1")
+
+    def test_vanished_jobset_fails(self):
+        co = self.run_watch(relocator.ADMIT_TIMEOUT_SECONDS + 1, None, jobset_404=True)
+        self.assertEqual(co.status["phase"], "Failed")
+
+
 class Scope(unittest.TestCase):
     def test_request_outside_training_namespace_rejected(self):
         r = rr()

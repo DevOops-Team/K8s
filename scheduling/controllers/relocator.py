@@ -25,6 +25,10 @@ action:
 단계마다 요청 status에 시각을 남기고, 다음 루프에서 비어 있는 단계부터 이어서 한다.
 펜싱 기록 갱신과 JobSet 생성도 같은 이름·조건으로 다시 해도 결과가 같아서, 실행기가 중간에 죽었다 살아나도 두 번 하지 않는다.
   acceptedAt -> isolatedAt -> stoppedAt -> resubmittedAt -> admittedAt (Done)
+
+시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
+  옛 실행 종료 15분 (STOP_HOLD_SECONDS) -> 넘으면 Held, 확인 어노테이션으로만 재개
+  입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
 import os
 import time
@@ -38,7 +42,12 @@ import recovery_render as R
 import recovery_store
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
-STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 내려가길 기다리는 최대 시간
+STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 이 시간 안에 안 내려가면 WaitingForStop으로 알림
+# 복구 컨트롤러는 옛 실행 종료를 15분 기다린 뒤 HOLD한다 (장애 복구 규약 2절). 그 뒤에 실행기가 혼자 재제출하지 않게
+# 요청 생성부터 이 시간이 지나면 자동 확인으로는 진행하지 않고 Held로 멈춘다. 확인 어노테이션(수동 재개)만 받는다
+STOP_HOLD_SECONDS = int(os.getenv("STOP_HOLD_SECONDS", "900"))
+# 재제출 잡이 이 시간 안에 입장 못 하면 AdmitDelayed로 알리고 계속 기다린다 (JobSet은 그대로 둠).
+# 복구 성공·실패 판단은 복구 컨트롤러 몫 (복원·학습 진행 확인 30분 뒤 HOLD)
 ADMIT_TIMEOUT_SECONDS = int(os.getenv("ADMIT_TIMEOUT_SECONDS", "900"))
 FENCING_WAIT_SECONDS = int(os.getenv("FENCING_WAIT_SECONDS", "300"))   # 복구 컨트롤러의 세대 +1을 기다리는 최대 시간
 # EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔). 없으면 MultiKueue Secret
@@ -239,11 +248,20 @@ def stop_old(x: Ctx):
     mgr_gone = kube.workload_for_jobset(x.mgr, ns, name) is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
-    if (mgr_gone and worker_gone) or confirmed:
+    held = kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
+    if confirmed or (mgr_gone and worker_gone and not held):
         how = f"옛 Workload 삭제 확인 ({why})" if (mgr_gone and worker_gone) else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
         advance(x, ("GENERATION_ADVANCED", "OLD_RUN_STOPPED"), "OLD_RUN_STOPPED")
         log.info("%s: 옛 실행 멈춤 (%s) -> OLD_RUN_STOPPED", x.name, how)
         x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=how)
+        return
+    if held:
+        # 복구 컨트롤러가 이미 HOLD했을 시간. 뒤늦게 멈춘 게 보여도 혼자 재제출하지 않는다
+        if x.st.get("phase") != "Held":
+            msg = (f"요청 후 {STOP_HOLD_SECONDS}s 안에 옛 실행 종료를 확인 못 함 ({why}) -> 멈춤 (복구 컨트롤러 HOLD 시간). "
+                   f"재개하려면 옛 실행이 멈춘 걸 확인하고 이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
+            log.warning("%s: %s", x.name, msg)
+            x.save(phase="Held", message=msg)
         return
     # 멈춘 게 확인되지 않으면 재제출하지 않는다 (contracts.md: 종료 확인 전 restart 금지 = 이중 실행 방지)
     # 관리 클러스터 Workload는 워커가 끊겨 있어도 지워진다. 워커 쪽에서 사라진 걸 봐야 멈춘 것
@@ -350,7 +368,24 @@ def watch_admit(x: Ctx):
         x.save(phase="Done", admittedAt=kube.now_rfc3339(), targetCluster=cluster)
         log.info("%s: 완료, %s가 %s에 입장", x.name, name, cluster)
     elif kube.since(x.st["resubmittedAt"]) > ADMIT_TIMEOUT_SECONDS:
-        x.save(phase="Failed", message=f"재제출 잡이 {ADMIT_TIMEOUT_SECONDS}s 안에 입장 못 함")
+        if not wl and not jobset_exists(x, ns, name):
+            x.save(phase="Failed", message=f"재제출 잡 {ns}/{name}이 입장 전에 사라짐")
+            log.warning("%s: 재제출 잡 %s/%s가 사라짐", x.name, ns, name)
+        elif x.st.get("phase") != "AdmitDelayed":
+            # 늦게라도 입장하면 Done. 실패로 끝내면 늦게 입장해 복구된 잡과 요청 기록이 어긋난다
+            msg = f"재제출 잡이 {ADMIT_TIMEOUT_SECONDS}s 안에 입장 못 함 -> 계속 기다림 (JobSet 유지, 복구 판단은 복구 컨트롤러)"
+            log.warning("%s: %s", x.name, msg)
+            x.save(phase="AdmitDelayed", message=msg)
+
+
+def jobset_exists(x: Ctx, ns, name):
+    try:
+        x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        return True
+    except client.ApiException as e:
+        if e.status == 404:
+            return False
+        raise
 
 
 def step(x: Ctx, all_rrs):
