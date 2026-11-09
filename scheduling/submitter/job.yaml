@@ -1,8 +1,36 @@
 # 잡 투입기를 관리 클러스터 platform에서 실험 때만 Job으로 (K8s 아키텍처 11/05: 데이터·잡 투입기 -> platform)
 # 코드·시나리오는 ConfigMap으로 넣는다:
 #   kubectl -n platform create configmap submitter --from-file=submit.py --from-file=scenario.csv=<시나리오 파일>
-#   kubectl -n platform apply -f job.yaml && kubectl -n platform logs -f job/submitter
-# 백엔드 모드만 (표준 라이브러리만 씀). 결과 CSV는 로그 끝에 출력
+#   kubectl apply -f job.yaml && kubectl -n platform logs -f job/submitter
+# 백엔드 모드. Kafka(experiment.started·ended)와 JobSet 조회(잡이 다 끝났는지)에 confluent-kafka·kubernetes가 필요해
+# 시작할 때 /tmp에 설치한다 (PyPI로 나가는 길 필요. 막혀 있으면 이미지를 따로 만들 것). 결과 CSV는 로그 끝에 출력
+# 실험 조건은 args 뒤에 붙인다: --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: submitter
+  namespace: platform
+---
+# 잡이 끝났는지 보려고 training의 JobSet만 읽는다
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: submitter-read-jobsets
+  namespace: training
+rules:
+- apiGroups: [jobset.x-k8s.io]
+  resources: [jobsets]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: submitter-read-jobsets
+  namespace: training
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: submitter-read-jobsets}
+subjects:
+- {kind: ServiceAccount, name: submitter, namespace: platform}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -13,20 +41,34 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     spec:
+      serviceAccountName: submitter
       restartPolicy: Never
       securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
       containers:
       - name: submitter
         image: python:3.12-slim
-        command: [sh, -c, "python /app/submit.py /app/scenario.csv --out /tmp/results.csv && cat /tmp/results.csv"]
+        command: [sh, -c]
+        args:
+        - >-
+          pip install -q --no-cache-dir --target /tmp/py confluent-kafka==2.6.1 kubernetes==31.0.0 &&
+          python /app/submit.py /app/scenario.csv --out /tmp/results.csv "$@";
+          rc=$?; cat /tmp/results.csv; exit $rc
+        - submitter
         env:
         - {name: BACKEND_URL, value: "http://backend.platform.svc:8000"}
+        - {name: KAFKA_BOOTSTRAP, value: "172.30.0.40:9092"}
+        - {name: KAFKA_TOPIC, value: job.lifecycle}
         - {name: MODEL, value: gpt2}
         - {name: DATASET_ID, value: ds-demo}
+        - {name: PYTHONPATH, value: /tmp/py}
+        - {name: HOME, value: /tmp}
         - {name: PYTHONUNBUFFERED, value: "1"}
         volumeMounts:
         - {name: app, mountPath: /app, readOnly: true}
-        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
+        - {name: tmp, mountPath: /tmp}
+        resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
       volumes:
       - name: app
         configMap: {name: submitter}
+      - name: tmp
+        emptyDir: {}
