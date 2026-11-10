@@ -73,6 +73,6 @@ def test_something(kube, check, info):
 | normal/05 heavy_fifo | 4장 잡이 막히면 뒤의 3장 잡도 대기 | 기본 |
 | normal/06 gang | 1~4장 잡을 섞어 넣어도 반쪽 배치 0건 | 기본 |
 | normal/07 big_job_admission | 작은 잡이 계속 와도 큰 잡 입장 (KEP-83) | 기본 |
-| compare/queue_split | 큐 분리 vs 큐 1개: 큰 잡 쿼터 시각 | 기본 |
+| compare/queue_split | 큐 분리 vs 큐 1개: 큰 잡 쿼터 시각, 분리했을 때 쿼터 뒤 워커 배치까지 (찜) | 기본 |
 
-기본 = dispatcher·relocator. 배분 조정 컨트롤러(aging)와 디스패처 비워 두기는 11/09에 뺐다 (`../controllers/README.md`의 "뺀 것").
+기본 = dispatcher·relocator. 배분 조정 컨트롤러(aging)와 시간 기준 비워 두기는 11/09에 뺐고, 11/10에 디스패처 찜을 넣었다 (`../controllers/README.md`의 "뺀 것").

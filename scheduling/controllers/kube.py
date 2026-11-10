@@ -130,16 +130,15 @@ def workload_owner(wl):
 
 
 def owner_annotations(api, wl) -> dict:
+    """Workload를 만든 JobSet·Job의 어노테이션. 조회 실패는 그대로 올린다 (ApiException).
+    빈 dict로 넘기면 target·exclude·manual이 없는 잡처럼 보여서, exclude로만 피하던 클러스터에 다시 보내게 된다"""
     kind, name = workload_owner(wl)
     ns = wl["metadata"]["namespace"]
-    try:
-        if kind == "JobSet":
-            obj = kueue(api).get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
-            return obj["metadata"].get("annotations") or {}
-        if kind == "Job":
-            return client.BatchV1Api(api).read_namespaced_job(name, ns).metadata.annotations or {}
-    except client.ApiException:
-        pass
+    if kind == "JobSet":
+        obj = kueue(api).get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        return obj["metadata"].get("annotations") or {}
+    if kind == "Job":
+        return client.BatchV1Api(api).read_namespaced_job(name, ns).metadata.annotations or {}
     return {}
 
 

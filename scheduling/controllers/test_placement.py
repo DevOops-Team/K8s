@@ -1,7 +1,7 @@
 """python -m unittest -v test_placement.py  (쿠버네티스 없이 돈다)"""
 import unittest
 
-from placement import Cluster, choose
+from placement import Cluster, choose, reserve
 
 
 def c(name, quota, nodes, **kw):
@@ -81,6 +81,47 @@ class Place(unittest.TestCase):
         cs[0].place(3, recovery=False)
         self.assertIsNone(choose(3, cs))
         self.assertEqual(choose(1, cs), "worker1")
+
+
+class Reserve(unittest.TestCase):
+    def test_picks_most_free(self):
+        cs = [c("worker1", 1, 1), c("worker2", 3, 3), c("worker3", 2, 2)]
+        self.assertEqual(reserve(4, cs), "worker2")
+
+    def test_free_is_min_of_quota_and_nodes(self):
+        # worker1은 쿼터 3이지만 노드는 1대만 빔 -> 실제 빈 자리는 worker2가 더 많음
+        cs = [c("worker1", 3, 1), c("worker2", 2, 2)]
+        self.assertEqual(reserve(4, cs), "worker2")
+
+    def test_pinned_stays_even_if_another_gets_emptier(self):
+        # 루프마다 옮기면 옛 워커 빈 칸에 작은 잡이 다시 들어감 -> 한 번 찜하면 그대로
+        cs = [c("worker1", 2, 2), c("worker2", 3, 3)]
+        self.assertEqual(reserve(4, cs, pinned="worker1"), "worker1")
+
+    def test_pinned_dropped_when_unusable(self):
+        cs = [c("worker1", 2, 2, fenced=True), c("worker2", 1, 1)]
+        self.assertEqual(reserve(4, cs, pinned="worker1"), "worker2")
+        cs = [c("worker1", 2, 2, active=False), c("worker2", 1, 1)]
+        self.assertEqual(reserve(4, cs, pinned="worker1"), "worker2")
+        cs = [c("worker1", 2, 2), c("worker2", 1, 1)]
+        self.assertEqual(reserve(4, cs, pinned="worker1", exclude={"worker1"}), "worker2")   # 앞 잡이 찜함
+
+    def test_never_fits_is_skipped(self):
+        # worker1은 cordon으로 노드 3대뿐 -> 다 비어도 4장 잡은 못 들어감
+        cs = [c("worker1", 3, 3, quota_total=4, node_total=3), c("worker2", 0, 0, quota_total=4, node_total=4)]
+        self.assertEqual(reserve(4, cs), "worker2")
+        self.assertEqual(reserve(4, cs, pinned="worker1"), "worker2")
+        self.assertEqual(reserve(3, cs), "worker1")
+
+    def test_recovery_counts_spare_and_recovery_quota(self):
+        x = c("worker1", 0, 0, quota_total=4, node_total=3, recovery_total=1, spare_free=1, recovery_free=1)
+        self.assertIsNone(reserve(4, [x]))
+        self.assertEqual(reserve(4, [x], recovery=True), "worker1")
+
+    def test_target_and_none(self):
+        cs = [c("worker1", 0, 0), c("worker2", 3, 3)]
+        self.assertEqual(reserve(4, cs, target="worker1"), "worker1")
+        self.assertIsNone(reserve(4, cs, exclude={"worker1", "worker2"}))
 
 
 if __name__ == "__main__":

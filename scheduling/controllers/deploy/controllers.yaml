@@ -35,6 +35,9 @@ rules:
 - apiGroups: [batch]
   resources: [jobs]
   verbs: [get]
+- apiGroups: [scheduling.devoops.site]   # 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지킴 (읽기만)
+  resources: [relocationrequests]
+  verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
