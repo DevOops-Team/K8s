@@ -2,7 +2,7 @@
 
 | 파일 | 일감 | 보는 것 | 바꾸는 것 |
 |---|---|---|---|
-| `dispatcher.py` | GPU-67 | 쿼터는 잡았고 워커는 미정인 Workload | `status.nominatedClusterNames` |
+| `dispatcher.py` | GPU-67 | 쿼터는 잡았고 워커는 미정인 Workload, 진행 중인 `RelocationRequest`(읽기만) | `status.nominatedClusterNames`, 찜 어노테이션 `devoops/reserved-cluster` |
 | `relocator.py` | GPU-68 | `RelocationRequest` + 펜싱 기록(DynamoDB) | 노드 cordon·taint, MultiKueueCluster 펜싱 라벨, 잡 삭제·재제출, 펜싱 기록 `recovery_phase`, 요청 status |
 
 - `keys.py`: 다른 파트와 맞물리는 이름(라벨·어노테이션·CRD). 이름 바꿀 땐 여기만.
@@ -40,14 +40,43 @@ kubectl --context kind-manager -n platform get lease | grep scheduling-   # hold
 | 뺀 것 | 이유 |
 |---|---|
 | 배분 조정 컨트롤러 `allocator.py` (GPU-69, aging: 대기 시간 x GPU 수로 `training-aged` 올리기) | 선점을 안 쓰므로 우선순위는 줄 순서에만 쓰이는데, 먼저 온 잡은 이미 앞에 있음. Light(BestEffortFIFO)는 1장만 비면 순서와 상관없이 1장 잡이 들어가서 올려도 소용없고, Heavy(StrictFIFO)에선 4장 잡이 먼저 aged 되어 먼저 온 3장 잡을 새치기함 |
-| 디스패처 비워 두기 (`STARVE_SECONDS`) | 큰 잡이 쿼터를 받으면 그 몫은 다른 잡이 못 쓰고, 디스패처는 먼저 온 순으로 보므로 4장 빈 워커가 생기면 큰 잡이 먼저 가져감. 켬/끔 비교에서 입장 시각이 같았음 (185s vs 192s, 192s vs 189s) |
+| 디스패처 비워 두기 (`STARVE_SECONDS`) | 기다린 시간을 기준으로 비우는 방식은 뺐다. 켬/끔 비교에서 입장 시각이 같았음 (185s vs 192s, 192s vs 189s). 다만 그 비교는 4장 빈 워커가 안 생기는 상황을 못 만들었고, 11/10 compare에서 쿼터 뒤 142s 지연이 나와 아래 "찜"으로 다시 넣음 |
 | 노드 단위 배치 계산 | 노드당 GPU 1장, Pod당 GPU 1장이라 "들어가는 노드가 있나"가 "남은 GPU 수"와 같음. cordon·NotReady 노드를 빼는 것과 예비 노드를 복구 잡에만 주는 것은 그대로 |
+
+## 찜 (11/10)
+
+관리 Kueue는 워커 3개 합계로 쿼터를 준다. 4장 잡이 쿼터를 받아도 4장이 한 워커에 비어 있다는 보장이 없고,
+쿼터를 받은 잡은 더는 "대기 중"이 아니라서 Light가 빈 칸을 계속 메운다 (11/10 compare: 쿼터 뒤 142s, 상한 없음).
+
+- 쿼터는 받았는데 들어갈 워커가 없는 잡은 워커 하나를 찜한다 (`devoops/reserved-cluster`, Workload 어노테이션).
+- 찜한 워커에는 **뒤 순서 학습 잡**을 안 보낸다. 다른 워커에는 그대로 보낸다. 먼저 온 잡은 영향 없음.
+- 복구 잡은 학습 잡의 찜을 무시한다. 복구 잡의 찜은 학습 잡·뒤 순서 복구 잡이 지킨다.
+- 한 번 찜하면 고정. 그 워커가 펜싱·끊김·exclude되거나 cordon으로 영영 못 들어가게 되면 다시 고른다.
+- 고르는 기준은 지금 빈 GPU가 가장 많은 곳. 찜한 잡이 다른 워커에 먼저 들어갈 수 있게 되면 거기로 가고 찜은 지운다.
+- 워커 하나에 찜 하나 (먼저 온 순).
+
+남은 한계: 잡이 언제 끝날지 모르므로 "가장 빨리 비는 워커"를 고르지는 못한다. 찜한 워커에 오래 도는 잡이 있으면
+그 잡이 끝날 때까지 기다린다 (그동안 그 워커의 빈 칸은 놂). 잡에 최대 실행 시간을 받으면 풀 수 있다.
+
+## 재배치 자리 지키기 · 종료 확인 범위 (11/10)
+
+- **자리 지키기 (디스패처)**: 같은 클러스터로 다시 띄우는 재배치(`restartInPlace`·`moveToSpare`)가 격리 단계를 지나면,
+  디스패처는 그 클러스터를 재제출 잡 몫으로 찜한 것처럼 다룬다. 재배치 실행기는 옛 잡을 먼저 내리고 새 잡을 넣는데,
+  선점이 없어서 그 사이 풀린 자리를 쿼터를 쥐고 기다리던 학습 잡이 가져갈 수 있었다. 새 잡이 지명되거나
+  `RELOCATION_HOLD_SECONDS`가 지나면 푼다. 디스패처는 `RelocationRequest`를 읽기만 한다.
+  - 관리 클러스터 쿼터는 따로다. 4장 복구 잡은 `cq-recovery` 3 + 학습 몫 1을 빌려야 해서 쿼터를 늦게 받을 수 있다
+    (시나리오 11, 대책 B = `cq-recovery` 4). 그동안 지켜 둔 클러스터는 비어 있고, 시간이 지나면 풀린다.
+- **종료 확인 범위 (재배치 실행기)**: 옛 실행이 멈췄는지는 입장했던 워커(`sourceCluster`)뿐 아니라 디스패처가 지명만
+  했던 워커(`status.seenClusters`)에서도 확인한다. 지명만 된 상태에서도 워커에 복사본·Pod가 있을 수 있다.
+- **디스패처가 읽는 어노테이션**(`devoops/target-cluster`·`exclude-clusters`·`manual-dispatch`)은 재배치 실행기와
+  클러스터 관리자만 붙이거나 바꿀 수 있다 (`deploy/admission-policy.yaml`의 `scheduling-dispatch-annotations`).
 
 ## 조정 값 (환경 변수)
 
 | 변수 | 기본 | 뜻 |
 |---|---|---|
 | `RENOMINATE_SECONDS` | 60 | 지명했는데 이 시간 안에 워커 입장 못 하면 다른 곳으로 |
+| `RELOCATION_HOLD_SECONDS` | 300 | 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지키는 최대 시간 (격리 시각, 옛 실행 종료 뒤엔 그 시각부터) |
 | `LEASE_SECONDS` / `RENEW_SECONDS` | 15 / 5 | 리더가 이만큼 갱신 안 하면 남이 가져감 / 갱신 주기 |
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
 | `RECOVERY_STORE` | configmap | 복구 원본·펜싱 기록 저장소 (`aws`면 `CKPT_BUCKET`·`FENCING_TABLE`·`AWS_REGION`) |

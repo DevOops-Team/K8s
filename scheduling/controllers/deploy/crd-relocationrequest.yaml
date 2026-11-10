@@ -83,3 +83,8 @@ spec:
               fromGeneration: {type: integer}
               toGeneration: {type: integer}
               oldExclude: {type: string}
+              gpus: {type: integer, description: 옛 잡의 GPU 수 (기록용)}
+              seenClusters:
+                type: array
+                items: {type: string}
+                description: 옛 잡 복사본이 있을 수 있는 워커 (입장 + 지명). 종료 확인은 여기 전부를 본다

@@ -1,12 +1,14 @@
 # 관리 클러스터 입장 정책 (ValidatingAdmissionPolicy, K8s 1.30+ GA. 우리는 1.35)
-# RBAC만으로는 못 막는 것 3가지를 API 서버에서 거절한다 (보안 검토 11/09):
+# RBAC만으로는 못 막는 것 4가지를 API 서버에서 거절한다 (보안 검토 11/09, 4번은 11/10 추가):
 #   1. RelocationRequest 만들기·고치기 = 복구 컨트롤러만
 #      (요청 하나로 노드 cordon·클러스터 펜싱·잡 삭제가 일어남)
 #   2. RelocationRequest status 쓰기 = 재배치 실행기만
 #      (실행기가 status의 sourceCluster로 옛 실행이 멈췄는지 확인함)
 #   3. 복구 큐·복구 우선순위를 새로 다는 것 = 재배치 실행기만
 #      (아무 잡이나 queue-recovery·recovery를 달면 예비 GPU를 차지함)
-# 셋 다 클러스터 관리자(kind·Kubespray kubeadm 관리자 kubeconfig)는 통과: 시나리오·run-local.sh·손 복구용
+#   4. 디스패처가 읽는 어노테이션(target-cluster·exclude-clusters·manual-dispatch)을 붙이기·바꾸기·떼기 = 재배치 실행기만
+#      (manual-dispatch=true면 쿼터만 쥐고 배치가 안 됨, target이면 클러스터를 골라 감, exclude를 떼면 피해야 할 클러스터로 감)
+# 넷 다 클러스터 관리자(kind·Kubespray kubeadm 관리자 kubeconfig)는 통과: 시나리오·run-local.sh·손 복구용
 # ServiceAccount 이름이 바뀌면 여기와 controllers.yaml을 같이 고칠 것
 #   복구 컨트롤러: platform/recovery-controller (onprem/apps/recovery-controller)
 #   재배치 실행기: platform/relocator
@@ -110,4 +112,49 @@ kind: ValidatingAdmissionPolicyBinding
 metadata: {name: scheduling-recovery-queue}
 spec:
   policyName: scheduling-recovery-queue
+  validationActions: [Deny]
+---
+# 디스패처가 읽는 어노테이션의 값이 달라지는 경우만 본다 (새로 붙임·값 바꿈·뗌). 그대로인 수정은 통과.
+# 백엔드가 최초 제출 때 이 어노테이션을 붙여야 하게 되면 allowed에 백엔드 ServiceAccount를 넣을 것
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: scheduling-dispatch-annotations}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [jobset.x-k8s.io]
+      apiVersions: ["*"]
+      operations: [CREATE, UPDATE]
+      resources: [jobsets]
+    - apiGroups: [batch]
+      apiVersions: ["*"]
+      operations: [CREATE, UPDATE]
+      resources: [jobs]
+  variables:
+  - name: keys
+    expression: "['devoops/target-cluster', 'devoops/exclude-clusters', 'devoops/manual-dispatch']"
+  - name: changed
+    expression: >-
+      variables.keys.exists(k,
+        (has(object.metadata.annotations) && k in object.metadata.annotations)
+          != (oldObject != null && has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations)
+        || (has(object.metadata.annotations) && k in object.metadata.annotations
+            && oldObject != null && has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations
+            && object.metadata.annotations[k] != oldObject.metadata.annotations[k]))
+  - name: allowed
+    expression: >-
+      request.userInfo.groups.exists(g, g == 'system:masters' || g == 'kubeadm:cluster-admins') ||
+      request.userInfo.username in ['system:serviceaccount:platform:relocator',
+                                    'system:serviceaccount:platform:jobset-controller-manager']
+  validations:
+  - expression: "!variables.changed || variables.allowed"
+    messageExpression: "'devoops/target-cluster·exclude-clusters·manual-dispatch는 재배치 실행기(platform/relocator)만 붙이거나 바꿀 수 있음: ' + request.userInfo.username"
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: scheduling-dispatch-annotations}
+spec:
+  policyName: scheduling-dispatch-annotations
   validationActions: [Deny]

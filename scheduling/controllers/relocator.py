@@ -145,10 +145,29 @@ def accept(x: Ctx, all_rrs):
         x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
         return False
     x.save(phase="Accepted", sourceCluster=source, jobId=job_id, fromGeneration=old_gen, toGeneration=to_gen,
-           oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message=f"펜싱 기록 {why}")
+           oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message=f"펜싱 기록 {why}",
+           seenClusters=sorted(set(x.st.get("seenClusters") or []) | copy_clusters(wl)),
+           **({"gpus": sum(kube.workload_pods(wl))} if (wl or {}).get("spec", {}).get("podSets") else {}))
     log.info("%s: 접수 %s %s/%s (지금 %s, 세대 %s -> %s)", x.name, x.spec["action"], ns, name,
              source or "워커 미정", old_gen, to_gen)
     return True
+
+
+def copy_clusters(wl) -> set:
+    """옛 잡의 복사본이 있을 수 있는 워커: 입장한 곳(clusterName) + 디스패처가 지명한 곳(nominatedClusterNames).
+    지명만 된 상태에서도 MultiKueue가 그 워커에 복사본을 만들고 Pod가 뜰 수 있다"""
+    st = (wl or {}).get("status") or {}
+    return {c for c in [st.get("clusterName"), *(st.get("nominatedClusterNames") or [])] if c}
+
+
+def note_copies(x: Ctx, wl):
+    """관리 클러스터 Workload가 보이는 동안 복사본이 있을 수 있는 워커를 status에 모아 둔다.
+    Workload가 지워진 뒤에는 어디에 보냈었는지 알 길이 없어서, 종료 확인(old_gone_on_worker)이 볼 곳을 미리 적어 둠"""
+    seen = set(x.st.get("seenClusters") or [])
+    new = copy_clusters(wl) - seen
+    if new:
+        log.info("%s: 옛 잡 복사본이 있을 수 있는 워커 추가 %s", x.name, sorted(new))
+        x.save(seenClusters=sorted(seen | new))
 
 
 def cordon_nodes(x: Ctx, src, nodes):
@@ -202,11 +221,20 @@ def isolate(x: Ctx):
 
 
 def old_gone_on_worker(x: Ctx, ns, name):
-    """옛 잡이 돌던 워커에서 JobSet·Workload·Pod가 전부 없어졌는지. (멈춤확인, 이유)
-    워커에 접속이 안 되면 확인 불가 = 멈췄다고 보지 않는다"""
-    src = x.st.get("sourceCluster")
-    if not src:
+    """옛 잡의 복사본이 있을 수 있는 모든 워커에서 JobSet·Workload·Pod가 전부 없어졌는지. (멈춤확인, 이유)
+    볼 곳 = 입장했던 워커(sourceCluster) + 지명만 됐던 워커(seenClusters). 하나라도 확인 못 하면 멈췄다고 보지 않는다"""
+    places = sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c})
+    if not places:
         return True, "워커에 보내지기 전이었음"
+    for src in places:
+        gone, why = gone_on(x, src, ns, name)
+        if not gone:
+            return False, why
+    return True, f"{','.join(places)}에서도 사라짐"
+
+
+def gone_on(x: Ctx, src, ns, name):
+    """워커 src에서 옛 잡이 사라졌는지. 워커에 접속이 안 되면 확인 불가 = 멈췄다고 보지 않는다"""
     api = x.workers.get().get(src)
     if api is None:
         return False, f"{src} 접속 정보 없음"
@@ -238,6 +266,7 @@ def old_gone_on_worker(x: Ctx, ns, name):
 
 def stop_old(x: Ctx):
     ns, name = x.job()
+    note_copies(x, kube.workload_for_jobset(x.mgr, ns, name))   # 지우기 전에: 접수 뒤 디스패처가 지명했을 수 있음
     try:
         x.co.delete_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name,
                                              propagation_policy="Background")
@@ -245,7 +274,9 @@ def stop_old(x: Ctx):
     except client.ApiException as e:
         if e.status != 404:
             raise
-    mgr_gone = kube.workload_for_jobset(x.mgr, ns, name) is None
+    left = kube.workload_for_jobset(x.mgr, ns, name)
+    note_copies(x, left)
+    mgr_gone = left is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
     held = kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
