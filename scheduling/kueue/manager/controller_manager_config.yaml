@@ -1,6 +1,6 @@
 apiVersion: config.kueue.x-k8s.io/v1beta2
-# Kueue가 도는 네임스페이스 (기본 kueue-system). 웹훅 인증서 이름·MultiKueue kubeconfig Secret 위치도 여기
-namespace: platform
+# Kueue가 도는 네임스페이스. 웹훅 인증서 이름·MultiKueue kubeconfig Secret 위치도 여기
+namespace: kueue-system
 clientConnection:
   burst: 500
   qps: 300

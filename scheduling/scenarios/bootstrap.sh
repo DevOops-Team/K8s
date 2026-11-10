@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MGR=kind-manager
 WORKERS=(worker1 worker2 worker3)
-GPU_SEL=node-role.devoops.site/gpu=true
+GPU_SEL=devoops/gpu=true
 say() { echo; echo "[$(date +%H:%M:%S)] === $*"; }
 
 say "관리 클러스터"
@@ -29,8 +29,8 @@ for w in "${WORKERS[@]}"; do
   kubectl --context $ctx apply -f "$ROOT/kwok/nodes.yaml" >/dev/null
   kubectl --context $ctx apply -f "$ROOT/examples/kwok/pod-complete-delay.yaml" >/dev/null
   kubectl --context $ctx apply --server-side --force-conflicts -k "$ROOT/kueue/worker" >/dev/null
-  kubectl --context $ctx -n platform rollout restart deploy/kueue-controller-manager >/dev/null
-  kubectl --context $ctx -n platform rollout status deploy/kueue-controller-manager --timeout=180s
+  kubectl --context $ctx -n kueue-system rollout restart deploy/kueue-controller-manager >/dev/null
+  kubectl --context $ctx -n kueue-system rollout status deploy/kueue-controller-manager --timeout=180s
   kubectl --context $ctx -n training get localqueues -o custom-columns=LQ:.metadata.name,CQ:.spec.clusterQueue --no-headers | sed 's/^/  /'
   kubectl --context $ctx get clusterqueues --no-headers | sed 's/^/  /'
   kubectl --context $ctx get nodes -l "$GPU_SEL" -L devoops/spare --no-headers | sed 's/^/  /'

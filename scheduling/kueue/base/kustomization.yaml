@@ -1,19 +1,8 @@
-# Kueue v0.20.4 기본 매니페스트를 platform 네임스페이스로 옮겨 설치 (11/05 K8s 아키텍처)
-namespace: platform
+# Kueue v0.20.4 기본 매니페스트 (kueue-system 그대로, 11/10 정본: Kueue는 kueue-system)
+# 바꾸는 것은 CPU requests 하나. 네임스페이스를 옮기지 않으므로 웹훅 제외 목록·kube-system RoleBinding 땜질이 필요 없다
 resources:
-  - namespace.yaml
   - kueue-v0.20.4-manifests.yaml
 patches:
-  # 기본 매니페스트의 kueue-system Namespace는 안 만듦 (platform은 namespace.yaml)
-  - target:
-      kind: Namespace
-      name: kueue-system
-    patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: kueue-system
   # CPU requests 500m -> 250m (관리 worker 1대 장애 시 CPU 여유 확보, EKS 시스템 노드 공간 확보)
   # limits(cpu 2, memory 512Mi)와 memory requests는 기본값 유지
   - target:
@@ -32,48 +21,3 @@ patches:
                 resources:
                   requests:
                     cpu: 250m
-  # Service selector가 control-plane: controller-manager 하나뿐 -> 같은 platform ns의 JobSet Pod(같은 라벨)도 잡힘.
-  # 그러면 Kueue 웹훅 요청 일부가 JobSet Pod(다른 인증서)로 가서 실패 -> failurePolicy Fail이라 생성 거부.
-  - target:
-      kind: Service
-    patch: |-
-      - op: add
-        path: /spec/selector/app.kubernetes.io~1name
-        value: kueue
-replacements:
-  # 웹훅은 kube-system·kueue-system을 제외하게 하드코딩돼 있음 -> 두 번째 값을 platform으로.
-  # 안 바꾸면 failurePolicy Fail인 Kueue Pod 웹훅이 자기 네임스페이스(platform)의 Pod 생성까지 막을 수 있음
-  - source:
-      kind: Namespace
-      name: platform
-      fieldPath: metadata.name
-    targets:
-      - select:
-          kind: MutatingWebhookConfiguration
-          name: kueue-mutating-webhook-configuration
-        fieldPaths:
-          - webhooks.*.namespaceSelector.matchExpressions.[key=kubernetes.io/metadata.name].values.1
-      - select:
-          kind: ValidatingWebhookConfiguration
-          name: kueue-validating-webhook-configuration
-        fieldPaths:
-          - webhooks.*.namespaceSelector.matchExpressions.[key=kubernetes.io/metadata.name].values.1
-      # kube-system에 남는 아래 RoleBinding은 namespace 변환이 subject를 안 고쳐서 kueue-system SA를 가리킴
-      - select:
-          kind: RoleBinding
-          name: kueue-visibility-server-auth-reader
-        fieldPaths:
-          - subjects.[name=kueue-controller-manager].namespace
-  # visibility 서버 RoleBinding은 kube-system의 Role(extension-apiserver-authentication-reader)을 참조하므로
-  # kube-system에 있어야 함. 위 namespace: platform이 옮겨 버리면 Kueue가 시작 못 하고 CrashLoopBackOff.
-  # replacements는 namespace 변환 뒤에 돌기 때문에 여기서 되돌린다 (값은 웹훅의 첫 번째 제외 값 kube-system).
-  - source:
-      kind: MutatingWebhookConfiguration
-      name: kueue-mutating-webhook-configuration
-      fieldPath: webhooks.0.namespaceSelector.matchExpressions.[key=kubernetes.io/metadata.name].values.0
-    targets:
-      - select:
-          kind: RoleBinding
-          name: kueue-visibility-server-auth-reader
-        fieldPaths:
-          - metadata.namespace

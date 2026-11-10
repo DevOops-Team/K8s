@@ -176,5 +176,57 @@ class RelocationHolds(unittest.TestCase):
             self.assertEqual(D.relocation_holds(None, []), {})
 
 
+
+
+class FillCapacity(unittest.TestCase):
+    """예비 노드(devoops/spare taint)의 GPU는 자리 표시 Pod가 있든 없든 복구 잡 몫 (11/10 정본 I4)"""
+
+    @staticmethod
+    def node(name, *, spare=False, gpus=1, ready=True, cordon=False):
+        from types import SimpleNamespace as N
+        taints = [N(key=K.TAINT_SPARE)] if spare else []
+        return N(metadata=N(name=name), spec=N(unschedulable=cordon, taints=taints),
+                 status=N(allocatable={K.GPU: str(gpus)}, conditions=[N(type="Ready", status="True" if ready else "False")]))
+
+    @staticmethod
+    def pod(node, gpus=1, placeholder=False):
+        from types import SimpleNamespace as N
+        ct = N(resources=N(requests={K.GPU: str(gpus)}))
+        return N(spec=N(node_name=node, containers=[ct],
+                        priority_class_name=K.PLACEHOLDER_PRIORITY_CLASS if placeholder else None))
+
+    def fill(self, nodes, pods):
+        from types import SimpleNamespace as N
+        core = mock.Mock()
+        core.list_pod_for_all_namespaces.return_value = N(items=pods)
+        core.list_node.return_value = N(items=nodes)
+        kq = mock.Mock()
+        kq.list_cluster_custom_object.return_value = {"items": [
+            {"spec": {"resourceGroups": [{"flavors": [{"resources": [{"name": K.GPU, "nominalQuota": "4"}]}]}]},
+             "status": {}},
+            {"spec": {"resourceGroups": [{"flavors": [{"resources": [{"name": K.GPU, "nominalQuota": "1",
+                                                                       "lendingLimit": "0"}]}]}]}, "status": {}}]}
+        c = Cluster(name="w", active=True)
+        with mock.patch.object(D.client, "CoreV1Api", return_value=core), mock.patch.object(D.kube, "kueue", return_value=kq):
+            D.fill_capacity(c, object())
+        return c
+
+    def test_spare_without_placeholder_is_recovery_only(self):
+        nodes = [self.node(f"g{i}") for i in range(4)] + [self.node("s", spare=True)]
+        c = self.fill(nodes, [])
+        self.assertEqual((c.node_free, c.spare_free, c.node_total), (4, 1, 4))
+        self.assertEqual(c.free_for(False), 4)
+        self.assertEqual(c.free_for(True), 5)
+
+    def test_spare_with_placeholder_and_busy_spare(self):
+        nodes = [self.node("g0"), self.node("s1", spare=True), self.node("s2", spare=True)]
+        c = self.fill(nodes, [self.pod("s1", placeholder=True), self.pod("s2")])   # s2는 복구 잡이 쓰는 중
+        self.assertEqual((c.node_free, c.spare_free), (1, 1))
+
+    def test_cordoned_spare_not_counted(self):
+        c = self.fill([self.node("s", spare=True, cordon=True)], [])
+        self.assertEqual(c.spare_free, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

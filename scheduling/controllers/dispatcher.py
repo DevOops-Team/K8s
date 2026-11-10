@@ -94,6 +94,8 @@ def fill_capacity(c: Cluster, api):
             c.quota_total += nominal
             c.quota_free += nominal - reserved
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
+    #    예비 노드(devoops/spare taint)는 자리 표시 Pod가 있든 없든 전부 복구 잡 몫 (학습 잡 Pod는 taint로 못 감)
+    #    일반 노드의 자리 표시 Pod 자리도 복구 잡 몫 (예비 taint 도입 전 구성 호환)
     core = client.CoreV1Api(api)
     used, held = {}, {}
     pods = core.list_pod_for_all_namespaces(
@@ -111,6 +113,9 @@ def fill_capacity(c: Cluster, api):
         if n.spec.unschedulable or not ready:
             continue
         alloc = int((n.status.allocatable or {}).get(K.GPU, 0))
+        if any(t.key == K.TAINT_SPARE for t in (n.spec.taints or [])):
+            c.spare_free += max(alloc - used.get(n.metadata.name, 0), 0)
+            continue
         free = alloc - used.get(n.metadata.name, 0) - held.get(n.metadata.name, 0)
         c.node_total += max(alloc - held.get(n.metadata.name, 0), 0)
         c.node_free += max(free, 0)

@@ -79,7 +79,19 @@ class Render(unittest.TestCase):
                     e["value"] = "1"
         pod["spec"]["containers"][0]["args"] = ORIG["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
             "spec"]["containers"][0]["args"]
+        orig_tols = ORIG["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"].get("tolerations")
+        pod["spec"]["tolerations"] = [t for t in pod["spec"]["tolerations"] if t != R.SPARE_TOLERATION]
+        if orig_tols is None and not pod["spec"]["tolerations"]:
+            del pod["spec"]["tolerations"]
         self.assertEqual(back, ORIG)
+
+    def test_spare_toleration_added_once(self):
+        """복구 잡만 예비 노드(devoops/spare taint)에 갈 수 있다. 두 번 렌더해도 하나만"""
+        pod = self.new["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        self.assertEqual(pod["tolerations"].count(R.SPARE_TOLERATION), 1)
+        again = R.render(self.new, "3f9a1c2e", 3, "r2", None, [])
+        pod2 = again["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        self.assertEqual(sum(t.get("key") == "devoops/spare" for t in pod2["tolerations"]), 1)
 
     def test_original_untouched(self):
         self.assertEqual(self.orig, ORIG)

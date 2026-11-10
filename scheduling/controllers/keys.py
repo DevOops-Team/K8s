@@ -7,7 +7,7 @@ import os
 # --- Kueue / JobSet API
 KUEUE_GROUP, KUEUE_VERSION = "kueue.x-k8s.io", "v1beta2"
 JOBSET_GROUP, JOBSET_VERSION = "jobset.x-k8s.io", "v1alpha2"
-KUEUE_NS = os.getenv("KUEUE_NAMESPACE", "platform")   # Kueue가 도는 곳 = MultiKueue kubeconfig Secret 위치
+KUEUE_NS = os.getenv("KUEUE_NAMESPACE", "kueue-system")   # Kueue가 도는 곳 = MultiKueue kubeconfig Secret 위치
 LABEL_QUEUE = "kueue.x-k8s.io/queue-name"
 LABEL_PRIORITY = "kueue.x-k8s.io/priority-class"
 GPU = "nvidia.com/gpu"
@@ -36,7 +36,8 @@ ANN_STOP_CONFIRMED = "devoops/old-execution-stopped"   # "true" = 옛 실행이 
 # --- 펜싱 / 노드
 LABEL_FENCED = "devoops/fenced"              # MultiKueueCluster에 "true" -> 새 잡 안 보냄
 TAINT_FAULTY = "devoops/faulty"              # 고장 노드 taint (NoSchedule)
-GPU_NODE_SELECTOR = os.getenv("GPU_NODE_SELECTOR", "node-role.devoops.site/gpu=true")   # EKS GPU 노드 그룹 라벨
+GPU_NODE_SELECTOR = os.getenv("GPU_NODE_SELECTOR", "devoops/gpu=true")   # GPU 노드 라벨 (11/05 아키텍처 v5, 11/10 정본 확정)
+TAINT_SPARE = "devoops/spare"   # 예비 GPU 노드 taint (값 true, NoSchedule). 같은 키의 라벨도 붙음. 복구 잡만 toleration을 가짐
 PLACEHOLDER_PRIORITY_CLASS = "spare-placeholder"   # 예비 노드 자리 표시 Pod
 
 # --- 큐 / 우선순위

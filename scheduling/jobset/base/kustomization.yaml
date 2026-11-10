@@ -1,20 +1,8 @@
 # 설치: kubectl apply --server-side -k scheduling/jobset/base
-# JobSet v0.13.0 기본 매니페스트를 platform 네임스페이스로 옮겨 설치 (11/05 K8s 아키텍처)
-# platform Namespace는 kueue/base가 만듦 -> Kueue 먼저 설치
-namespace: platform
+# JobSet v0.13.0 기본 매니페스트 (jobset-system 그대로, 11/10 정본)
 resources:
   - manifests.yaml
 patches:
-  - target:
-      kind: Namespace
-      name: jobset-system
-    patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: jobset-system
-  # 웹훅 인증서 DNS 이름은 자기 SA 네임스페이스 파일에서 읽음 (pkg/util/cert) -> 설정 변경 필요 없음
   # CPU requests 500m -> 250m (Kueue와 같은 이유). limits(memory 4Gi)와 memory requests는 기본값 유지
   - target:
       kind: Deployment

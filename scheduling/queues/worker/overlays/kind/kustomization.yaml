@@ -13,7 +13,7 @@ patches:
         name: gpu
       spec:
         nodeLabels:
-          node-role.devoops.site/gpu: "true"
+          devoops/gpu: "true"
         tolerations:
         - key: kwok.x-k8s.io/node
           operator: Equal

@@ -2,7 +2,7 @@
 # HA: 컨트롤러마다 레플리카 3개를 platform-worker=true 노드(worker1~3)에 하나씩.
 #     Lease(platform/scheduling-<이름>)로 리더 하나만 일하고 나머지 둘은 대기 (leader.py)
 #     노드 하나가 죽어도 남은 둘 중 하나가 LEASE_SECONDS(15s) 안에 이어받음
-# platform 네임스페이스는 kueue/base가 만듦 (우리 망 온프레미스는 Argo CD gpu-foundation)
+# platform 네임스페이스는 kind에서는 cluster/setup.sh, 우리 망 온프레미스는 Argo CD gpu-foundation이 만듦
 
 # 컨트롤러마다 ServiceAccount를 따로 둔다: 필요한 권한만
 #   dispatcher: Workload 지명 + 워커 kubeconfig 읽기
@@ -71,14 +71,14 @@ metadata: {name: scheduling-relocator}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: scheduling-relocator}
 subjects: [{kind: ServiceAccount, name: relocator, namespace: platform}]
 ---
-# 워커 kubeconfig: 이름을 지정한 Secret만 (Kueue와 같은 platform 네임스페이스)
+# 워커 kubeconfig: 이름을 지정한 Secret만 (Kueue와 같은 kueue-system 네임스페이스)
 #   dispatcher: MultiKueue가 쓰는 Secret (우리 망에서는 eks-a/b/c-kubeconfig로 바꿈)
 #   relocator : EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔, IAM 답변 11/05)
 #               kind에서는 Secret이 없으면 MultiKueue Secret으로 대신함 (RELOCATOR_KUBECONFIG_SECRET 참고)
 # MultiKueueCluster 목록 조회도 필요하지만 그건 위 ClusterRole에 있음
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: scheduling-worker-kubeconfig, namespace: platform}
+metadata: {name: scheduling-worker-kubeconfig, namespace: kueue-system}
 rules:
 - apiGroups: [""]
   resources: [secrets]
@@ -88,7 +88,7 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: scheduling-worker-kubeconfig, namespace: platform}
+metadata: {name: scheduling-worker-kubeconfig, namespace: kueue-system}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: scheduling-worker-kubeconfig}
 subjects:
 - {kind: ServiceAccount, name: dispatcher, namespace: platform}

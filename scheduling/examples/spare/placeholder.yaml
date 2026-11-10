@@ -1,6 +1,8 @@
 # 예비 노드 자리 표시 Pod (GPU-70) — 워커 클러스터에 apply. 컨트롤러가 필요 없다.
 # 예비 노드의 GPU를 잡고 있다가, 우선순위가 더 높은 Pod(복구 잡, 기본 0)가 오면
 # kube-scheduler 선점으로 밀려난다. Kueue 선점과는 무관 (Kueue는 이 Pod를 관리하지 않음).
+# 예비 노드에는 devoops/spare=true:NoSchedule taint가 있어서 학습 잡 Pod는 아예 못 온다 (11/10 정본 I4).
+# 이 taint를 견디는 것은 이 Pod와 relocator가 재제출한 복구 잡뿐 (recovery_render, admission-policy.yaml).
 # 예비 on/off = 이 Deployment를 두느냐 마느냐.
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
@@ -28,6 +30,7 @@ spec:
         devoops/spare: "true"
       tolerations:
       - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+      - {key: devoops/spare, operator: Equal, value: "true", effect: NoSchedule}   # 예비 노드 taint
       - {key: kwok.x-k8s.io/node, operator: Equal, value: fake, effect: NoSchedule}   # kind 전용
       containers:
       - name: pause

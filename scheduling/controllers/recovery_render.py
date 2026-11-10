@@ -11,6 +11,11 @@
 | trainer args --master-addr                        | job-{id}-g0001-workers-0-0.job-{id}-g0001 -> ...g0002 |
 | env GENERATION (모든 컨테이너)                    | 1 -> 2 |
 | target / exclude 어노테이션                       | (없음) -> devoops/target-cluster · devoops/exclude-clusters |
+| Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
+
+예비 노드 toleration을 Kueue ResourceFlavor가 아니라 여기서 넣는 이유: 4장 복구 잡이 학습 노드 3대 + 예비 1대에
+걸쳐 뜨려면 학습 몫을 빌려야 하고(같은 flavor), flavor에 toleration을 두면 그 flavor를 쓰는 학습 잡도 예비에 간다.
+학습 잡이 이 toleration을 달고 오는 것은 관리 클러스터 정책(admission-policy.yaml)이 막는다.
 """
 import copy
 import re
@@ -18,6 +23,7 @@ import re
 import keys as K
 
 LEAVE_SOURCE = {"moveToOtherCluster", "evacuateCluster"}   # 원래 클러스터를 떠나는 action
+SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
 
 
@@ -81,7 +87,10 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude)
     for tmpl in _pod_specs(new):
         tmeta = tmpl.setdefault("metadata", {})
         tmeta.setdefault("labels", {})[K.LABEL_GENERATION] = str(gen)
-        spec = tmpl.get("spec") or {}
+        spec = tmpl.setdefault("spec", {})
+        tols = spec.setdefault("tolerations", [])
+        if not any(t.get("key") == K.TAINT_SPARE for t in tols):
+            tols.append(dict(SPARE_TOLERATION))
         for ct in (spec.get("initContainers") or []) + (spec.get("containers") or []):
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:

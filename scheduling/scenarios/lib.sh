@@ -7,7 +7,7 @@ MGR=kind-manager
 WORKERS=(worker1 worker2 worker3)
 NS=training          # 학습 잡·재배치 요청 (JobSet 템플릿 합의안)
 CTL_NS=scheduling-local-store   # kind에서 S3·DynamoDB 대신 쓰는 ConfigMap 자리 (recovery_store.py)
-GPU_SEL=node-role.devoops.site/gpu=true
+GPU_SEL=devoops/gpu=true
 
 ts() { date +%H:%M:%S; }
 say() { echo; echo "[$(ts)] === $*"; }
