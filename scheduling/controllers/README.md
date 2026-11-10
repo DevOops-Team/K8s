@@ -31,6 +31,11 @@ kubectl --context kind-manager -n platform get pods -l 'app in (dispatcher,reloc
 kubectl --context kind-manager -n platform get lease | grep scheduling-   # holder = 지금 리더 Pod
 ```
 
+우리 망 이미지 (GHCR): `.github/workflows/scheduling-controllers-image.yml`이 이 폴더가 바뀐 develop·main push마다
+테스트 → 빌드 → `ghcr.io/devoops-team/scheduling-controllers`로 올린다 (PR은 테스트·빌드만). 태그는 `sha-<커밋>`·브랜치명, main은 `latest`도.
+배포 매니페스트에는 실행 요약(Summary)에 찍힌 `@sha256:` digest로 고정하고, 패키지가 private이면 `platform/ghcr-pull` Secret을 `imagePullSecrets`로 건다.
+kind는 위처럼 `scheduling-controllers:dev`를 그대로 쓴다.
+
 로컬 kind manager는 `cluster/kind/manager.yaml`에 `platform-worker=true` 워커 노드 3개가 있어야 함(없으면 Pod 3개 중 일부 Pending) → 예전 manager 클러스터는 다시 만들어야 함.
 
 ## 뺀 것 (11/09)

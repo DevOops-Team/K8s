@@ -1,0 +1,97 @@
+# 스케줄링 컨트롤러(dispatcher·relocator) 이미지 -> ghcr.io/devoops-team/scheduling-controllers
+# - PR: 테스트 + 빌드만 (push 안 함)
+# - develop·main push / 수동 실행: 테스트 -> 빌드 -> GHCR push
+# 배포 매니페스트에는 태그 말고 digest(@sha256:...)로 고정한다. digest는 실행 요약(Summary)에 남는다.
+name: scheduling-controllers-image
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - scheduling/controllers/**
+      - .github/workflows/scheduling-controllers-image.yml
+  pull_request:
+    paths:
+      - scheduling/controllers/**
+      - .github/workflows/scheduling-controllers-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduling-controllers-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/devoops-team/scheduling-controllers   # GHCR 이름은 소문자만
+  CONTEXT: scheduling/controllers
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scheduling/controllers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"          # Dockerfile 베이스와 같게
+          cache: pip
+          cache-dependency-path: scheduling/controllers/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m unittest -v test_*.py   # 쿠버네티스·AWS 없이 돈다
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write                     # GHCR push (GITHUB_TOKEN)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=scheduling-controllers
+            org.opencontainers.image.description=GPU failover scheduling controllers (dispatcher, relocator)
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.CONTEXT }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### scheduling-controllers"
+            echo
+            echo '```'
+            echo "${IMAGE}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
