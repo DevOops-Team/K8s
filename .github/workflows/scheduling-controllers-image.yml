@@ -16,6 +16,7 @@ on:
       - .github/workflows/scheduling-controllers-image.yml
   workflow_dispatch:
 
+# 액션은 커밋 SHA로 고정 (packages: write 토큰을 쓰므로 태그 바꿔치기 방지). 올릴 땐 SHA와 버전 주석을 같이
 permissions:
   contents: read
 
