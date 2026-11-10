@@ -202,6 +202,10 @@ spec:
         # 우리 망: aws + CKPT_BUCKET=devoops-prod-ckpt-354363695096-us-east-2, FENCING_TABLE=devoops-prod-fencing,
         #          AWS_REGION=us-east-2, 자격 증명은 박기현 님이 만드는 온프레 인증 경로 (체크포인트 규약 13절)
         - {name: RECOVERY_STORE, value: configmap}
+        # 워커 EKS API가 끊겼을 때 EC2 인스턴스 상태로 옛 실행 종료 확인 (ec2_evidence.py). kind = off
+        # 우리 망: describe (박기현 님 IAM ec2:DescribeInstances 받은 뒤) -> terminate (TerminateInstances 받은 뒤)
+        #          EC2_CLUSTERS='{"worker1":"<EKS 이름>",...}', EC2_NODEPOOLS=training,spare (Karpenter NodePool)
+        - {name: EC2_EVIDENCE, value: "off"}
         resources: {requests: {cpu: 50m, memory: 64Mi}}
 ---
 apiVersion: policy/v1
