@@ -1,11 +1,11 @@
-"""케이스 시작 전 초기화: 잡·요청·복구 기록 삭제, 노드·펜싱 원상복구. 다 지워질 때까지 기다린다.
-
-네트워크 끊기(docker network)는 장애복구 시나리오(scenarios/)만 쓰므로 여기선 안 다룬다.
+"""케이스 시작 전 초기화: 끊어 둔 워커 다시 연결, 잡·요청·복구 기록 삭제, 노드·펜싱·자리 표시 Pod 원상복구.
+다 지워질 때까지 기다린다.
 """
 import logging
 
 from kubernetes import client
 
+from . import network
 from .cluster import wait_until
 from .env import GPU_SELECTOR, NS, REQUEST_TIMEOUT, STORE_NS, WORKERS, K
 from .verdict import Invalid
@@ -22,8 +22,23 @@ def _ignore_404(fn, *a, **kw):
             raise
 
 
+def _all_active(kube):
+    mkcs = kube.co.list_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters",
+                                              _request_timeout=T)["items"]
+    active = {m["metadata"]["name"] for m in mkcs
+              if any(c["type"] == "Active" and c["status"] == "True" for c in (m.get("status") or {}).get("conditions") or [])}
+    return set(WORKERS) <= active
+
+
 def reset(kube, timeout=180):
     co, core = kube.co, kube.core
+    # 장애복구 케이스가 끊어 둔 워커부터 붙인다 (아래 워커 API 호출이 걸리지 않게)
+    try:
+        was_down = network.reconnect_all(kube)
+    except Exception as e:  # noqa: BLE001
+        raise Invalid(f"워커 네트워크 원상복구 실패: {e}") from e
+    if was_down and wait_until(lambda: _all_active(kube), 180, interval=5) is None:
+        raise Invalid("다시 연결한 뒤 180s 안에 MultiKueueCluster가 전부 Active로 안 돌아옴")
     _ignore_404(co.delete_collection_namespaced_custom_object, K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL,
                 _request_timeout=T)
     co.delete_collection_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, NS, "jobsets",
