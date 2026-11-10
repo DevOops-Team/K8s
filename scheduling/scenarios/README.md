@@ -17,6 +17,6 @@
 | 8 | `08-no-spare.sh` | 예비 없으면 자리 날 때까지 대기, 5번과 시각 비교 |
 | 9 | `09-duplicate.sh` | 같은 requestId 두 번 -> 한 번만 실행 |
 | 10 | `10-move-to-other-cluster.sh` | 예비 소진·SDC: 의심 노드만 격리, 잡은 다른 워커로, worker2 펜싱 안 함 (6번과 비교) |
-| 11 | `11-recovery-under-load.sh` | 학습 12장이 찬 상태 + Heavy 대기 잡에서 4장 잡 moveToSpare -> 복구 잡이 먼저 쿼터를 받는지 (끝 줄 OK/PROBLEM). `FIX=B`면 복구 몫 4로 비교 |
+| 11 | `11-recovery-under-load.sh` | 학습 12장이 찬 상태 + Heavy 대기 잡에서 4장 잡 moveToSpare -> 복구 잡이 먼저 쿼터를 받는지 (끝 줄 OK/PROBLEM). 지금 복구 몫 4라 OK 기대, `BEFORE=1`이면 예전 3으로 비교 |
 
 6·7번은 `docker network disconnect`를 쓴다 (sudo 없이 docker가 되는 사용자 기준).

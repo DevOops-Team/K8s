@@ -84,6 +84,9 @@ spec:
     - name: gpu
       resources:
       - name: nvidia.com/gpu
-        nominalQuota: '3'   # 예비 1 x 3
+        nominalQuota: '4'   # 잡 최대 크기(4) = 클러스터 하나 학습 자리. 예비 노드 수(3)가 아님 (정본 R10)
+        # 3이면 4장 복구 잡이 학습 몫 1을 빌려야 하는데, Kueue는 안 빌리는 잡을 먼저 받아서(KEP-83 정렬)
+        # 옛 잡이 내려놓은 Heavy 몫을 Heavy 대기 잡이 먼저 가져간다. 4면 evacuateCluster로 옮기는 잡도 안 빌림.
+        # 관리 합계 16 > 실제 15지만 복구 잡은 자기가 대신하는 옛 잡 자리를 쓰므로 실제 사용은 안 늘어남
         # 복구 몫은 학습 잡에 안 빌려줌 (학습 몫은 복구 잡에 빌려줌)
         lendingLimit: '0'

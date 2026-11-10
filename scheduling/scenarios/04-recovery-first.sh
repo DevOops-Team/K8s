@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 4. 복구 잡 우선: 대기열이 찬 상태에서 복구 잡 제출 -> 복구 잡이 맨 앞에서 입장
-#    복구 몫(관리 cq-recovery 3 = 예비 1 x 3, 워커 recovery-cq 1)은 학습 잡에 안 빌려줌 -> 늘 비어 있다
+#    복구 몫(관리 cq-recovery 4 = 잡 최대 크기, 워커 recovery-cq 1 = 예비 노드)은 학습 잡에 안 빌려줌 -> 늘 비어 있다
 source "$(dirname "$0")/lib.sh"
 reset
 

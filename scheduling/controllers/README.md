@@ -64,8 +64,8 @@ kubectl --context kind-manager -n platform get lease | grep scheduling-   # hold
   디스패처는 그 클러스터를 재제출 잡 몫으로 찜한 것처럼 다룬다. 재배치 실행기는 옛 잡을 먼저 내리고 새 잡을 넣는데,
   선점이 없어서 그 사이 풀린 자리를 쿼터를 쥐고 기다리던 학습 잡이 가져갈 수 있었다. 새 잡이 지명되거나
   `RELOCATION_HOLD_SECONDS`가 지나면 푼다. 디스패처는 `RelocationRequest`를 읽기만 한다.
-  - 관리 클러스터 쿼터는 따로다. 4장 복구 잡은 `cq-recovery` 3 + 학습 몫 1을 빌려야 해서 쿼터를 늦게 받을 수 있다
-    (시나리오 11, 대책 B = `cq-recovery` 4). 그동안 지켜 둔 클러스터는 비어 있고, 시간이 지나면 풀린다.
+  - 관리 클러스터 쿼터는 따로 지킨다: `cq-recovery`를 잡 최대 크기 4로 둬서 4장 복구 잡도 학습 몫을 안 빌리고
+    바로 쿼터를 받는다 (11/10, 정본 R10. 3일 땐 Heavy 대기 잡이 옛 잡 몫을 먼저 가져갔음 = 시나리오 11).
 - **종료 확인 범위 (재배치 실행기)**: 옛 실행이 멈췄는지는 입장했던 워커(`sourceCluster`)뿐 아니라 디스패처가 지명만
   했던 워커(`status.seenClusters`)에서도 확인한다. 지명만 된 상태에서도 워커에 복사본·Pod가 있을 수 있다.
 - **디스패처가 읽는 어노테이션**(`devoops/target-cluster`·`exclude-clusters`·`manual-dispatch`)은 재배치 실행기와

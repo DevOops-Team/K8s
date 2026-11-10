@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# 11. 학습 큐가 찬 상태에서 4장 잡 복구 (설계 문제 1번 확인용)
+# 11. 학습 큐가 찬 상태에서 4장 잡 복구 (설계 문제 1번 = 정본 R10 확인용)
 #
-# 4번은 1장 복구 잡이라 복구 몫(관리 cq-recovery 3) 안에 들어가서 이 경우를 못 본다.
-# 4장 복구 잡은 복구 몫 3 + 학습 몫 1을 빌려야 한다. Kueue는 한 주기 안에서 "안 빌리는 잡"을 먼저 보고
+# 4번은 1장 복구 잡이라 복구 몫 안에 들어가서 이 경우를 못 본다.
+# 복구 몫이 3이면 4장 복구 잡은 학습 몫 1을 빌려야 한다. Kueue는 한 주기 안에서 "안 빌리는 잡"을 먼저 보고
 # (KEP-83 정렬: 안 빌림 -> 우선순위 -> 생성 시각), 그런 잡이 기다리면 cohort 빌려 쓰기를 막는다.
 # 그래서 옛 잡이 내려놓은 Heavy 몫 4를 Heavy 대기 잡 wait-c가 먼저 가져가고 복구 잡은 기다릴 수 있다.
+# 11/10에 관리 cq-recovery를 잡 최대 크기 4로 올렸다 (정본 R10). 지금 설정에서는 OK가 나와야 한다.
 #
 # 판정 (끝에 한 줄):
 #   OK      복구 잡이 wait-c보다 먼저(또는 wait-c 없이) 관리 클러스터 쿼터를 받음
 #   PROBLEM wait-c가 먼저 쿼터를 받고, 복구 잡은 WAIT초 안에 못 받음 -> 문제 1 재현
 #   UNCLEAR 그 밖 (로그 확인)
-#   WAIT=180 ./11-recovery-under-load.sh   지금 설정 그대로 (문제 재현 기대)
-#   FIX=B ./11-recovery-under-load.sh      대책 B: 관리 cq-recovery 몫 3 -> 4 (잡 하나 크기)로 잠깐 바꿔 돌리고 끝나면 3으로 되돌림
+#   WAIT=180 ./11-recovery-under-load.sh   지금 설정 그대로 (복구 몫 4, OK 기대)
+#   BEFORE=1 ./11-recovery-under-load.sh   예전 설정: 관리 cq-recovery 몫 4 -> 3으로 잠깐 바꿔 돌리고 끝나면 4로 되돌림 (PROBLEM 기대)
 source "$(dirname "$0")/lib.sh"
 reset
 WAIT=${WAIT:-180}
@@ -20,10 +21,10 @@ set_recovery_quota() {
   kubectl --context $MGR patch clusterqueue cq-recovery --type json     -p "[{\"op\":\"replace\",\"path\":\"/spec/resourceGroups/0/flavors/0/resources/0/nominalQuota\",\"value\":\"$1\"}]" >/dev/null
   echo "  관리 cq-recovery nominalQuota = $1"
 }
-if [ "${FIX:-}" = B ]; then
-  say "대책 B 적용: 복구 몫 4 (복구 잡 하나가 학습 몫을 안 빌려도 되게)"
-  set_recovery_quota 4
-  trap 'set_recovery_quota 3' EXIT
+if [ -n "${BEFORE:-}" ]; then
+  say "예전 설정으로 비교: 복구 몫 3 (4장 복구 잡이 학습 몫 1을 빌려야 함)"
+  set_recovery_quota 3
+  trap 'set_recovery_quota 4' EXIT
 fi
 
 # JobSet 이름 -> 관리 클러스터 Workload의 QuotaReserved=True 시각 (없으면 빈칸)

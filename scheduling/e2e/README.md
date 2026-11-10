@@ -66,7 +66,7 @@ def test_something(kube, check, info):
 
 | 케이스 | 확인하는 것 | 컨트롤러 |
 |---|---|---|
-| normal/01 queue_config | 몫 8/4/3, StrictFIFO, borrowingLimit 없음, lendingLimit 0, cohort, 선점 안 함 | 상관없음 |
+| normal/01 queue_config | 몫 8/4/4, StrictFIFO, borrowingLimit 없음, lendingLimit 0, cohort, 선점 안 함 | 상관없음 |
 | normal/02 routing | 1·2장 Light, 3·4장 Heavy, 5장 거부, 3장 잡이 cq-heavy로 | 기본 |
 | normal/03 binpack | 빈 워커에 1장 6개 -> worker1 4, worker2 2 | 기본 |
 | normal/04 light_borrow | Heavy 대기 없으면 Light가 12장까지 | 기본 |
