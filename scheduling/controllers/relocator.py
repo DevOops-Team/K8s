@@ -173,7 +173,7 @@ def cordon_nodes(x: Ctx, src, nodes):
 
 
 def record_old_nodes(x: Ctx, src):
-    """옛 잡 Pod가 있던 노드 [{node, instanceId}]. 워커 접속이 안 되거나 실패하면 빈 목록 (EC2 증거는 클러스터 전체 범위로)"""
+    """옛 잡 Pod가 있던 노드 [{node, instanceId}] = terminate 모드 강제 종료 대상. 워커 접속이 안 되거나 실패하면 빈 목록"""
     ns, name = x.job()
     try:
         api = (x.workers.get() if x.workers else {}).get(src)
@@ -188,7 +188,7 @@ def record_old_nodes(x: Ctx, src):
             out.append({"node": node, "instanceId": ec2_evidence.instance_id(n.spec.provider_id)})
         return out
     except Exception as e:  # noqa: BLE001  기록은 보조 정보라 실패해도 격리는 계속
-        log.warning("%s: %s 옛 노드 기록 실패 (%s) - EC2 증거는 클러스터 전체 범위로", x.name, src, type(e).__name__)
+        log.warning("%s: %s 옛 노드 기록 실패 (%s) - EC2 강제 종료 대상 없음", x.name, src, type(e).__name__)
         return []
 
 
@@ -209,7 +209,7 @@ def isolate(x: Ctx):
         log.warning("%s: status의 sourceCluster=%r 대신 Workload 기준 %r 사용", x.name, x.st.get("sourceCluster"), src)
         x.save(sourceCluster=src)
     if src and "oldNodes" not in x.st:
-        # 워커가 아직 살아 있을 때 옛 잡이 돌던 노드·인스턴스를 적어 둔다. 나중에 워커가 끊기면 EC2 증거를 이걸로 찾는다
+        # 워커가 아직 살아 있을 때 옛 잡이 돌던 노드·인스턴스를 적어 둔다. 나중에 워커가 끊기면 강제 종료 대상 (증거 아님)
         x.st["oldNodes"] = record_old_nodes(x, src)
     nodes = x.spec.get("excludeNodes") or []
     if action in ("moveToSpare", "moveToOtherCluster") and nodes:
@@ -306,23 +306,23 @@ def stop_old(x: Ctx):
 
 def ec2_stop_evidence(x: Ctx, why):
     """워커에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
-    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다"""
+    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (기록한 옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
+    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다 (옛 실행을 끊는 용도)"""
     ec2 = getattr(x, "ec2", None)
     src = x.st.get("sourceCluster")
     if ec2 is None or not src:
         return False, why
-    old = x.st.get("oldNodes") or []
-    # 인스턴스 ID를 못 얻은 노드가 하나라도 있으면 일부만 보고 판단하면 안 됨 -> 클러스터 전체 범위 (강제 종료도 안 함)
-    old_ids = [n["instanceId"] for n in old] if all(n.get("instanceId") for n in old) else []
-    ok, ev, _ = ec2.check(src, old_ids)
+    old_ids = [n["instanceId"] for n in x.st.get("oldNodes") or [] if n.get("instanceId")]
+    ok, ev, _ = ec2.check(src)
     if (not ok and old_ids and ec2.can_terminate and not x.st.get("ec2TerminatedAt")
             and kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS):
         try:
             done = ec2.terminate(src, old_ids)
             x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=done)
             ev += f" -> 옛 노드 강제 종료 요청 {done}"
-        except Exception as e:  # noqa: BLE001  권한 없음 등. 사람 확인 경로로 남음
-            ev += f" -> 강제 종료 실패 ({type(e).__name__})"
+        except Exception as e:  # noqa: BLE001  권한 없음·태그 불일치 등. 사람 확인 경로로 남음
+            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=[], ec2TerminateError=str(e))
+            ev += f" -> 강제 종료 실패 ({type(e).__name__}: {e})"
     return ok, f"{why}; {ev}"
 
 

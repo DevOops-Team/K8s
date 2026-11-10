@@ -54,7 +54,7 @@ kubectl --context kind-manager -n platform get lease | grep scheduling-   # hold
 | `FENCING_WAIT_SECONDS` | 300 | 요청을 받고 세대 +1 기록이 이 시간 안에 안 보이면 Failed |
 | `STOP_WAIT_SECONDS` | 60 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
 | `STOP_HOLD_SECONDS` | 900 | 요청 생성부터 이 시간 안에 옛 실행 종료를 확인 못 하면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 (복구 컨트롤러 HOLD 15분과 맞춤) |
-| `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 EC2 인스턴스 상태를 옛 실행 종료 증거로 씀 (`ec2_evidence.py`). `describe` = 조회만, `terminate` = 워커가 `STOP_WAIT_SECONDS` 넘게 안 닿으면 격리 때 기록한 옛 노드 인스턴스만 한 번 강제 종료. 필요 IAM: `ec2:DescribeInstances`(+`ec2:TerminateInstances`, Karpenter NodePool 태그 조건) |
+| `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 기록한 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만, `terminate` = 워커가 `STOP_WAIT_SECONDS` 넘게 안 닿으면 격리 때 기록한 옛 노드 인스턴스만 한 번 강제 종료(ID로 조회 후 태그 확인, 증거는 여전히 클러스터 전체 기준). 필요 IAM: `ec2:DescribeInstances`(+`ec2:TerminateInstances`, Karpenter NodePool 태그 조건) |
 | `EC2_CLUSTERS` / `EC2_NODEPOOLS` | `{}` / training,spare | MultiKueueCluster 이름 → EKS 클러스터 이름(JSON, 없으면 같은 이름) / 찾을 Karpenter NodePool (`karpenter.sh/nodepool` 태그) |
 | `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |
 
