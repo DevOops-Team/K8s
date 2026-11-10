@@ -6,6 +6,7 @@
   - 각 클러스터 컨트롤 플레인(apiserver·etcd·scheduler·controller-manager) 컨테이너가 재시작했는지
     (워커 scheduler가 재시작하면 지명은 맞아도 Pod가 제때 안 떠서 FAIL처럼 보인다)
   - 관리 클러스터 Kueue 웹훅 엔드포인트가 하나라도 Ready인지
+케이스가 일부러 끊은 워커(network.DOWN)는 보지 않는다.
 """
 import logging
 import threading
@@ -13,6 +14,7 @@ from datetime import datetime
 
 from kubernetes import client
 
+from . import network
 from .env import K
 
 log = logging.getLogger("e2e")
@@ -27,6 +29,7 @@ class Watchdog(threading.Thread):
         self._halt = threading.Event()
         self._last = {}
         self._restarts = {}      # (클러스터, 구성요소) -> 마지막으로 본 재시작 횟수
+        self._was_down = set()
         self.clusters = {"관리": kube.mgr, **kube.workers}
 
     def run(self):
@@ -41,6 +44,12 @@ class Watchdog(threading.Thread):
         dead = self.ctl.dead()
         yield f"컨트롤러 종료: {','.join(dead)}", not dead
         for name, api in self.clusters.items():
+            if name in network.DOWN:   # 케이스가 일부러 끊은 워커
+                self._was_down.add(name)
+                continue
+            if name in self._was_down:   # 다시 붙은 워커: 끊긴 동안의 재시작은 세지 않게 기준을 새로 잡는다
+                self._was_down.discard(name)
+                self._restarts = {k: v for k, v in self._restarts.items() if k[0] != name}
             try:
                 api.call_api("/readyz", "GET", auth_settings=["BearerToken"], response_type="str",
                              _return_http_data_only=True, _request_timeout=5)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 시나리오 돌리기 전 준비를 한 번에 (여러 번 돌려도 같은 결과). 클러스터 자체는 cluster/setup.sh로 먼저 만든다
+# e2e 돌리기 전 준비를 한 번에 (여러 번 돌려도 같은 결과). 클러스터 자체는 cluster/setup.sh로 먼저 만든다
 #   관리: 큐(training 네임스페이스), 재배치 요청 CRD
 #   워커: 큐, KWOK 노드(라벨·taint), pod-complete 지연, Kueue 설정(갱·재큐 끔), 클러스터 이름 ConfigMap
 set -euo pipefail

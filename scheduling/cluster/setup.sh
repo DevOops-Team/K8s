@@ -7,7 +7,7 @@
 #   manager  컨트롤 플레인 1 + worker 3 (platform-worker=true)  Kueue(+MultiKueue, MAP) -> kueue-system · JobSet -> jobset-system 각 3중화, 컨트롤러 -> platform
 #   workerN  컨트롤 플레인 1 + KWOK 가짜 GPU 노드 5 (학습 4 + 예비 1)  Kueue -> kueue-system · JobSet -> jobset-system
 #   MultiKueue kubeconfig Secret workerN-secret (kueue-system, 키 kubeconfig, 주소는 kind 내부망)
-# 그다음: scenarios/bootstrap.sh (큐·CRD·KWOK 노드), 컨트롤러는 controllers/run-local.sh 또는 README의 클러스터 안 배포
+# 그다음: e2e/bootstrap.sh (큐·CRD·KWOK 노드), 컨트롤러는 controllers/run-local.sh 또는 README의 클러스터 안 배포
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"   # scheduling/
 WORKERS=(worker1 worker2 worker3)
@@ -56,4 +56,4 @@ for w in "${WORKERS[@]}"; do
   rm -f "/tmp/$w.kubeconfig"
 done
 
-say "다음: scenarios/bootstrap.sh"
+say "다음: e2e/bootstrap.sh"

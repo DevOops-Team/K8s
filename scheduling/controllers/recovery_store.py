@@ -5,7 +5,7 @@ RECOVERY_STORE=configmap kind. 관리 클러스터 전용 네임스페이스 sch
                          (platform의 다른 ConfigMap에 권한이 닿지 않게 따로 둠)
                          recovery-code-<job_id>    data.jobset.json  (= S3 code/{job_id}/jobset.json)
                          recovery-fencing-<job_id> data.<필드>       (= DynamoDB 항목, 숫자도 문자열로)
-                         시나리오(lib.sh)가 백엔드·복구 컨트롤러 몫을 대신 쓴다.
+                         e2e 하네스(harness/jobs.py·recovery.py)가 백엔드·복구 컨트롤러 몫을 대신 쓴다.
 
 재배치 실행기가 쓰는 필드는 recovery_phase(OLD_RUN_STOPPED, NEW_RUN_SUBMITTED) · new_jobset_name · new_jobset_uid ·
 recovery_updated_at 뿐이고, 전부 조건부 갱신이다:

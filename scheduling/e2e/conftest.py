@@ -48,12 +48,12 @@ def _preflight(k):
             C.clusterqueue(k, cq)
         mkcs = k.co.list_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters")["items"]
     except Exception as e:  # noqa: BLE001
-        pytest.exit(f"준비 안 됨: 관리 클러스터 조회 실패 ({e}). cluster/setup.sh, scenarios/bootstrap.sh 먼저", 3)
+        pytest.exit(f"준비 안 됨: 관리 클러스터 조회 실패 ({e}). cluster/setup.sh, e2e/bootstrap.sh 먼저", 3)
     active = {m["metadata"]["name"] for m in mkcs
               if any(c["type"] == "Active" and c["status"] == "True" for c in m.get("status", {}).get("conditions", []))}
     missing = set(WORKERS) - active
     if missing:
-        pytest.exit(f"준비 안 됨: MultiKueue Active 아님 {sorted(missing)}. scenarios/bootstrap.sh 먼저", 3)
+        pytest.exit(f"준비 안 됨: MultiKueue Active 아님 {sorted(missing)}. e2e/bootstrap.sh 먼저", 3)
 
 
 @pytest.fixture(scope="session")

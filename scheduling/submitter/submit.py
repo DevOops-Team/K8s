@@ -92,7 +92,7 @@ def submit_backend(i, row, prefix):
 
 
 class KindSubmitter:
-    """kind 전용: 백엔드 대신 1세대 JobSet + 복구 원본·펜싱 기록 ConfigMap (scenarios/lib.sh submit과 같은 모양)"""
+    """kind 전용: 백엔드 대신 1세대 JobSet + 복구 원본·펜싱 기록 ConfigMap (e2e/harness/jobs.py submit과 같은 모양)"""
 
     def __init__(self, context):
         from kubernetes import client, config   # 백엔드 모드에서는 필요 없게
