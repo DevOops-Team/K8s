@@ -256,11 +256,15 @@ def old_gone_on_worker(x: Ctx, ns, name):
     places = sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c})
     if not places:
         return True, "워커에 보내지기 전이었음"
+    whys = []
     for src in places:
         gone, why = gone_on(x, src, ns, name)
+        if not gone and isinstance(why, Unreachable):   # 닿지 않는 워커는 그 워커의 EC2 증거로만 대신한다
+            gone, why = ec2_stop_evidence(x, why, src)
         if not gone:
             return False, why
-    return True, f"{','.join(places)}에서도 사라짐"
+        whys.append(why)
+    return True, "; ".join(whys)
 
 
 def gone_on(x: Ctx, src, ns, name):
@@ -308,8 +312,6 @@ def stop_old(x: Ctx):
     note_copies(x, left)
     mgr_gone = left is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
-    if mgr_gone and not worker_gone and isinstance(why, Unreachable):
-        worker_gone, why = ec2_stop_evidence(x, why)
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
     held = kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
     if confirmed or (mgr_gone and worker_gone and not held):
@@ -335,15 +337,18 @@ def stop_old(x: Ctx):
         x.save(phase="WaitingForStop", message=msg)
 
 
-def ec2_stop_evidence(x: Ctx, why):
-    """워커에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
+def ec2_stop_evidence(x: Ctx, why, src=None):
+    """워커 src에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
     증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (기록한 옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
-    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다 (옛 실행을 끊는 용도)"""
+    src를 안 주면 입장했던 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다.
+    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다 (옛 실행을 끊는 용도).
+    기록한 옛 노드는 입장했던 워커의 것이라, 내리기는 src가 sourceCluster일 때만"""
     ec2 = getattr(x, "ec2", None)
-    src = x.st.get("sourceCluster")
+    src = src or x.st.get("sourceCluster")
     if ec2 is None or not src:
         return False, why
-    old_ids = [n["instanceId"] for n in x.st.get("oldNodes") or [] if n.get("instanceId")]
+    is_source = src == x.st.get("sourceCluster")
+    old_ids = [n["instanceId"] for n in x.st.get("oldNodes") or [] if n.get("instanceId")] if is_source else []
     ok, ev, _ = ec2.check(src)
     if (not ok and old_ids and ec2.can_terminate and not x.st.get("ec2TerminatedAt")
             and kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS):

@@ -151,19 +151,43 @@ class StopPathTests(unittest.TestCase):
             relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
         self.assertEqual(e.ec2.terminated, [])
 
-    def test_stop_old_uses_ec2_only_when_unreachable(self):
+    def gone(self, results, ec2_ok, **st):
+        """워커별 gone_on 결과(results)와 EC2 판정(ec2_ok: 워커 -> bool)으로 old_gone_on_worker를 돌린다"""
         calls = []
-        with mock.patch.object(relocator, "ec2_stop_evidence", side_effect=lambda x, w: calls.append(w) or (False, w)):
-            for why in ("eks-a에 Pod 2개 남아 있음", relocator.Unreachable("eks-a 접속 안 됨")):
-                x = SimpleNamespace(
-                    co=mock.Mock(), mgr=None, name="rr", st={"isolatedAt": "t", "phase": "Executing"},
-                    rr={"metadata": {"creationTimestamp": "t", "annotations": {}}},
-                    job=lambda: ("training", "job-j1-g0001"), save=lambda **kw: None)
-                with mock.patch.object(relocator.kube, "workload_for_jobset", return_value=None), \
-                        mock.patch.object(relocator, "old_gone_on_worker", return_value=(False, why)), \
-                        mock.patch.object(relocator.kube, "since", return_value=0):
-                    relocator.stop_old(x)
-        self.assertEqual(calls, ["eks-a 접속 안 됨"])
+        x = SimpleNamespace(st={"sourceCluster": "eks-a", **st})
+        with mock.patch.object(relocator, "gone_on", side_effect=lambda _x, src, *_: results[src]), \
+                mock.patch.object(relocator, "ec2_stop_evidence",
+                                  side_effect=lambda _x, why, src: calls.append(src) or (ec2_ok.get(src, False), why)):
+            return relocator.old_gone_on_worker(x, "training", "job-j1-g0001")[0], calls
+
+    def test_ec2_only_for_unreachable_worker(self):
+        ok, calls = self.gone({"eks-a": (False, "eks-a에 Pod 2개 남아 있음")}, {"eks-a": True})
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
+        ok, calls = self.gone({"eks-a": (False, relocator.Unreachable("eks-a 접속 안 됨"))}, {"eks-a": True})
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["eks-a"])
+
+    def test_unreachable_nominated_worker_uses_its_own_ec2(self):
+        # 입장한 워커는 사라짐 확인, 지명만 됐던 eks-b는 끊김 -> eks-b의 EC2로 봐야 함 (eks-a가 아니라)
+        res = {"eks-a": (True, "eks-a에서도 사라짐"), "eks-b": (False, relocator.Unreachable("eks-b 접속 안 됨"))}
+        ok, calls = self.gone(res, {"eks-a": True}, seenClusters=["eks-b"])
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["eks-b"])
+        self.assertTrue(self.gone(res, {"eks-b": True}, seenClusters=["eks-b"])[0])
+
+    def test_source_ec2_dead_does_not_skip_other_worker(self):
+        # 입장한 워커는 끊겼고 EC2로 꺼짐 확인, 그래도 지명만 됐던 워커에 남은 복사본이 있으면 멈춤 아님
+        res = {"eks-a": (False, relocator.Unreachable("eks-a 접속 안 됨")), "eks-b": (False, "eks-b에 Pod 1개 남아 있음")}
+        self.assertFalse(self.gone(res, {"eks-a": True}, seenClusters=["eks-b"])[0])
+
+    def test_no_terminate_on_nominated_only_worker(self):
+        # 기록한 옛 노드(oldNodes)는 입장한 워커 것. 다른 워커 이름으로 내리지 않는다
+        e = ev({"i-1": "running"})
+        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
+            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"), "worker2")
+        self.assertEqual(e.ec2.terminated, [])
 
 
 if __name__ == "__main__":
