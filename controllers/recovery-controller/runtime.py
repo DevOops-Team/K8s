@@ -32,7 +32,7 @@ def run(config, stop, health):
                   max_recovery_attempts=config.get('retry_policy', {}).get('max_recovery_attempts', 3))
     execute = config['execution_enabled']
     executor = RelocationClient(config.get('job_namespace', 'training')) if execute else None
-    workflow = Workflow(store, executor, execute)
+    workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'))
     watchdog_config = config.get('watchdog', {})
     guard = Watchdog(store, watchdog_config['url'],
                      watchdog_config.get('timeout_seconds', 300),

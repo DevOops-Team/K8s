@@ -28,6 +28,7 @@ action:
 
 시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
   옛 실행 종료 15분 (STOP_HOLD_SECONDS) -> 넘으면 Held, 확인 어노테이션으로만 재개
+    워커 API에 접속이 안 되면 EC2 인스턴스 상태를 종료 증거로 쓴다 (ec2_evidence.py, 기본 off)
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
 import os
@@ -36,6 +37,7 @@ import time
 from kubernetes import client
 
 import keys as K
+import ec2_evidence
 import kube
 import leader
 import recovery_render as R
@@ -60,8 +62,9 @@ FINAL = {"Done", "Failed", "Duplicate"}
 
 
 class Ctx:
-    def __init__(self, mgr, workers, store, rr):
+    def __init__(self, mgr, workers, store, rr, ec2=None):
         self.mgr, self.workers, self.store, self.rr = mgr, workers, store, rr
+        self.ec2 = ec2   # ec2_evidence.Ec2Evidence 또는 None (EC2 증거 안 씀)
         self.co = kube.kueue(mgr)
         self.ns = rr["metadata"]["namespace"]
         self.name = rr["metadata"]["name"]
@@ -188,6 +191,26 @@ def cordon_nodes(x: Ctx, src, nodes):
         log.info("%s: %s/%s cordon + taint", x.name, src, node)
 
 
+def record_old_nodes(x: Ctx, src):
+    """옛 잡 Pod가 있던 노드 [{node, instanceId}] = terminate 모드 강제 종료 대상. 워커 접속이 안 되거나 실패하면 빈 목록"""
+    ns, name = x.job()
+    try:
+        api = (x.workers.get() if x.workers else {}).get(src)
+        if api is None:
+            return []
+        core = client.CoreV1Api(api)
+        pods = core.list_namespaced_pod(ns, label_selector=f"jobset.sigs.k8s.io/jobset-name={name}",
+                                        _request_timeout=kube.TIMEOUT).items
+        out = []
+        for node in sorted({p.spec.node_name for p in pods if p.spec.node_name}):
+            n = core.read_node(node, _request_timeout=kube.TIMEOUT)
+            out.append({"node": node, "instanceId": ec2_evidence.instance_id(n.spec.provider_id)})
+        return out
+    except Exception as e:  # noqa: BLE001  기록은 보조 정보라 실패해도 격리는 계속
+        log.warning("%s: %s 옛 노드 기록 실패 (%s) - EC2 강제 종료 대상 없음", x.name, src, type(e).__name__)
+        return []
+
+
 def current_source(x: Ctx):
     """옛 잡이 지금 보내져 있는 워커 (관리 클러스터 Workload 기준). Workload가 없거나 아직 안 보내졌으면 빈 문자열"""
     ns, name = x.job()
@@ -204,6 +227,9 @@ def isolate(x: Ctx):
         # 접수 뒤 디스패처가 막 보냈거나(빈 값 -> 워커), status가 바뀐 경우. 어느 쪽이든 Workload가 맞다
         log.warning("%s: status의 sourceCluster=%r 대신 Workload 기준 %r 사용", x.name, x.st.get("sourceCluster"), src)
         x.save(sourceCluster=src)
+    if src and "oldNodes" not in x.st:
+        # 워커가 아직 살아 있을 때 옛 잡이 돌던 노드·인스턴스를 적어 둔다. 나중에 워커가 끊기면 강제 종료 대상 (증거 아님)
+        x.st["oldNodes"] = record_old_nodes(x, src)
     nodes = x.spec.get("excludeNodes") or []
     if action in ("moveToSpare", "moveToOtherCluster") and nodes:
         if not src:
@@ -218,6 +244,10 @@ def isolate(x: Ctx):
                                          {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
         log.info("%s: %s 펜싱 (새 잡 안 보냄)", x.name, src)
     x.save(phase="Executing", isolatedAt=kube.now_rfc3339())
+
+
+class Unreachable(str):
+    """워커 API에 닿지 못해서 확인 못 했다는 이유 (EC2 증거로 넘어가도 되는 경우)"""
 
 
 def old_gone_on_worker(x: Ctx, ns, name):
@@ -237,7 +267,7 @@ def gone_on(x: Ctx, src, ns, name):
     """워커 src에서 옛 잡이 사라졌는지. 워커에 접속이 안 되면 확인 불가 = 멈췄다고 보지 않는다"""
     api = x.workers.get().get(src)
     if api is None:
-        return False, f"{src} 접속 정보 없음"
+        return False, Unreachable(f"{src} 접속 정보 없음")
     try:
         try:
             kube.kueue(api).get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name,
@@ -261,7 +291,7 @@ def gone_on(x: Ctx, src, ns, name):
             return False, f"{src}에 Pod {len(pods)}개 남아 있음"
         return True, f"{src}에서도 사라짐"
     except Exception as e:  # noqa: BLE001  끊김·타임아웃
-        return False, f"{src} 접속 안 됨 ({type(e).__name__})"
+        return False, Unreachable(f"{src} 접속 안 됨 ({type(e).__name__})")
 
 
 def stop_old(x: Ctx):
@@ -278,6 +308,8 @@ def stop_old(x: Ctx):
     note_copies(x, left)
     mgr_gone = left is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
+    if mgr_gone and not worker_gone and isinstance(why, Unreachable):
+        worker_gone, why = ec2_stop_evidence(x, why)
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
     held = kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
     if confirmed or (mgr_gone and worker_gone and not held):
@@ -301,6 +333,28 @@ def stop_old(x: Ctx):
                f"이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
         log.warning("%s: %s", x.name, msg)
         x.save(phase="WaitingForStop", message=msg)
+
+
+def ec2_stop_evidence(x: Ctx, why):
+    """워커에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
+    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (기록한 옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
+    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다 (옛 실행을 끊는 용도)"""
+    ec2 = getattr(x, "ec2", None)
+    src = x.st.get("sourceCluster")
+    if ec2 is None or not src:
+        return False, why
+    old_ids = [n["instanceId"] for n in x.st.get("oldNodes") or [] if n.get("instanceId")]
+    ok, ev, _ = ec2.check(src)
+    if (not ok and old_ids and ec2.can_terminate and not x.st.get("ec2TerminatedAt")
+            and kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS):
+        try:
+            done = ec2.terminate(src, old_ids)
+            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=done)
+            ev += f" -> 옛 노드 강제 종료 요청 {done}"
+        except Exception as e:  # noqa: BLE001  권한 없음·태그 불일치 등. 사람 확인 경로로 남음
+            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=[], ec2TerminateError=str(e))
+            ev += f" -> 강제 종료 실패 ({type(e).__name__}: {e})"
+    return ok, f"{why}; {ev}"
 
 
 PHASE_ORDER = ["GENERATION_ADVANCED", "OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED", "RESUMING", "COMPLETED"]
@@ -433,13 +487,13 @@ def step(x: Ctx, all_rrs):
     return watch_admit(x)
 
 
-def reconcile(mgr, workers, store):
+def reconcile(mgr, workers, store, ec2=None):
     co = kube.kueue(mgr)
     rrs = co.list_cluster_custom_object(K.RR_GROUP, K.RR_VERSION, K.RR_PLURAL)["items"]
     for rr in rrs:
         if (rr.get("status") or {}).get("phase") in FINAL:
             continue
-        x = Ctx(mgr, workers, store, rr)
+        x = Ctx(mgr, workers, store, rr, ec2)
         try:
             step(x, rrs)
         except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
@@ -458,13 +512,15 @@ def main():
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
     store = recovery_store.from_env(mgr)
-    log.info("시작: interval=%ss store=%s", INTERVAL, type(store).__name__)
+    ec2 = ec2_evidence.from_env()
+    log.info("시작: interval=%ss store=%s ec2=%s", INTERVAL, type(store).__name__,
+             "off" if ec2 is None else ("terminate" if ec2.can_terminate else "describe"))
     while True:
         if not elector.is_leader():
             time.sleep(1)
             continue
         try:
-            reconcile(mgr, workers, store)
+            reconcile(mgr, workers, store, ec2)
         except Exception:  # noqa: BLE001
             log.exception("루프 실패")
         time.sleep(INTERVAL)

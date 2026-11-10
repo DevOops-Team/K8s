@@ -16,7 +16,8 @@ class Runner:
     def hold(self, record, reason):
         print(json.dumps(dict(component='recovery', event_id=record['event']['event_id'],
                               state='HOLD', reason=reason)), flush=True)
-        return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason)
+        return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason,
+                               stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])))
 
     def operation(self, record, now, monitoring_hold):
         from workflow import TERMINAL
@@ -29,11 +30,16 @@ class Runner:
         if monitoring_hold and record['state'] == 'RECEIVED':
             return record
         stage = 'FINALIZE' if finish else record.get('waiting_phase', record['state'])
+        resume_stages = ('NEW_RUN_SUBMITTED', 'SUBMITTED', 'RESUMING', 'RESUME')
+        if stage in resume_stages:
+            stage = 'RESUME'
+            if record.get('budget_stage') in resume_stages:
+                record = self.store.save(rid, budget_stage='RESUME')
         if record.get('budget_stage') != stage:
             record = self.store.save(rid, budget_stage=stage, stage_started_at=now, api_attempts=0)
         limits = {'RECEIVED':'claim', 'CLAIMED':'claim', 'GENERATION_ADVANCED':'stop',
                   'OLD_RUN_STOPPED':'submit', 'NEW_RUN_SUBMITTED':'resume', 'RESUMING':'resume',
-                  'REQUESTED':'stop', 'SUBMITTED':'resume', 'FINALIZE':'claim'}
+                  'REQUESTED':'stop', 'SUBMITTED':'resume', 'RESUME':'resume', 'FINALIZE':'claim'}
         timeout = self.policy[limits.get(stage, 'claim') + '_timeout_seconds']
         if now - int(record['stage_started_at']) >= timeout:
             return self.hold(record, 'stage deadline exceeded: ' + stage)
@@ -61,7 +67,10 @@ class Runner:
                                  + stage + ' (' + type(exc).__name__ + ')')
             return self.store.save(rid, last_api_error=type(exc).__name__)
         # Successful status polling is not an error retry and does not slide the deadline.
-        return self.store.save(rid, api_attempts=0)
+        changes = dict(api_attempts=0)
+        if (result.get('state') == 'RESUMING' or result.get('waiting_phase') in resume_stages) and stage != 'RESUME':
+            changes.update(budget_stage='RESUME', stage_started_at=now)
+        return self.store.save(rid, **changes)
 
     def deliver(self, record, now):
         from workflow import TERMINAL
@@ -79,9 +88,13 @@ class Runner:
         self.store.save(rid, publish_attempts=attempt, publish_next_at=now + delay)
         errors = []
         payload = dict(event_id=rid + ':result', job_id=record['event'].get('job_id'),
-                       state=record['state'], generation=record.get('generation', record['event'].get('generation')),
+                       state=record['state'], generation=(int(record.get('generation', record['event'].get('generation')))
+                           if record.get('generation', record['event'].get('generation')) is not None else None),
                        action=record.get('action'), reason=record.get('reason'),
-                       checkpoint_warning=record.get('checkpoint_warning'))
+                       checkpoint_warning=record.get('checkpoint_warning'),
+                       stage=record.get('stopped_stage', record.get('stage', record.get('waiting_phase', record.get('budget_stage', record['state'])))),
+                       retry_count=int(record['retry_count']) if record.get('retry_count') is not None else None,
+                       exit_code=int(record['exit_code']) if record.get('exit_code') is not None else None, failure_class=record.get('failure_class'))
         try:
             self.producer.produce(self.topic, key=payload['job_id'], value=json.dumps(payload),
                                   on_delivery=lambda err, msg: errors.append(err))

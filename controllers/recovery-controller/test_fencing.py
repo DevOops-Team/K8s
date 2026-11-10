@@ -10,6 +10,8 @@ class RecoveryTable:
                        jobset_uri='s3://bucket/code/j1/jobset.json',jobset_sha256='a'*64)
         self.calls=[]
     def get_item(self,**kw):
+        if kw['Key']['pk'].startswith('checkpoint#'):
+            return {}
         assert kw['Key']=={'pk':'job#j1'}
         return {'Item':copy.deepcopy(self.item)}
     def update_item(self,**kw): self.calls.append(kw);return {}
@@ -27,13 +29,24 @@ class FencingTable:
         values=kw['ExpressionAttributeValues']
         if kw['UpdateExpression'].startswith('SET recovery_id'):
             assert self.item['generation'] == values[':old']
-            assert 'recovery_id' not in self.item
+            if ':previous_rid' in values:
+                assert self.item['recovery_id'] == values[':previous_rid']
+                assert self.item['recovery_phase'] == values[':previous_phase']
+                assert self.item['new_jobset_uid'] == values[':failed_uid']
+            else:
+                assert 'recovery_id' not in self.item
             if ':approved_gen' in values:
                 assert self.item['approved_gen'] == values[':approved_gen']
                 assert self.item['approved_step'] == values[':approved_step']
             self.item.update(recovery_id=values[':rid'], recovery_from_gen=values[':old'],
                              recovery_to_gen=values[':new'], recovery_phase='CLAIMED',
                              recovery_resume_step=values[':resume'], recovery_resume_gen=values[':resume_gen'])
+            self.item['recovery_checkpoint_warning'] = values[':warning']
+            if ', approved_gen = :resume_gen' in kw['UpdateExpression']:
+                self.item.update(approved_gen=values[':resume_gen'], approved_step=values[':resume'])
+            elif 'REMOVE approved_gen, approved_step' in kw['UpdateExpression']:
+                self.item.pop('approved_gen', None)
+                self.item.pop('approved_step', None)
         elif kw['UpdateExpression'].startswith('SET generation'):
             assert self.item['generation']==values[':old']
             assert self.item.get('owner',values[':source'])==values[':source']
@@ -115,8 +128,9 @@ class FencingTests(unittest.TestCase):
         self.recovery.item['allow_restart_from_scratch']=True
         self.assertEqual(self.advance()['generation'],2)
     def test_finish_retains_owner_and_approved_fields(self):
-        self.advance();self.fence.item['owner']='eks-b'
-        self.store.finish(dict(state='RECOVERED',event=EVENT,generation=2,target_cluster='eks-b',active_nodes=['new']))
+        self.advance();self.fence.item.update(owner='eks-b',new_jobset_uid='new-uid')
+        self.store.finish(dict(state='RECOVERED',event=EVENT,generation=2,target_cluster='eks-b',active_nodes=['new'],evidence_jobset_uid='new-uid',
+                    evidence_progress_id='progress-1',evidence_placement_id='placement-1',evidence_completed_step=1001))
         self.assertEqual(self.fence.item['owner'],'eks-b')
         self.assertEqual(self.fence.item['approved_gen'],1)
         self.assertNotIn('recovery_id',self.fence.item)
@@ -124,7 +138,8 @@ class FencingTests(unittest.TestCase):
     def test_finish_refuses_unclaimed_new_cluster(self):
         self.advance()
         with self.assertRaises(RecoveryBlocked):
-            self.store.finish(dict(state='RECOVERED',event=EVENT,generation=2,target_cluster='eks-b',active_nodes=['new']))
+            self.store.finish(dict(state='RECOVERED',event=EVENT,generation=2,target_cluster='eks-b',active_nodes=['new'],evidence_jobset_uid='new-uid',
+                    evidence_progress_id='progress-1',evidence_placement_id='placement-1',evidence_completed_step=1001))
     def test_consistent_owner_read(self):
         self.assertTrue(self.store.owner_matches('j1',1,'eks-a'))
         self.assertFalse(self.store.owner_matches('j1',1,'eks-b'))
@@ -156,9 +171,10 @@ class FencingTests(unittest.TestCase):
 
     def test_complete_preserves_previous_approval_until_sidecar_updates_it(self):
         self.advance()
-        self.fence.item.update(owner='eks-b',recovery_phase='RESUMING')
+        self.fence.item.update(owner='eks-b',recovery_phase='RESUMING',new_jobset_uid='new-uid')
         record=dict(state='RECOVERED',event=EVENT,generation=2,
-                    target_cluster='eks-b',active_nodes=['new'])
+                    target_cluster='eks-b',active_nodes=['new'],evidence_jobset_uid='new-uid',
+                    evidence_progress_id='progress-1',evidence_placement_id='placement-1',evidence_completed_step=1001)
         self.store.finish(record)
         self.assertEqual(self.fence.item['recovery_phase'],'COMPLETED')
         self.assertEqual(self.fence.item['approved_gen'],1)

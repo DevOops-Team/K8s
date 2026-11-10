@@ -29,5 +29,15 @@
     "kafka_backoff_seconds": 5,
     "kafka_max_backoff_seconds": 300,
     "max_recovery_attempts": 3
+  },
+  "evidence_policy": {
+    "max_age_seconds": 300,
+    "future_skew_seconds": 30,
+    "placement_producers": [
+      "scheduling"
+    ],
+    "progress_producers": [
+      "training"
+    ]
   }
 }

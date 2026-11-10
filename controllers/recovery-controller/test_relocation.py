@@ -39,3 +39,16 @@ class RequestTests(unittest.TestCase):
         client.submit(dict(EVENT,node=None,category='site'), 'evacuateCluster')
         self.assertEqual(saved[0]['spec']['excludeClusters'], ['eks-a'])
         self.assertNotIn('devoops/old-execution-stopped', str(saved))
+
+    def test_preemptive_request_excludes_only_the_retiring_node(self):
+        from controller import plan
+        from workflow import RELOCATION_ACTIONS
+        event = dict(EVENT, source='spot', suggested_action='evacuate_preemptive')
+        saved = []
+        action = RELOCATION_ACTIONS[plan(event)['suggested_action']]
+        RelocationClient('training', lambda m,p,d=None: saved.append(d)).submit(event, action)
+        self.assertEqual(saved[0]['spec']['action'], 'moveToSpare')
+        self.assertEqual(saved[0]['spec']['reason'], 'spot')
+        self.assertEqual(saved[0]['spec']['excludeNodes'], ['bad-node'])
+        self.assertNotIn('excludeClusters', saved[0]['spec'])
+        self.assertNotIn('annotations', saved[0]['metadata'])

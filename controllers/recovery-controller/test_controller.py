@@ -8,6 +8,10 @@ class PolicyTests(unittest.TestCase):
         result=plan(self.event('node_hardware'))
         self.assertEqual(result['suggested_action'], 'QUARANTINE_AND_RETRY')
         self.assertFalse(result['executed'])
+    def test_preemptive_and_legacy_spot_use_spare_recovery(self):
+        for event in (self.event('spot_interruption'),
+                      dict(self.event('unknown'), suggested_action='evacuate_preemptive')):
+            self.assertEqual(plan(event)['suggested_action'], 'QUARANTINE_AND_RETRY')
     def test_az_requires_fencing(self):
         self.assertEqual(plan(self.event('az_failure'))['suggested_action'], 'FENCE_AND_EVACUATE')
     def test_permanent_error_rejected(self):
