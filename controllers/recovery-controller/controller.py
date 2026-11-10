@@ -13,7 +13,9 @@ def plan(event):
         raise ValueError('event_id and cluster must be nonempty strings')
     if event.get('job_id') is not None and not isinstance(event['job_id'], str):
         raise ValueError('job_id must be a string or null')
-    if not event.get('suggested_action') and not event.get('fault_type'):
+    from init_failure import decision
+    init = decision(event)
+    if not init and not event.get('suggested_action') and not event.get('fault_type'):
         raise ValueError('suggested_action or legacy fault_type required')
     if event['cluster'] not in ('eks-a', 'eks-b', 'eks-c'):
         raise ValueError('unknown cluster')
@@ -21,7 +23,8 @@ def plan(event):
         'restart_in_place': 'RETRY_GROUP',
         'isolate_migrate': 'QUARANTINE_AND_RETRY',
         'reset_then_migrate': 'QUARANTINE_AND_RETRY',
-        'evacuate_preemptive': 'PLANNED_MIGRATE',
+        # Pre-save migration is deferred; use the normal generation-first spare path.
+        'evacuate_preemptive': 'QUARANTINE_AND_RETRY',
         'fence_evacuate': 'FENCE_AND_EVACUATE',
         'hold': 'HOLD', 'refuse': 'NEEDS_CONFIG_FIX', 'none': 'NONE',
     }
@@ -30,9 +33,9 @@ def plan(event):
               'spot_interruption': 'evacuate_preemptive', 'straggler': 'hold',
               'az_failure': 'fence_evacuate'}
     recommendation = event.get('suggested_action', legacy.get(event.get('fault_type'), 'hold'))
-    if recommendation not in actions:
+    if not init and recommendation not in actions:
         raise ValueError('unknown suggested_action')
-    action = actions[recommendation]
+    action = init['action'] if init else actions[recommendation]
     if event.get('collector_healthy') is False and event.get('category') != 'site':
         action = 'HOLD'
     return {'event_id': event['event_id'], 'job_id': event.get('job_id'),
@@ -71,6 +74,8 @@ def validate_config(config):
             if not isinstance(namespace, str) or not re.fullmatch('[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?', namespace):
                 raise ValueError('invalid job_namespace')
 
+    from evidence import policy_config
+    policy_config(config.get('evidence_policy'))
     watchdog = config.get('watchdog', {})
     if not isinstance(watchdog, dict) or type(watchdog.get('enabled', False)) is not bool:
         raise ValueError('watchdog.enabled must be boolean')

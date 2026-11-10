@@ -66,7 +66,9 @@ Kafka 모드는 실제 값으로 채운 로컬 JSON을 --config로 지정하세�
 옛 승인본·새 배치 증거 부재 시 완료 금지를 검증합니다.
 실제 Kafka/AWS/Kubernetes 통합·이미지 게시·클러스터 배포는 별도 작업입니다.
 새 참여 노드 메타데이터 생산자가 연결되기 전에는 RESUMING에서 완료를 보류합니다.
-PLANNED_MIGRATE는 이름을 매핑하지만 사전 체크포인트 handshake 미확정으로 HOLD합니다.
+회수 예고 evacuate_preemptive(legacy spot_interruption)는 QUARANTINE_AND_RETRY → moveToSpare로 처리합니다.
+세대를 먼저 증가시키고 옛 실행 종료 확인 후 같은 클러스터의 예비 노드로 재배치해 마지막 승인본에서 재개합니다.
+마지막 저장 후 세대 증가(PLANNED_MIGRATE)는 향후 확장으로 보류합니다. 이미 HOLD된 사건은 자동 재개하지 않습니다.
 moveToOtherCluster 자동 승격은 미구현입니다. Watchdog HOLD는 아래와 같이 구현했습니다.
 
 전체 제한과 기존 HTTP 복구에서의 전환 절차는 contracts.md를 참고하세요.
@@ -131,9 +133,20 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 ## 2026-11-09 체크포인트·장애 복구 규약 대조 보완
 
-- 승인본이 전혀 없는 복구는 규약 10절대로 처음부터 재시작합니다. 불완전한 승인 필드는 계속 HOLD하고, 기존 승인본 다운로드/검증 실패를 승인본 없음으로 취급하지 않습니다. 더 엄격한 작업별 `allow_restart_from_scratch=false`도 지원합니다.
+- 승인본이 전혀 없는 복구는 규약 10절대로 처음부터 재시작합니다. 불완전한 승인 필드는 계속 HOLD하고, 일시 다운로드 실패를 승인본 없음으로 취급하지 않습니다. 확인된 코드 7은 아래 fallback 정책으로 구분합니다. 더 엄격한 작업별 `allow_restart_from_scratch=false`도 지원합니다.
 - 복원 기준은 CLAIMED에서 고정합니다. 승인본 없음의 기준은 `resume_gen=null`, `resume_step=0`이며, 진행 신호 `started_from_scratch=true`와 실제 첫 step 증가가 있어야 완료합니다.
 - 경고 `checkpoint_warning=NO_APPROVED_CHECKPOINT_RESTART_FROM_SCRATCH`는 영속 inbox와 최종 recovery.action에 보존합니다. 이것은 새 승인 체크포인트를 임의로 만드는 동작이 아닙니다.
 - 작업당 자동 복구 한도는 `retry_policy.max_recovery_attempts`로 설정하며 기본 3회입니다. 세대 전환의 조건부 갱신에도 같은 상한을 사용하고, 진행 중인 마지막 허용 시도의 재처리는 계속 허용합니다.
 - relocator는 Pod 조회 권한 403을 이전 실행 종료로 인정하지 않습니다. 실행기 자격증명에 해당 namespace의 Pod 조회가 필요하며, 실제 Pod 0개 확인 또는 별도 검증한 운영자 종료 증거가 있어야 다음 단계로 갑니다.
 - 종료를 대신하는 클러스터 펜싱 증거는 문서상 합의 대기이므로 자동 승인하지 않습니다. SDC 이전 정상본 판단·예비 소진 승격 신호·사전 체크포인트 handshake는 추가 합의/연동 대상으로 유지합니다.
+
+## ckpt-init 실패 연동
+
+`init_failure.py`에 종료 코드 2·3·4·5·6·7 판단과 Pod 종료 상태 → 사건 변환 어댑터가 있습니다. 코드 7의 확인된 손상 승인본은 recovery_table에 영속 격리하며, 같은 승인본으로 새 claim/재배치 요청을 만들지 않습니다. `prev_approved`가 있으면 이전 승인본으로 전환하고 없거나 손상이 확인되면 처음부터 학습합니다. 이전 승인본도 코드 7이면 다음 세대는 처음부터 학습합니다. 실제 파일 검증은 ckpt-init이 수행합니다. 선택·포인터 전환은 조건부 갱신하고 retry_count는 초기화하지 않습니다. recovery.action에는 stage·retry_count·exit_code·failure_class를 추가했습니다.
+
+실제 EKS 탐지기에서 어댑터를 호출해 Kafka로 보내는 연결, 신뢰된 현재 JobSet 메타데이터 기록, 소비자의 사건 스키마 적용은 담당 파트와 통합해야 합니다. 상세 입력·판단·제한은 [contracts.md의 ckpt-init 절](contracts.md#ckpt-init-종료-사건과-판단-2026-11-09-로컬-구현)을 따릅니다.
+
+
+## 복구 증거 v1
+
+배치·복원·첫 step의 기록/검증 계약과 남은 생산자 인증 연동은 [evidence-contract.md](evidence-contract.md)를 따릅니다. EvidenceWriter의 조건부 기록 함수와 Workflow의 버전·주체·신선도·현재 실행 검사를 구현했습니다. 실제 생산자/인증 어댑터는 별도 연결이 필요하며 producer 문자열만으로 인증했다고 보지 않습니다. 증거 누락은 제한 시간까지 대기하고, 신뢰된 실패 또는 시간 초과는 HOLD합니다.

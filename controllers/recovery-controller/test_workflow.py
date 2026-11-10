@@ -1,5 +1,6 @@
 import copy
 import unittest
+import time
 from workflow import Workflow
 from test_fencing import EVENT as BASE_EVENT
 
@@ -16,6 +17,11 @@ class MemoryStore:
                           progress=dict(recovery_id='e1',generation=2,cluster='eks-a',
                                         jobset_uid='new-uid',checkpoint_loaded=True,
                                         restored_gen=1,restored_step=1000,completed_step=1200))
+        now = int(time.time())
+        self.nodes.update(recovery_id='e1', jobset_uid='new-uid',
+            placement_evidence=dict(schema_version=1,event_id='placement-1',producer='scheduling',observed_at=now,received_at=now))
+        self.nodes['progress'].update(schema_version=1,event_id='progress-1',producer='training',
+                                      observed_at=now,received_at=now,outcome='succeeded')
     def accept(self, event, digest):
         old = self.events.get(event['event_id'])
         if old:
@@ -94,10 +100,37 @@ class WorkflowTests(unittest.TestCase):
         self.store.events['e1']['event'].update(fault_type='az_failure', node=None)
         self.assertEqual(self.tick()['state'], 'REQUESTED')
         self.assertEqual(self.requests.calls[0][1], 'evacuateCluster')
-    def test_preemptive_is_held_until_checkpoint_contract_exists(self):
+    def test_preemptive_claims_before_spare_request_and_resumes_approved_step(self):
         self.store.events['e1']['event']['suggested_action'] = 'evacuate_preemptive'
-        self.assertEqual(self.tick()['state'], 'HOLD')
+        submit = self.requests.submit
+        def check_generation_before_submit(event, action):
+            self.assertEqual(self.store.fence['generation'], 2)
+            self.assertEqual(self.store.fence['recovery_phase'], 'GENERATION_ADVANCED')
+            self.assertEqual(event['generation'], 1)  # Relocator must stop the old run.
+            return submit(event, action)
+        self.requests.submit = check_generation_before_submit
+        result = self.tick()
+        self.assertEqual(result['state'], 'REQUESTED')
+        self.assertEqual(result['action'], 'QUARANTINE_AND_RETRY')
+        self.assertEqual(self.requests.calls[0][1], 'moveToSpare')
+        self.assertEqual(self.tick()['state'], 'REQUESTED')  # Old-run stop not confirmed.
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-a',
+                                approved_gen=1, approved_step=1000)
+        self.assertEqual(self.tick()['state'], 'RECOVERED')
+        self.assertEqual(self.store.fence['approved_step'], 1000)
+
+    def test_preemptive_requires_target_node_before_claim(self):
+        with self.assertRaises(ValueError):
+            self.flow.accept(dict(EVENT, suggested_action='evacuate_preemptive', node=None))
         self.assertEqual(self.store.job['generation'], 1)
+        self.assertEqual(self.requests.calls, [])
+
+    def test_preemptive_does_not_resume_in_another_cluster(self):
+        self.store.events['e1']['event']['suggested_action'] = 'evacuate_preemptive'
+        self.tick()
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-b')
+        self.assertEqual(self.tick()['state'], 'HOLD')
+
     def test_no_fresh_placement_cannot_complete(self):
         self.tick()
         self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-a', approved_gen=2)
