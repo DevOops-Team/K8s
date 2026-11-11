@@ -9,7 +9,7 @@ import time
 from kubernetes import client, config
 from urllib3.exceptions import HTTPError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "controllers"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
 import keys as K
 
 DEPLOYMENTS = (("kueue-system", "kueue-controller-manager"),

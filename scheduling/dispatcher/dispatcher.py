@@ -21,6 +21,10 @@
     라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
 """
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
 import time
 
 from kubernetes import client

@@ -35,7 +35,7 @@ class Controllers:
             return self
         self.stop()
         if not PY.exists():
-            raise Invalid(f"{PY} 없음: controllers/run-local.sh를 한 번 돌려 venv를 만들 것")
+            raise Invalid(f"{PY} 없음: scheduling/run-local.sh를 한 번 돌려 venv를 만들 것")
         self.seq += 1
         self.logfile = self.logdir / f"controllers-{self.seq:02d}-{'+'.join(names) or 'none'}.log"
         full = {**os.environ, **env, "KUBE_CONTEXT": MGR_CONTEXT, "PYTHONUNBUFFERED": "1",
@@ -43,7 +43,7 @@ class Controllers:
         out = open(self.logfile, "a", buffering=1)
         out.write(f"# {datetime.now():%H:%M:%S} 설정: {names} {env}\n")
         for n in names:
-            self.procs[n] = subprocess.Popen([str(PY), f"{n}.py"], cwd=CONTROLLERS_DIR, env=full,
+            self.procs[n] = subprocess.Popen([str(PY), f"{n}/{n}.py"], cwd=CONTROLLERS_DIR, env=full,
                                              stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         self.key, self.started_at = key, time.time()
         deadline = time.monotonic() + 30
