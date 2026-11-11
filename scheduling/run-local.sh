@@ -8,22 +8,20 @@ cd "$(dirname "$0")"
 
 if [ ! -d .venv ]; then
   python3 -m venv .venv
-  .venv/bin/pip install -q -r requirements.txt
+  .venv/bin/pip install -q -r common/requirements.txt
 fi
 
 export KUBE_CONTEXT=${KUBE_CONTEXT:-kind-manager}
 export WORKER_CONTEXTS=${WORKER_CONTEXTS:-worker1=kind-worker1,worker2=kind-worker2,worker3=kind-worker3}
 export PYTHONUNBUFFERED=1
 
-# CRD가 없으면 먼저 만듦 (platform 네임스페이스는 kueue/base 설치 때 생김)
-kubectl --context "$KUBE_CONTEXT" apply -f deploy/crd-relocationrequest.yaml >/dev/null
 
 names=("${@:-dispatcher relocator}")
 read -r -a names <<< "${names[*]}"
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait' INT TERM EXIT
 for n in "${names[@]}"; do
-  .venv/bin/python "$n.py" &
+  .venv/bin/python "$n/$n.py" &
   pids+=($!)
 done
 wait

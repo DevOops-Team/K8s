@@ -4,8 +4,8 @@
 
 | 경로 | 용도 |
 | --- | --- |
-| `controllers/recovery-controller/` | 복구 컨트롤러 코드·이미지·테스트 |
-| `scheduling/controllers/` | 디스패처·재배치 실행기 코드·이미지·테스트 |
+| `recovery-controller/` | 복구 컨트롤러 코드·이미지·테스트 |
+| `scheduling/dispatcher/`, `scheduling/relocator/`, `scheduling/common/` | 디스패처·재배치 실행기 코드·이미지·테스트 |
 | `scheduling/cluster/`, `scheduling/e2e/`, `scheduling/examples/` | kind·KWOK 기반 실습 및 통합 테스트 |
 | `scheduling/kueue/`, `scheduling/jobset/`, `scheduling/queues/` | 실습 클러스터에서 사용하는 설치·큐 구성 |
 
@@ -15,5 +15,5 @@
 
 - [Gitops 등록 경로](docs/bootstrap.md)
 - [기존 Application 인계](docs/migration.md)
-- [복구 컨트롤러](controllers/recovery-controller/README.md)
+- [복구 컨트롤러](recovery-controller/README.md)
 - [스케줄링 테스트](scheduling/e2e/README.md)

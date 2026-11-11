@@ -1,4 +1,4 @@
-"""접속 정보, 이름, 시간 값. 이름은 컨트롤러와 같은 controllers/keys.py를 쓴다 (한 곳에서만 바꾸게)."""
+"""접속 정보, 이름, 시간 값. 이름은 컨트롤러와 같은 common/keys.py를 쓴다 (한 곳에서만 바꾸게)."""
 import os
 import pathlib
 import sys
@@ -6,8 +6,8 @@ import sys
 from kubernetes import client, config
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]          # scheduling/
-CONTROLLERS_DIR = ROOT / "controllers"
-sys.path.insert(0, str(CONTROLLERS_DIR))
+CONTROLLERS_DIR = ROOT
+sys.path.insert(0, str(ROOT / "common"))
 import keys as K  # noqa: E402
 
 MGR_CONTEXT = os.getenv("MGR_CONTEXT", "kind-manager")

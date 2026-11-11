@@ -24,23 +24,44 @@
 클러스터 안 (우리 망과 같은 방식, 워커 kubeconfig는 MultiKueue Secret을 읽음):
 
 ```bash
-docker build -t scheduling-controllers:dev .
-kind load docker-image scheduling-controllers:dev --name manager
-kubectl --context kind-manager apply -k deploy/
-kubectl --context kind-manager -n platform get pods -l 'app in (dispatcher,relocator)' -o wide   # 레플리카 3개씩 manager-worker/2/3에 하나씩
-kubectl --context kind-manager -n platform get lease | grep scheduling-   # holder = 지금 리더 Pod
+docker build -f scheduling/dispatcher/Dockerfile -t scheduling-dispatcher:dev scheduling
+docker build -f scheduling/relocator/Dockerfile -t scheduling-relocator:dev scheduling
 ```
 
-우리 망 이미지 (GHCR): `.github/workflows/scheduling-controllers-image.yml`이 이 폴더가 바뀐 develop·main push마다
-테스트 → 빌드 → `ghcr.io/devoops-team/scheduling-controllers`로 올린다 (PR은 테스트·빌드만). 태그는 `sha-<커밋>`·브랜치명, main은 `latest`도.
-배포 매니페스트에는 실행 요약(Summary)에 찍힌 `@sha256:` digest로 고정하고, 패키지가 private이면 `platform/ghcr-pull` Secret을 `imagePullSecrets`로 건다.
-kind는 위처럼 `scheduling-controllers:dev`를 그대로 쓴다.
+Build from the repository root with `scheduling/` as the context.
+Default commands: `python dispatcher/dispatcher.py` and `python relocator/relocator.py`.
+Common modules are copied into `/app` (`PYTHONPATH=/app`).
+For local execution, run `python scheduling/dispatcher/dispatcher.py` or
+`python scheduling/relocator/relocator.py` from the repository root.
 
-로컬 kind manager는 `cluster/kind/manager.yaml`에 `platform-worker=true` 워커 노드 3개가 있어야 함(없으면 Pod 3개 중 일부 Pending) → 예전 manager 클러스터는 다시 만들어야 함.
+### Layout and tests
+
+- `dispatcher/`: dispatcher, placement, tests and Dockerfile.
+- `relocator/`: relocator, recovery_store, ec2_evidence, tests and Dockerfile.
+- `common/`: keys, kube, leader, recovery_render, tests and requirements.txt.
+
+```bash
+python -m pip install -r scheduling/common/requirements.txt
+export PYTHONPATH="$PWD/scheduling/common:$PWD/scheduling/dispatcher:$PWD/scheduling/relocator"
+python -m unittest discover -s scheduling/common -p 'test_*.py'
+python -m unittest discover -s scheduling/dispatcher -p 'test_*.py'
+python -m unittest discover -s scheduling/relocator -p 'test_*.py'
+```
+
+### CI / deployment handoff
+
+CI는 저장소 루트 `.github/workflows/ci.yml` 하나다 (GPU-127, 담당 노찬경).
+
+- 이미지: `ghcr.io/devoops-team/dispatcher`, `ghcr.io/devoops-team/relocator` (Dockerfile은 각 폴더, 빌드 컨텍스트는 `scheduling/`)
+- PR · develop push: `common` + 자기 폴더 테스트 → 이미지 빌드 (push 안 함)
+- main push: 자기 폴더나 `scheduling/common/`이 바뀐 이미지만 `main`, `sha-<7자리>`로 push
+  → K8s Variable `DEPLOY_IMAGES`에 든 이미지만 봇이 Gitops `onprem/controllers/<이름>/overlays/onprem` digest 갱신
+- 운영 매니페스트(CRD · RBAC · Deployment)는 Gitops에서 관리한다. Deployment는 Dockerfile 기본 CMD를 쓴다.
+  CRD는 `run-local.sh` 실행 전에 설치돼 있어야 한다.
 
 ## 뺀 것 (11/09)
 
-워커 하나가 GPU 5장(학습 4 + 예비 1)이고 잡이 최대 4장인 규모에서 효과가 없어서 뺐다. 근거는 `../e2e/` 실행 결과.
+워커 하나가 GPU 5장(학습 4 + 예비 1)이고 잡이 최대 4장인 규모에서 효과가 없어서 뺐다. 근거는 `e2e/` 실행 결과.
 
 | 뺀 것 | 이유 |
 |---|---|

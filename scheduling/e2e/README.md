@@ -14,7 +14,7 @@ kind 로컬 클러스터에서 평소 학습·장애복구 스케줄링 규칙(�
 ./run.sh -k gang             # 골라서 (pytest 인자 그대로)
 ```
 
-컨트롤러는 케이스가 알아서 띄운다. `controllers/run-local.sh`를 따로 켜 두면 Lease를 다투니 끄고 돌린다.
+컨트롤러는 케이스가 알아서 띄운다. `../run-local.sh`를 따로 켜 두면 Lease를 다투니 끄고 돌린다.
 결과는 `logs/<시각>/`의 `results.json`(항목별 체크·측정값), `summary.md`, `pytest.log`, `controllers-*.log`에 남는다.
 
 ## 판정
@@ -35,7 +35,7 @@ kind 로컬 클러스터에서 평소 학습·장애복구 스케줄링 규칙(�
 run.sh                실행기 (venv 준비, 로그 폴더, 종료 코드)
 conftest.py           케이스 준비(컨트롤러 설정 -> 초기화 -> 감시 시작), 판정 변환, 결과 기록
 harness/
-  env.py              접속·이름·시간 값. 이름은 controllers/keys.py와 같은 것을 씀
+  env.py              접속·이름·시간 값. 이름은 common/keys.py와 같은 것을 씀
   cluster.py          조회: Workload(작업ID로), ClusterQueue 사용량, 우선순위, 워커 Pod
   jobs.py             제출 (JobSet 템플릿 합의안 모양 + 복구 원본·펜싱 ConfigMap), 잡 투입기 큐 규칙
   reset.py            초기화 (끊어 둔 워커 다시 연결 포함)
@@ -133,4 +133,4 @@ def test_something(kube, check, info):
 11은 "복구 잡이 wait-c보다 먼저 쿼터"를 기대하던 것을 "복구 몫으로 쿼터·원래 워커 입장"으로 바꿈(풀린 Heavy 몫은 옛 잡을 내리는 순간 wait-c가 먼저 받는 게 정상).
 06에서 다시 연결한 뒤 끊긴 워커의 옛 복사본이 치워지는지는 정본에 기대가 없어 판정하지 않고 기록만 한다.
 
-기본 = dispatcher·relocator. 배분 조정 컨트롤러(aging)와 시간 기준 비워 두기는 11/09에 뺐고, 11/10에 디스패처 찜을 넣었다 (`../controllers/README.md`의 "뺀 것").
+기본 = dispatcher·relocator. 배분 조정 컨트롤러(aging)와 시간 기준 비워 두기는 11/09에 뺐고, 11/10에 디스패처 찜을 넣었다 (`../README.md`의 "뺀 것").

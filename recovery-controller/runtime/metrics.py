@@ -7,6 +7,27 @@ HOLD_TOTAL = Counter(
     ('job_id', 'reason'),
 )
 
+REJECTED_TOTAL = Counter(
+    'recovery_rejected_total',
+    'Recovery events entering REJECTED',
+    ('job_id', 'reason'),
+)
+
+_REJECTED_REASONS = {
+    'NEEDS_CONFIG_FIX': 'classifier_refuse',
+    'init configuration mismatch requires correction': 'config_mismatch',
+    'init fencing registration missing; do not create it': 'registration_missing',
+}
+
+
+def record_rejected(job_id, reason):
+    if (reason or '').startswith('automatic recovery limit reached ('):
+        code = 'retry_limit_reached'
+    else:
+        code = _REJECTED_REASONS.get(reason, 'other')
+    REJECTED_TOTAL.labels(job_id=job_id or '', reason=code).inc()
+
+
 _REASON_PREFIXES = {
     'stage deadline exceeded:': 'stage_timeout',
     'API attempt budget exhausted:': 'api_attempts_exhausted',

@@ -8,7 +8,7 @@ RelocationRequest 생성 → DynamoDB 단계 확인 → 학습 진행 확인 →
 
 ## 배포와 인증
 
-Deployment·ServiceAccount는 platform/recovery-controller입니다. 최신 스케줄링 문서와 일치하는 현재 배포 기준이며, 과거 IAM 요청에 적힌 recovery namespace를 추가하지 않습니다. 이름을 바꾸려면 Argo destination·Lease·RBAC subject·Secret·온프레 AWS 인증 연결을 함께 검토해야 합니다. [팀 정합성 기준](../../docs/team-contract.md)을 참고합니다.
+Deployment·ServiceAccount는 platform/recovery-controller입니다. 최신 스케줄링 문서와 일치하는 현재 배포 기준이며, 과거 IAM 요청에 적힌 recovery namespace를 추가하지 않습니다. 이름을 바꾸려면 Argo destination·Lease·RBAC subject·Secret·온프레 AWS 인증 연결을 함께 검토해야 합니다. [팀 정합성 기준](../docs/team-contract.md)을 참고합니다.
 기본 매니페스트는 replicas=0이고 렌더러는 실제 digest로 고정된 이미지와 3개 복제본을 생성합니다.
 Kafka 모드에서는 Lease 리더만 소비·복구 작업을 실행합니다.
 관찰 모드의 사건은 OBSERVED로 끝나며 실행 모드 전환 뒤 자동 재실행하지 않습니다.
@@ -31,7 +31,7 @@ examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 �
 ## 로컬 테스트·빌드
 
 ```bash
-cd controllers/recovery-controller
+cd recovery-controller
 python3 -m unittest discover -s tests -v
 python3 main.py --event-file examples/example-event.json
 python3 main.py --config examples/config.example.json
@@ -49,13 +49,13 @@ namespace platform·platform-worker=true 노드와 private 이미지용 ghcr-pul
 # gpu-k8s 루트
 python3 -m pip install -r requirements-dev.txt
 mkdir -p .build
-cd controllers/recovery-controller
+cd recovery-controller
 python3 -m tools.render \
   --image ghcr.io/YOUR_ORG/recovery-controller@sha256:ACTUAL_DIGEST \
   --config examples/config.example.json \
-  > ../../.build/recovery-controller.yaml
+  > ../.build/recovery-controller.yaml
 # 렌더가 성공한 경우에만 적용
-kubectl --context YOUR_CONTEXT apply -f ../../.build/recovery-controller.yaml
+kubectl --context YOUR_CONTEXT apply -f ../.build/recovery-controller.yaml
 kubectl --context YOUR_CONTEXT -n platform rollout status deployment/recovery-controller
 kubectl --context YOUR_CONTEXT -n platform logs deployment/recovery-controller
 ```
@@ -162,3 +162,9 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 카운터는 Pod별 메모리에 있으며 재시작 시 초기화됩니다. 새 라벨 조합의 첫 샘플이
 이미 1일 수 있으므로 수집 룰에서 첫 샘플도 고려해야 합니다.
 Kafka `recovery.action`의 HOLD 결과에는 `type=recovery.held`를 포함합니다.
+
+`8080/metrics` also exposes `recovery_rejected_total{job_id,reason}`. It counts
+new persisted REJECTED transitions, including `retry_limit_reached`,
+`config_mismatch`, `registration_missing`, and `classifier_refuse`.
+Repeated saves of the same state and Kafka result retries do not increment it.
+Like the HOLD counter, it resets on Pod restart and can first be scraped at 1.

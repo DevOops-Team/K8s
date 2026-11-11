@@ -1,0 +1,5 @@
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/test_*.py
+e2e/logs
