@@ -162,3 +162,9 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 카운터는 Pod별 메모리에 있으며 재시작 시 초기화됩니다. 새 라벨 조합의 첫 샘플이
 이미 1일 수 있으므로 수집 룰에서 첫 샘플도 고려해야 합니다.
 Kafka `recovery.action`의 HOLD 결과에는 `type=recovery.held`를 포함합니다.
+
+`8080/metrics` also exposes `recovery_rejected_total{job_id,reason}`. It counts
+new persisted REJECTED transitions, including `retry_limit_reached`,
+`config_mismatch`, `registration_missing`, and `classifier_refuse`.
+Repeated saves of the same state and Kafka result retries do not increment it.
+Like the HOLD counter, it resets on Pod restart and can first be scraped at 1.

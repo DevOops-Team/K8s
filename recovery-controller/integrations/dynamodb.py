@@ -43,15 +43,17 @@ class Store:
         values['updated_at'] = int(time.time())
         names = {'#'+str(i):k for i,k in enumerate(values)}
         vals = {':'+str(i):v for i,v in enumerate(values.values())}
-        entering_hold = values.get('state') == 'HOLD'
+        state = values.get('state')
+        count_transition = state in ('HOLD', 'REJECTED')
         previous = self.table.update_item(Key={'pk':'event#'+rid},
             UpdateExpression='SET '+', '.join('#'+str(i)+' = :'+str(i) for i in range(len(values))),
             ExpressionAttributeNames=names, ExpressionAttributeValues=vals,
-            ReturnValues='ALL_OLD' if entering_hold else 'ALL_NEW')['Attributes']
-        if entering_hold:
-            if previous.get('state') != 'HOLD':
-                from runtime.metrics import record_hold
-                record_hold(previous['event'].get('job_id'), values.get('reason'))
+            ReturnValues='ALL_OLD' if count_transition else 'ALL_NEW')['Attributes']
+        if count_transition:
+            if previous.get('state') != state:
+                from runtime.metrics import record_hold, record_rejected
+                record = record_hold if state == 'HOLD' else record_rejected
+                record(previous['event'].get('job_id'), values.get('reason'))
             return {**previous, **values}
         return previous
 
