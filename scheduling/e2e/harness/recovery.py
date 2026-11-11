@@ -212,6 +212,18 @@ def fenced(kube, worker):
     return (m["metadata"].get("labels") or {}).get(K.LABEL_FENCED) == "true"
 
 
+def fenced_ack(kube, worker):
+    """디스패처가 남긴 시간대 있는 ACK를 읽는다. 없거나 잘못됐으면 None이다."""
+    m = kube.co.get_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", worker,
+                                         _request_timeout=T)
+    value = (m.get("metadata", {}).get("annotations") or {}).get(K.ANN_FENCED_ACK)
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def mkc_active(kube, worker):
     m = kube.co.get_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", worker,
                                           _request_timeout=T)

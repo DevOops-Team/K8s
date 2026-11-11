@@ -17,6 +17,8 @@
     재배치 실행기는 옛 잡을 먼저 내리고 새 잡을 넣는데, 그 사이 풀린 자리를 쿼터를 쥐고 기다리던 학습 잡이
     가져가면 복구 잡이 들어갈 곳이 없어진다. 새 잡이 지명되거나 RELOCATION_HOLD_SECONDS가 지나면 푼다.
   - 잡 하나의 실패(조회·patch 오류)는 그 잡만 건너뛴다. 뒤 잡은 계속 본다.
+  - fenced ACK: 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에 devoops/fenced-ack=<루프 시작 시각>.
+    라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
 """
 import os
 import time
@@ -180,11 +182,27 @@ def touch_nomination(mgr, wl, tried):
         {"metadata": {"annotations": {K.ANN_NOMINATED_AT: str(int(time.time())), K.ANN_TRIED: ",".join(sorted(tried))}}})
 
 
+def ack_fenced(mgr, clusters, started):
+    """이번 루프에서 fenced로 본 클러스터에 '이 루프 시작 시각'을 남긴다 (GPU-125).
+    루프는 시작할 때 라벨을 한 번 읽으므로, 라벨을 붙인 뒤 시작해서 끝까지 돈 루프가 있어야
+    그 전에 옛 정보로 돌던 루프도 끝났다고 말할 수 있다. 실패해도 다음 루프에서 다시 쓴다"""
+    for c in clusters:
+        if not c.fenced:
+            continue
+        try:
+            kube.kueue(mgr).patch_cluster_custom_object(
+                K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", c.name,
+                {"metadata": {"annotations": {K.ANN_FENCED_ACK: started}}})
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s fenced-ack 못 씀: %s", c.name, e)
+
+
 def reconcile(mgr, workers):
+    """한 바퀴. 끝까지 돌면 이번 루프가 본 클러스터 목록을 돌려준다 (fenced-ack용)"""
     clusters = cluster_state(mgr, workers)
     if clusters and not any(c.active for c in clusters):
         log.warning("워커 %d개 전부 끊김 -> 지명 중단 (네트워크 쪽 장애일 수 있음)", len(clusters))
-        return
+        return clusters
     by_name = {c.name: c for c in clusters}
     all_wls = kube.list_workloads(mgr)
     wls = [w for w in all_wls if waiting(w)]
@@ -214,6 +232,7 @@ def reconcile(mgr, workers):
             pinned = (wl["metadata"].get("annotations") or {}).get(K.ANN_RESERVED)
             if pinned in by_name:
                 reserved.setdefault(pinned, (is_recovery(wl), kube.workload_owner(wl)[1]))
+    return clusters
 
 
 def set_reserved(mgr, wl, cluster):
@@ -296,10 +315,13 @@ def main():
         if not elector.is_leader():
             time.sleep(1)
             continue
+        started = kube.now_rfc3339()   # 라벨을 읽기 전 시각 (초 단위 버림 -> ack > T 비교가 안전한 쪽)
         try:
-            reconcile(mgr, workers)
-        except Exception:  # noqa: BLE001
+            clusters = reconcile(mgr, workers)
+        except Exception:  # noqa: BLE001  루프가 중간에 끊기면 ack 안 남김
             log.exception("루프 실패")
+        else:
+            ack_fenced(mgr, clusters, started)
         time.sleep(INTERVAL)
 
 

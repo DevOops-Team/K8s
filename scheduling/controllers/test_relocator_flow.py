@@ -1,6 +1,7 @@
 """python -m unittest -v test_relocator_flow.py  (kubernetes 패키지만 필요, 클러스터 없이 돈다)
 재배치 실행기 단계 함수를 가짜 API·저장소로 돌려 본다: 재제출 철회, 워커 미정 evacuate."""
 import copy
+import json
 import unittest
 from unittest import mock
 
@@ -51,6 +52,7 @@ class FakeStore:
             self.rec.update(recovery_id="other", recovery_phase="GENERATION_ADVANCED")
             return False
         self.rec["recovery_phase"] = new_phase
+        self.rec.update(extra or {})
         return True
 
 
@@ -177,13 +179,75 @@ class StopOld(unittest.TestCase):
             relocator.stop_old(x)
         return co, store
 
+    def test_110_seconds_still_allows_graceful_stop(self):
+        co, store = self.run_stop(110, gone=False)
+        self.assertIsNone(co.status)
+        self.assertEqual(store.rec["recovery_phase"], "GENERATION_ADVANCED")
+
+    def test_stop_evidence_is_recorded_with_phase(self):
+        co, store = self.run_stop(30, gone=True)
+        evidence = json.loads(store.rec["old_run_stop_evidence"])
+        self.assertEqual(evidence["generation"], 1)
+        self.assertEqual(evidence["jobset_name"], "job-abc-g0001")
+        self.assertEqual(evidence["namespace"], "training")
+        self.assertEqual(evidence["clusters"], ["worker1"])
+        self.assertEqual(evidence["kind"], "automatic")
+        self.assertEqual(evidence["confirmed_at"], co.status["stoppedAt"])
+        self.assertEqual(evidence["confirmed_by"], "relocator")
+        self.assertTrue(evidence["recorded_by"])
+
+    def test_mixed_api_and_ec2_evidence(self):
+        co, store = FakeCO(), FakeStore(fencing("GENERATION_ADVANCED"))
+        co.delete_namespaced_custom_object = mock.Mock()
+        x = ctx(store, co, sourceCluster="worker1", seenClusters=["worker2"], isolatedAt="t")
+        with elapsed(30), on_worker(None), mock.patch.object(
+                relocator, "gone_on", side_effect=[(True, "absent"), (False, relocator.Unreachable("offline"))]), \
+                mock.patch.object(relocator, "ec2_stop_evidence", return_value=(True, "pool stopped")):
+            relocator.stop_old(x)
+        evidence = json.loads(store.rec["old_run_stop_evidence"])
+        self.assertEqual(evidence["kind"], "ec2")
+        self.assertEqual(evidence["clusters"], ["worker1", "worker2"])
+        self.assertEqual(evidence["checks"], [
+            {"cluster": "worker1", "kind": "automatic", "detail": "absent"},
+            {"cluster": "worker2", "kind": "ec2", "detail": "pool stopped"}])
+
+    def test_deadline_controls_actual_stop_transition(self):
+        for deadline, expected in ((2100, "OLD_RUN_STOPPED"), (2000, "GENERATION_ADVANCED")):
+            with self.subTest(deadline=deadline):
+                co = FakeCO()
+                co.delete_namespaced_custom_object = mock.Mock()
+                store = FakeStore(dict(fencing("GENERATION_ADVANCED"), stop_wait_deadline=deadline))
+                x = ctx(store, co, sourceCluster="worker1", isolatedAt="t")
+                with elapsed(9999), on_worker(None), mock.patch.object(relocator.time, "time", return_value=2000), \
+                        mock.patch.object(relocator, "old_gone_on_worker", return_value=(True, "absent")):
+                    relocator.stop_old(x)
+                self.assertEqual(store.rec["recovery_phase"], expected)
+                self.assertEqual(co.status["phase"], "Executing" if deadline == 2100 else "Held")
+
+    def test_lost_fencing_does_not_record_stop_or_status(self):
+        co, store = FakeCO(), FakeStore(fencing("GENERATION_ADVANCED"), steal_on_set=True)
+        co.delete_namespaced_custom_object = mock.Mock()
+        x = ctx(store, co, sourceCluster="worker1", isolatedAt="t")
+        with elapsed(30), on_worker(None), mock.patch.object(
+                relocator, "old_gone_on_worker", return_value=(True, "absent")), self.assertRaises(PermissionError):
+            relocator.stop_old(x)
+        self.assertNotIn("old_run_stop_evidence", store.rec)
+        self.assertIsNone(co.status)
+
+    def test_manual_evidence_does_not_claim_known_human_identity(self):
+        _, store = self.run_stop(1000, gone=False, confirmed=True)
+        evidence = json.loads(store.rec["old_run_stop_evidence"])
+        self.assertEqual(evidence["kind"], "manual")
+        self.assertEqual(evidence["confirmed_by"], "unknown (RR annotation)")
+        self.assertEqual(evidence["checks"], [])
+
     def test_gone_before_hold_advances(self):
         co, store = self.run_stop(30, gone=True)
         self.assertEqual(store.rec["recovery_phase"], "OLD_RUN_STOPPED")
         self.assertIn("stoppedAt", co.status)
 
     def test_not_gone_after_wait_is_waiting(self):
-        co, store = self.run_stop(120, gone=False)
+        co, store = self.run_stop(relocator.STOP_WAIT_SECONDS + 1, gone=False)
         self.assertEqual(co.status["phase"], "WaitingForStop")
         self.assertEqual(store.rec["recovery_phase"], "GENERATION_ADVANCED")
 
@@ -197,6 +261,35 @@ class StopOld(unittest.TestCase):
         co, store = self.run_stop(relocator.STOP_HOLD_SECONDS + 1, gone=False, confirmed=True, phase="Held")
         self.assertEqual(store.rec["recovery_phase"], "OLD_RUN_STOPPED")
         self.assertEqual(co.status["phase"], "Executing")
+
+
+class StopDeadline(unittest.TestCase):
+    def held(self, fields, now=2000, rr_age=10):
+        x = ctx(FakeStore(dict(fencing("GENERATION_ADVANCED"), **fields)), FakeCO())
+        with mock.patch.object(relocator.time, "time", return_value=now), elapsed(rr_age):
+            return relocator.stop_held(x)
+
+    def test_deadline_overrides_started_at_and_old_rr(self):
+        self.assertFalse(self.held({"stop_wait_started_at": 0, "stop_wait_deadline": 2100}, rr_age=9999))
+        self.assertTrue(self.held({"stop_wait_started_at": 1990, "stop_wait_deadline": 2000}))
+
+    def test_started_at_without_deadline(self):
+        self.assertFalse(self.held({"stop_wait_started_at": "1900"}, rr_age=9999))
+        self.assertTrue(self.held({"stop_wait_started_at": 1100}))
+        self.assertTrue(self.held({"stop_wait_started_at": 0}))
+
+    def test_rfc3339_and_epoch_strings(self):
+        self.assertTrue(self.held({"stop_wait_deadline": "2000"}))
+        self.assertTrue(self.held({"stop_wait_deadline": "1970-01-01T00:33:20Z"}))
+        self.assertFalse(self.held({"stop_wait_started_at": "1970-01-01T00:31:40+00:00"}))
+
+    def test_missing_fields_preserve_rr_fallback(self):
+        self.assertFalse(self.held({}, rr_age=899))
+        self.assertTrue(self.held({"stop_wait_started_at": None, "stop_wait_deadline": ""}, rr_age=901))
+
+    def test_invalid_deadline_does_not_fall_back_and_resume(self):
+        with self.assertRaises(ValueError):
+            self.held({"stop_wait_deadline": "invalid"})
 
 
 class WatchAdmit(unittest.TestCase):

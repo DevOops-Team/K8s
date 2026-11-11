@@ -35,6 +35,9 @@ ANN_STOP_CONFIRMED = "devoops/old-execution-stopped"   # "true" = 옛 실행이 
 
 # --- 펜싱 / 노드
 LABEL_FENCED = "devoops/fenced"              # MultiKueueCluster에 "true" -> 새 잡 안 보냄
+# 디스패처가 fenced를 보고 루프를 끝까지 돈 뒤 남기는 그 루프의 시작 시각 (RFC3339 UTC, 초 단위 버림).
+# 라벨 붙인 시각 T보다 크면(>) 옛 정보로 돌던 루프는 끝났다는 뜻 (EKS OFF 절차, GPU-125)
+ANN_FENCED_ACK = "devoops/fenced-ack"
 TAINT_FAULTY = "devoops/faulty"              # 고장 노드 taint (NoSchedule)
 GPU_NODE_SELECTOR = os.getenv("GPU_NODE_SELECTOR", "devoops/gpu=true")   # GPU 노드 라벨 (11/05 아키텍처 v5, 11/10 정본 확정)
 TAINT_SPARE = "devoops/spare"   # 예비 GPU 노드 taint (값 true, NoSchedule). 같은 키의 라벨도 붙음. 복구 잡만 toleration을 가짐
