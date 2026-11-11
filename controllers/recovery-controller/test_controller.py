@@ -34,7 +34,19 @@ class ConfigurationTests(unittest.TestCase):
     def test_manual_render_uses_three_replicas_without_kafka_credentials(self):
         from render import render
         config=dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=False)
-        docs=render('ghcr.io/team/controller@sha256:'+'a'*64, config)
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        # The real deployment template and RBAC are validated in Gitops.
+        with TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'resources.yaml'
+            manifest.write_text(
+                'kind: ConfigMap\nmetadata: {name: test-config}\ndata: {}\n---\n'
+                'kind: Deployment\nmetadata: {name: test-controller}\n'
+                'spec:\n  strategy: {type: Recreate}\n  template:\n'
+                '    metadata: {}\n    spec:\n      containers: [{name: controller}]\n'
+            )
+            docs = render('ghcr.io/team/controller@sha256:'+'a'*64, config, manifest)
         dep=next(d for d in docs if d['kind']=='Deployment')
         self.assertEqual(dep['spec']['replicas'],3)
         self.assertEqual(dep['spec']['strategy']['type'],'Recreate')

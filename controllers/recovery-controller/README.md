@@ -41,7 +41,7 @@ docker build -t ghcr.io/YOUR_ORG/recovery-controller:VERSION .
 
 ## Argo CD 없이 수동 배포
 
-namespace platform·platform-worker=true 노드와 private 이미지용 ghcr-pull Secret이 필요합니다. 기본 Git manifest는 replicas=0입니다. 실제 이미지 빌드·게시 후 digest로 고정하고 렌더링하세요. 렌더러는 클러스터를 변경하지 않습니다.
+namespace platform·platform-worker=true 노드와 private 이미지용 ghcr-pull Secret이 필요합니다. Gitops의 `onprem/controllers/recovery-controller/resources.yaml`은 기본 replicas=0입니다. 실제 이미지 빌드·게시 후 digest로 고정하고 렌더링하세요. 렌더러에 `--manifest`로 Gitops의 resources.yaml 경로를 전달합니다. 인접한 `gpu-gitops` 체크아웃이 있으면 그 경로를 기본값으로 사용합니다.
 
 ```bash
 # gpu-k8s 루트

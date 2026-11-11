@@ -3,19 +3,21 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
 import yaml
 from controller import validate_config
 
-ROOT=Path(__file__).resolve().parents[2]
+DEFAULT_MANIFEST = Path(__file__).resolve().parents[3] / 'gpu-gitops/onprem/controllers/recovery-controller/resources.yaml'
 
-def render(image, config):
+def render(image, config, manifest=None):
     if not re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}', image) or image.endswith('0'*64):
         raise ValueError('Use an actual GHCR image pinned by sha256 digest')
     validate_config(config)
-    docs=list(yaml.safe_load_all((ROOT/'onprem/apps/recovery-controller/resources.yaml').read_text()))
+    manifest = Path(manifest or os.environ.get('RECOVERY_DEPLOYMENT_MANIFEST', DEFAULT_MANIFEST))
+    docs = list(yaml.safe_load_all(manifest.read_text()))
     for document in docs:
         if document['metadata'].get('name') == 'recovery-controller-relocation':
             document['metadata']['namespace'] = config.get('job_namespace', 'training')
@@ -35,8 +37,9 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--image',required=True)
     p.add_argument('--config',type=Path,default=Path(__file__).with_name('config.example.json'))
+    p.add_argument('--manifest', type=Path, help='Path to the Gitops recovery-controller resources.yaml')
     args=p.parse_args()
     try:
-        print(yaml.safe_dump_all(render(args.image,json.loads(args.config.read_text())),sort_keys=False),end='')
+        print(yaml.safe_dump_all(render(args.image,json.loads(args.config.read_text()), args.manifest),sort_keys=False),end='')
     except (ValueError,OSError) as e:
         p.exit(1,str(e)+'\n')

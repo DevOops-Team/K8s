@@ -12,7 +12,7 @@
 #      (학습 잡이 달면 예비 노드를 차지함. 정본 I4. 키 없는 operator: Exists도 모든 taint를 견디므로 같이 막음)
 # 1~4는 클러스터 관리자(kind·Kubespray kubeadm 관리자 kubeconfig)는 통과: 시나리오·run-local.sh·손 복구용
 # ServiceAccount 이름이 바뀌면 여기와 controllers.yaml을 같이 고칠 것
-#   복구 컨트롤러: platform/recovery-controller (onprem/apps/recovery-controller)
+#   복구 컨트롤러: platform/recovery-controller (Gitops onprem/controllers/recovery-controller)
 #   재배치 실행기: platform/relocator
 #   JobSet 컨트롤러: jobset-system/jobset-controller-manager (자식 Job을 만듦)
 apiVersion: admissionregistration.k8s.io/v1
