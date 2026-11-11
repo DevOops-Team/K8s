@@ -1,4 +1,0 @@
-resources:
-  - crd-relocationrequest.yaml
-  - controllers.yaml
-  - admission-policy.yaml

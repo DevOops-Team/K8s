@@ -1,6 +1,0 @@
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata: {name: kueue-controller-manager, namespace: kueue-system}
-spec:
-  maxUnavailable: 1              # 노드 drain 때도 둘은 남김
-  selector: {matchLabels: {app.kubernetes.io/name: kueue, control-plane: controller-manager}}

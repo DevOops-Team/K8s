@@ -1,6 +1,0 @@
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata: {name: jobset-controller-manager, namespace: jobset-system}
-spec:
-  maxUnavailable: 1
-  selector: {matchLabels: {app.kubernetes.io/name: jobset, control-plane: controller-manager}}
