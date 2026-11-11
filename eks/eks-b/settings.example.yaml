@@ -1,8 +1,0 @@
-cluster_alias: eks-b
-gpu_node_labels:
-  node-role.devoops.site/gpu: 'true'
-gpu_node_taints: []
-gpu_quota: 4
-cpu_quota: 32
-memory_quota: 128Gi
-training_service_account_annotations: {}
