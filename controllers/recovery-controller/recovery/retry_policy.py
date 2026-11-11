@@ -95,6 +95,8 @@ class Runner:
                        stage=record.get('stopped_stage', record.get('stage', record.get('waiting_phase', record.get('budget_stage', record['state'])))),
                        retry_count=int(record['retry_count']) if record.get('retry_count') is not None else None,
                        exit_code=int(record['exit_code']) if record.get('exit_code') is not None else None, failure_class=record.get('failure_class'))
+        if record['state'] == 'HOLD':
+            payload['type'] = 'recovery.held'
         try:
             self.producer.produce(self.topic, key=payload['job_id'], value=json.dumps(payload),
                                   on_delivery=lambda err, msg: errors.append(err))

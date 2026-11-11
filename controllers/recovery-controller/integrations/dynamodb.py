@@ -43,10 +43,17 @@ class Store:
         values['updated_at'] = int(time.time())
         names = {'#'+str(i):k for i,k in enumerate(values)}
         vals = {':'+str(i):v for i,v in enumerate(values.values())}
-        return self.table.update_item(Key={'pk':'event#'+rid},
+        entering_hold = values.get('state') == 'HOLD'
+        previous = self.table.update_item(Key={'pk':'event#'+rid},
             UpdateExpression='SET '+', '.join('#'+str(i)+' = :'+str(i) for i in range(len(values))),
             ExpressionAttributeNames=names, ExpressionAttributeValues=vals,
-            ReturnValues='ALL_NEW')['Attributes']
+            ReturnValues='ALL_OLD' if entering_hold else 'ALL_NEW')['Attributes']
+        if entering_hold:
+            if previous.get('state') != 'HOLD':
+                from runtime.metrics import record_hold
+                record_hold(previous['event'].get('job_id'), values.get('reason'))
+            return {**previous, **values}
+        return previous
 
     def context(self, event, recovering=False):
         item = self.table.get_item(Key={'pk':'job#'+event['job_id']}, ConsistentRead=True).get('Item')
@@ -368,3 +375,6 @@ class Store:
         except Exception as exc:
             if getattr(exc, 'response', {}).get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
                 raise
+        else:
+            from runtime.metrics import record_hold
+            record_hold(None, 'watchdog_missing_and_no_gpu_fault')

@@ -153,3 +153,12 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 ## 복구 증거 v1
 
 배치·복원·첫 step의 기록/검증 계약과 남은 생산자 인증 연동은 [evidence-contract.md](docs/evidence-contract.md)를 따릅니다. EvidenceWriter의 조건부 기록 함수와 Workflow의 버전·주체·신선도·현재 실행 검사를 구현했습니다. 실제 생산자/인증 어댑터는 별도 연결이 필요하며 producer 문자열만으로 인증했다고 보지 않습니다. 증거 누락은 제한 시간까지 대기하고, 신뢰된 실패 또는 시간 초과는 HOLD합니다.
+
+### HOLD 지표
+
+`8080/metrics`는 `recovery_hold_total{job_id,reason}` 카운터를 노출합니다.
+새 HOLD 기록이 DynamoDB에 저장될 때 증가합니다. Watchdog의 전역 HOLD는
+`job_id=""`로 표시합니다. 기존 HOLD의 재조회와 Kafka 재전송은 카운터를 올리지 않습니다.
+카운터는 Pod별 메모리에 있으며 재시작 시 초기화됩니다. 새 라벨 조합의 첫 샘플이
+이미 1일 수 있으므로 수집 룰에서 첫 샘플도 고려해야 합니다.
+Kafka `recovery.action`의 HOLD 결과에는 `type=recovery.held`를 포함합니다.

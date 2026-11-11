@@ -75,6 +75,15 @@ HEALTH = {"kafka_connected": False, "worker_ok": False, "execution_enabled": Fal
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == '/metrics':
+            from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+            body = generate_latest()
+            self.send_response(200)
+            self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path not in ('/healthz', '/readyz'):
             self.send_error(404)
             return
