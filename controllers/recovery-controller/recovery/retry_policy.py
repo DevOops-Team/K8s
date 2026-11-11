@@ -20,7 +20,7 @@ class Runner:
                                stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])))
 
     def operation(self, record, now, monitoring_hold):
-        from workflow import TERMINAL
+        from recovery.workflow import TERMINAL
         rid = record['event']['event_id']
         finish = record['state'] == 'RECOVERED'
         if finish and record.get('finalized'):
@@ -73,7 +73,7 @@ class Runner:
         return self.store.save(rid, **changes)
 
     def deliver(self, record, now):
-        from workflow import TERMINAL
+        from recovery.workflow import TERMINAL
         if record['state'] not in TERMINAL or record.get('published'):
             return
         if record['state'] == 'RECOVERED' and not record.get('finalized'):

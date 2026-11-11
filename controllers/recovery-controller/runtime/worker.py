@@ -1,29 +1,18 @@
 """Single-replica Kafka inbox + restartable workflow worker."""
 import json
-import os
 import threading
 import time
-from adapters import Store
-from relocation import RelocationClient
-from workflow import Workflow, TERMINAL
-from watchdog import Watchdog
-from retry_policy import Runner
-
-
-def accept_message(consumer, workflow, msg):
-    envelope=json.loads(msg.value())
-    event=envelope.get('payload', envelope)
-    headers = dict(msg.headers() or []) if hasattr(msg, 'headers') else {}
-    if headers.get('rule_version'):
-        event = dict(event, rule_version=headers['rule_version'].decode('utf-8'))
-    workflow.accept(event)
-    consumer.commit(message=msg, asynchronous=False)
+from integrations.dynamodb import Store
+from integrations.kafka import accept_message, create_clients
+from integrations.relocation import RelocationClient
+from recovery.workflow import Workflow
+from runtime.watchdog import Watchdog
+from recovery.retry_policy import Runner
 
 
 def run(config, stop, health):
     import boto3
     from botocore.config import Config
-    from confluent_kafka import Consumer, Producer
     dynamodb = boto3.resource('dynamodb', region_name=config['aws_region'],
                                 config=Config(
                                     retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))
@@ -38,12 +27,7 @@ def run(config, stop, health):
                      watchdog_config.get('timeout_seconds', 300),
                      watchdog_config.get('poll_seconds', 30)) if watchdog_config.get('enabled') else None
     guard_lock = threading.Lock()
-    security = json.loads(os.environ.get('KAFKA_CLIENT_CONFIG_JSON','{}'))
-    base = dict(security, **{'bootstrap.servers':config['kafka_bootstrap_servers']})
-    consumer = Consumer(dict(base, **{'group.id':config['kafka_group_id'],
-        'enable.auto.commit':False, 'enable.auto.offset.store':False,
-        'auto.offset.reset':'earliest'}))
-    producer = Producer(base)
+    consumer, producer = create_clients(config)
     runner = Runner(store, workflow, producer, config['result_topic'], config.get('retry_policy'))
 
     def worker():

@@ -2,11 +2,11 @@ import copy
 import time
 import unittest
 from decimal import Decimal
-from evidence import EvidenceWriter, assess, DEFAULT_POLICY
-from adapters import Store, RecoveryBlocked
+from recovery.evidence import EvidenceWriter, assess, DEFAULT_POLICY
+from integrations.dynamodb import Store, RecoveryBlocked
 from test_workflow import MemoryStore, Requests, EVENT
-from workflow import Workflow
-from retry_policy import Runner
+from recovery.workflow import Workflow
+from recovery.retry_policy import Runner
 from test_retry_policy import Producer
 
 NOW = 2000000000

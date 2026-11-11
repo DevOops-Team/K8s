@@ -2,11 +2,11 @@ import copy
 import json
 import unittest
 from decimal import Decimal
-from adapters import Store
-from controller import plan
-from init_failure import collect, decision
-from workflow import Workflow
-from retry_policy import Runner
+from integrations.dynamodb import Store
+from recovery.policy import plan
+from recovery.init_failure import collect, decision
+from recovery.workflow import Workflow
+from recovery.retry_policy import Runner
 from test_fencing import RecoveryTable, FencingTable
 from test_workflow import MemoryStore, Requests, EVENT
 from test_checkpoint_contract import WarningProducer

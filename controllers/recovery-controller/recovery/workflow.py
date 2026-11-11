@@ -3,10 +3,10 @@ import hashlib
 import json
 import re
 import time
-from evidence import assess, policy_config
-from controller import plan
-from init_failure import decision as init_decision
-from adapters import RecoveryBlocked, RetryLimitReached
+from recovery.evidence import assess, policy_config
+from recovery.policy import plan
+from recovery.init_failure import decision as init_decision
+from integrations.dynamodb import RecoveryBlocked, RetryLimitReached
 
 TERMINAL = {'RECOVERED', 'REJECTED', 'REVIEW', 'HOLD', 'IGNORED', 'STALE', 'OBSERVED'}
 RELOCATION_ACTIONS = {'RETRY_GROUP': 'restartInPlace',

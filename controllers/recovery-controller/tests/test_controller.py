@@ -1,5 +1,5 @@
 import unittest
-from controller import plan
+from recovery.policy import plan
 
 class PolicyTests(unittest.TestCase):
     def event(self, kind):
@@ -25,14 +25,14 @@ class PolicyTests(unittest.TestCase):
 
 class ConfigurationTests(unittest.TestCase):
     def test_execution_cannot_be_enabled(self):
-        from controller import validate_config
+        from main import validate_config
         with self.assertRaises(ValueError):
             validate_config(dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=True))
     def test_manual_render_requires_digest(self):
-        from render import render
+        from tools.render import render
         with self.assertRaises(ValueError): render('ghcr.io/team/controller:latest', {})
     def test_manual_render_uses_three_replicas_without_kafka_credentials(self):
-        from render import render
+        from tools.render import render
         config=dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=False)
         from pathlib import Path
         from tempfile import TemporaryDirectory
@@ -53,7 +53,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(dep['spec']['template']['spec']['automountServiceAccountToken'])
 
     def test_execute_requires_reviewed_A_policy(self):
-        from controller import validate_config
+        from main import validate_config
         config=dict(schema_version=1,mode='execute',event_source='kafka',execution_enabled=True,
                     aws_region='ap-northeast-2',recovery_table='recovery',fencing_table='fencing',
                     kafka_bootstrap_servers='kafka:9093',kafka_group_id='recovery-v1',

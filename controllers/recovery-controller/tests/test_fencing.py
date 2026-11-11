@@ -1,6 +1,6 @@
 import copy
 import unittest
-from adapters import Store, RecoveryBlocked, RetryLimitReached
+from integrations.dynamodb import Store, RecoveryBlocked, RetryLimitReached
 
 EVENT=dict(event_id='e1',job_id='j1',cluster='eks-a',node='n1',generation=1)
 

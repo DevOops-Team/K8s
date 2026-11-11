@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from leadership import Election, LEASE_SECONDS, RENEW_SECONDS
+from runtime.leadership import Election, LEASE_SECONDS, RENEW_SECONDS
 
 
 class FakeLease:

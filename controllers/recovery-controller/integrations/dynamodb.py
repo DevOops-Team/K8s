@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from evidence import whole
+from recovery.evidence import whole
 
 
 class RecoveryBlocked(ValueError):

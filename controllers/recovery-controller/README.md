@@ -1,6 +1,6 @@
 # 학습 복구 컨트롤러
 
-실행 코드와 Dockerfile은 이 디렉터리에 있습니다. 테스트는 `tests/`, 계약 문서는 `docs/`, 설정·이벤트 예시는 `examples/`에 있습니다.
+`main.py`에서 실행을 시작합니다. 복구 판단과 상태 처리는 `recovery/`, 외부 연결은 `integrations/`, 실행 루프와 리더 선출은 `runtime/`, 배포 렌더러는 `tools/`에 있습니다. 테스트는 `tests/`, 계약 문서는 `docs/`, 설정·이벤트 예시는 `examples/`에 있습니다.
 
 Kafka gpu.fault → DynamoDB 영속 inbox → 판단·세대 증가 → 관리 클러스터
 RelocationRequest 생성 → DynamoDB 단계 확인 → 학습 진행 확인 → Kafka 결과 발행 구조입니다.
@@ -33,8 +33,8 @@ examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 �
 ```bash
 cd controllers/recovery-controller
 python3 -m unittest discover -s tests -v
-python3 controller.py --event-file examples/example-event.json
-python3 controller.py --config examples/config.example.json
+python3 main.py --event-file examples/example-event.json
+python3 main.py --config examples/config.example.json
 # 빌드 환경에서 실행. Kubernetes 노드에 Docker Engine 설치는 불필요
 docker build -t ghcr.io/YOUR_ORG/recovery-controller:VERSION .
 ```
@@ -49,12 +49,13 @@ namespace platform·platform-worker=true 노드와 private 이미지용 ghcr-pul
 # gpu-k8s 루트
 python3 -m pip install -r requirements-dev.txt
 mkdir -p .build
-python3 controllers/recovery-controller/render.py \
+cd controllers/recovery-controller
+python3 -m tools.render \
   --image ghcr.io/YOUR_ORG/recovery-controller@sha256:ACTUAL_DIGEST \
-  --config controllers/recovery-controller/examples/config.example.json \
-  > .build/recovery-controller.yaml
+  --config examples/config.example.json \
+  > ../../.build/recovery-controller.yaml
 # 렌더가 성공한 경우에만 적용
-kubectl --context YOUR_CONTEXT apply -f .build/recovery-controller.yaml
+kubectl --context YOUR_CONTEXT apply -f ../../.build/recovery-controller.yaml
 kubectl --context YOUR_CONTEXT -n platform rollout status deployment/recovery-controller
 kubectl --context YOUR_CONTEXT -n platform logs deployment/recovery-controller
 ```

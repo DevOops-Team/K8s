@@ -1,6 +1,6 @@
 import unittest
 from urllib.error import HTTPError
-from relocation import RelocationClient
+from integrations.relocation import RelocationClient
 
 EVENT = dict(event_id='event/123', job_id='3f9a1c2e', generation=1,
              cluster='eks-a', node='bad-node', category='hw')
@@ -41,8 +41,8 @@ class RequestTests(unittest.TestCase):
         self.assertNotIn('devoops/old-execution-stopped', str(saved))
 
     def test_preemptive_request_excludes_only_the_retiring_node(self):
-        from controller import plan
-        from workflow import RELOCATION_ACTIONS
+        from recovery.policy import plan
+        from recovery.workflow import RELOCATION_ACTIONS
         event = dict(EVENT, source='spot', suggested_action='evacuate_preemptive')
         saved = []
         action = RELOCATION_ACTIONS[plan(event)['suggested_action']]

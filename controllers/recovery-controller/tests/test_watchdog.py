@@ -1,6 +1,6 @@
 import copy
 import unittest
-from watchdog import Watchdog, watchdog_active
+from runtime.watchdog import Watchdog, watchdog_active
 
 
 class Store:

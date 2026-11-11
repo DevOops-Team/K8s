@@ -1,7 +1,7 @@
 import copy
 import unittest
 import time
-from workflow import Workflow
+from recovery.workflow import Workflow
 from test_fencing import EVENT as BASE_EVENT
 
 EVENT = dict(BASE_EVENT, fault_type='node_hardware')

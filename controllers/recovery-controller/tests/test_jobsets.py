@@ -1,7 +1,7 @@
 import hashlib
 import json
 import unittest
-from jobsets import render_recovery
+from recovery.jobsets import render_recovery
 
 
 def original():

@@ -1,6 +1,6 @@
 import copy
 import unittest
-from retry_policy import Runner
+from recovery.retry_policy import Runner
 
 class Store:
     def __init__(self):

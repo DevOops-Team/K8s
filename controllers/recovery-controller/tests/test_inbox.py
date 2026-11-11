@@ -1,6 +1,6 @@
 import unittest
-from runtime import accept_message
-from adapters import Store
+from integrations.kafka import accept_message
+from integrations.dynamodb import Store
 
 class InboxTests(unittest.TestCase):
     def test_save_before_commit(self):
