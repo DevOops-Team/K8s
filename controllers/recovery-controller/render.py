@@ -36,7 +36,7 @@ def render(image, config, manifest=None):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--image',required=True)
-    p.add_argument('--config',type=Path,default=Path(__file__).with_name('config.example.json'))
+    p.add_argument('--config',type=Path,default=Path(__file__).with_name('examples') / 'config.example.json')
     p.add_argument('--manifest', type=Path, help='Path to the Gitops recovery-controller resources.yaml')
     args=p.parse_args()
     try:

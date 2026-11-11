@@ -1,8 +1,10 @@
 # 학습 복구 컨트롤러
 
+실행 코드와 Dockerfile은 이 디렉터리에 있습니다. 테스트는 `tests/`, 계약 문서는 `docs/`, 설정·이벤트 예시는 `examples/`에 있습니다.
+
 Kafka gpu.fault → DynamoDB 영속 inbox → 판단·세대 증가 → 관리 클러스터
 RelocationRequest 생성 → DynamoDB 단계 확인 → 학습 진행 확인 → Kafka 결과 발행 구조입니다.
-최신 역할·필드·액션 대응과 미연결 범위는 [contracts.md](contracts.md)를 기준으로 합니다.
+최신 역할·필드·액션 대응과 미연결 범위는 [contracts.md](docs/contracts.md)를 기준으로 합니다.
 
 ## 배포와 인증
 
@@ -22,7 +24,7 @@ AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 �
 recovery_table의 실제 이름과 초기 job 배치 메타데이터는 별도 준비합니다.
 DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateItem/Scan입니다.
 Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
-config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.
+examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.
 모니터링 서비스 VIP 172.30.0.35는 예약 상태이므로 watchdog은 기본 비활성화입니다. Alertmanager의 실제 URL·포트와 접근 경로를 확인한 뒤 URL을 입력하고 활성화합니다.
 이 컨트롤러는 EC2/S3/SQS API나 EKS API를 직접 호출하지 않습니다.
 
@@ -30,9 +32,9 @@ config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 
 
 ```bash
 cd controllers/recovery-controller
-python3 -m unittest discover -v
-python3 controller.py --event-file example-event.json
-python3 controller.py --config config.example.json
+python3 -m unittest discover -s tests -v
+python3 controller.py --event-file examples/example-event.json
+python3 controller.py --config examples/config.example.json
 # 빌드 환경에서 실행. Kubernetes 노드에 Docker Engine 설치는 불필요
 docker build -t ghcr.io/YOUR_ORG/recovery-controller:VERSION .
 ```
@@ -49,7 +51,7 @@ python3 -m pip install -r requirements-dev.txt
 mkdir -p .build
 python3 controllers/recovery-controller/render.py \
   --image ghcr.io/YOUR_ORG/recovery-controller@sha256:ACTUAL_DIGEST \
-  --config controllers/recovery-controller/config.example.json \
+  --config controllers/recovery-controller/examples/config.example.json \
   > .build/recovery-controller.yaml
 # 렌더가 성공한 경우에만 적용
 kubectl --context YOUR_CONTEXT apply -f .build/recovery-controller.yaml
@@ -71,7 +73,7 @@ Kafka 모드는 실제 값으로 채운 로컬 JSON을 --config로 지정하세�
 마지막 저장 후 세대 증가(PLANNED_MIGRATE)는 향후 확장으로 보류합니다. 이미 HOLD된 사건은 자동 재개하지 않습니다.
 moveToOtherCluster 자동 승격은 미구현입니다. Watchdog HOLD는 아래와 같이 구현했습니다.
 
-전체 제한과 기존 HTTP 복구에서의 전환 절차는 contracts.md를 참고하세요.
+전체 제한과 기존 HTTP 복구에서의 전환 절차는 docs/contracts.md를 참고하세요.
 
 ## Watchdog 단절 시 HOLD — ADR-18 후속 보완
 
@@ -111,7 +113,7 @@ approved_gen=1 / approved_step=1200 상태 그대로 복구 완료가 가능합�
 컨트롤러는 승인본을 새 세대로 임의 변경하지 않습니다.
 
 진행 증거는 recovery_table의 기존 job#ID 레코드에 넣는 progress 객체를 읽습니다.
-progress-record.example.json을 참고하세요. 신뢰된 학습/모니터링 수집 측이 다음을 기록해야 합니다.
+examples/progress-record.example.json을 참고하세요. 신뢰된 학습/모니터링 수집 측이 다음을 기록해야 합니다.
 - recovery_id, generation, cluster, jobset_uid(펜싱 기록 new_jobset_uid와 일치)
 - checkpoint_loaded=true, restored_gen, restored_step(고정된 복원 기준과 일치)
 - completed_step(정수, restored_step보다 큰 실제 완료 스텝)
@@ -144,9 +146,9 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 `init_failure.py`에 종료 코드 2·3·4·5·6·7 판단과 Pod 종료 상태 → 사건 변환 어댑터가 있습니다. 코드 7의 확인된 손상 승인본은 recovery_table에 영속 격리하며, 같은 승인본으로 새 claim/재배치 요청을 만들지 않습니다. `prev_approved`가 있으면 이전 승인본으로 전환하고 없거나 손상이 확인되면 처음부터 학습합니다. 이전 승인본도 코드 7이면 다음 세대는 처음부터 학습합니다. 실제 파일 검증은 ckpt-init이 수행합니다. 선택·포인터 전환은 조건부 갱신하고 retry_count는 초기화하지 않습니다. recovery.action에는 stage·retry_count·exit_code·failure_class를 추가했습니다.
 
-실제 EKS 탐지기에서 어댑터를 호출해 Kafka로 보내는 연결, 신뢰된 현재 JobSet 메타데이터 기록, 소비자의 사건 스키마 적용은 담당 파트와 통합해야 합니다. 상세 입력·판단·제한은 [contracts.md의 ckpt-init 절](contracts.md#ckpt-init-종료-사건과-판단-2026-11-09-로컬-구현)을 따릅니다.
+실제 EKS 탐지기에서 어댑터를 호출해 Kafka로 보내는 연결, 신뢰된 현재 JobSet 메타데이터 기록, 소비자의 사건 스키마 적용은 담당 파트와 통합해야 합니다. 상세 입력·판단·제한은 [contracts.md의 ckpt-init 절](docs/contracts.md#ckpt-init-종료-사건과-판단-2026-11-09-로컬-구현)을 따릅니다.
 
 
 ## 복구 증거 v1
 
-배치·복원·첫 step의 기록/검증 계약과 남은 생산자 인증 연동은 [evidence-contract.md](evidence-contract.md)를 따릅니다. EvidenceWriter의 조건부 기록 함수와 Workflow의 버전·주체·신선도·현재 실행 검사를 구현했습니다. 실제 생산자/인증 어댑터는 별도 연결이 필요하며 producer 문자열만으로 인증했다고 보지 않습니다. 증거 누락은 제한 시간까지 대기하고, 신뢰된 실패 또는 시간 초과는 HOLD합니다.
+배치·복원·첫 step의 기록/검증 계약과 남은 생산자 인증 연동은 [evidence-contract.md](docs/evidence-contract.md)를 따릅니다. EvidenceWriter의 조건부 기록 함수와 Workflow의 버전·주체·신선도·현재 실행 검사를 구현했습니다. 실제 생산자/인증 어댑터는 별도 연결이 필요하며 producer 문자열만으로 인증했다고 보지 않습니다. 증거 누락은 제한 시간까지 대기하고, 신뢰된 실패 또는 시간 초과는 HOLD합니다.

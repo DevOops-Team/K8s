@@ -124,7 +124,7 @@ approved_gen=1 / approved_step=1200 상태 그대로 복구 완료가 가능합�
 컨트롤러는 승인본을 새 세대로 임의 변경하지 않습니다.
 
 진행 증거는 recovery_table의 기존 job#ID 레코드에 넣는 progress 객체를 읽습니다.
-progress-record.example.json을 참고하세요. 신뢰된 학습/모니터링 수집 측이 다음을 기록해야 합니다.
+../examples/progress-record.example.json을 참고하세요. 신뢰된 학습/모니터링 수집 측이 다음을 기록해야 합니다.
 - recovery_id, generation, cluster, jobset_uid(펜싱 기록 new_jobset_uid와 일치)
 - checkpoint_loaded=true, restored_gen, restored_step(고정된 복원 기준과 일치)
 - completed_step(정수, restored_step보다 큰 실제 완료 스텝)
