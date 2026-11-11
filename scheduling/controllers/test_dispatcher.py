@@ -134,6 +134,44 @@ class Reconcile(unittest.TestCase):
         self.assertEqual(self.nominated, {"job-b-g0002": "worker2"})
 
 
+class FencedAck(unittest.TestCase):
+    """GPU-125: 끝까지 돈 루프만, fenced로 본 클러스터에만 그 루프 시작 시각을 남긴다"""
+
+    def test_marks_only_fenced_clusters_with_loop_start(self):
+        co = mock.Mock()
+        with mock.patch.object(D.kube, "kueue", return_value=co):
+            D.ack_fenced(None, [cl("eks-a", 0, fenced=True), cl("eks-b", 4)], "2026-11-11T05:00:00Z")
+        co.patch_cluster_custom_object.assert_called_once_with(
+            K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", "eks-a",
+            {"metadata": {"annotations": {K.ANN_FENCED_ACK: "2026-11-11T05:00:00Z"}}})
+
+    def test_patch_failure_does_not_raise(self):
+        co = mock.Mock()
+        co.patch_cluster_custom_object.side_effect = client.ApiException(status=403)
+        with mock.patch.object(D.kube, "kueue", return_value=co):
+            D.ack_fenced(None, [cl("eks-a", 0, fenced=True), cl("eks-b", 0, fenced=True)], "t")
+        self.assertEqual(co.patch_cluster_custom_object.call_count, 2)
+
+    def test_reconcile_returns_what_it_saw_even_when_all_disconnected(self):
+        cs = [cl("eks-a", 0, fenced=True, active=False)]
+        with mock.patch.object(D, "cluster_state", return_value=cs):
+            self.assertIs(D.reconcile(None, None), cs)
+
+    def test_failed_loop_leaves_no_ack(self):
+        class Stop(Exception):
+            pass
+        elector = mock.Mock()
+        elector.is_leader.return_value = True
+        with mock.patch.object(D.kube, "manager_client"), mock.patch.object(D.kube, "Workers"), \
+             mock.patch.object(D.leader, "Elector", return_value=elector), \
+             mock.patch.object(D, "reconcile", side_effect=RuntimeError("boom")), \
+             mock.patch.object(D, "ack_fenced") as ack, \
+             mock.patch.object(D.time, "sleep", side_effect=Stop):
+            with self.assertRaises(Stop):
+                D.main()
+        ack.assert_not_called()
+
+
 def rr(action="moveToSpare", phase="Executing", **st):
     status = {"phase": phase, "sourceCluster": "worker1", "jobId": "a", "toGeneration": 2,
               "isolatedAt": D.kube.now_rfc3339(), **st}

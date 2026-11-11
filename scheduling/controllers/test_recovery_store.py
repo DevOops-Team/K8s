@@ -1,5 +1,6 @@
 """python -m unittest -v test_recovery_store.py — kind용 ConfigMap 저장소의 조건부 갱신 (쿠버네티스 없이)"""
 import copy
+import json
 import unittest
 from unittest import mock
 
@@ -70,6 +71,14 @@ class ConfigMapStoreTest(unittest.TestCase):
         self.core.read_namespaced_config_map = stale
         with self.assertRaises(recovery_store.Conflict):
             self.store.set_phase("a1", "r1", 2, ("GENERATION_ADVANCED",), "OLD_RUN_STOPPED")
+
+    def test_stop_evidence_round_trip_and_conflict(self):
+        evidence = json.dumps({"generation": 1, "kind": "ec2", "checks": [{"cluster": "eks-a"}]})
+        extra = {"old_run_stop_evidence": evidence}
+        self.assertFalse(self.store.set_phase("a1", "other", 2, ("GENERATION_ADVANCED",), "OLD_RUN_STOPPED", extra))
+        self.assertNotIn("old_run_stop_evidence", self.store.get_fencing("a1"))
+        self.assertTrue(self.store.set_phase("a1", "r1", 2, ("GENERATION_ADVANCED",), "OLD_RUN_STOPPED", extra))
+        self.assertEqual(self.store.get_fencing("a1")["old_run_stop_evidence"], evidence)
 
 
 if __name__ == "__main__":

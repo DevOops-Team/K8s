@@ -31,8 +31,11 @@ action:
     워커 API에 접속이 안 되면 EC2 인스턴스 상태를 종료 증거로 쓴다 (ec2_evidence.py, 기본 off)
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
+import json
 import os
+import socket
 import time
+from datetime import datetime
 
 from kubernetes import client
 
@@ -44,9 +47,9 @@ import recovery_render as R
 import recovery_store
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
-STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "60"))     # 옛 잡이 이 시간 안에 안 내려가면 WaitingForStop으로 알림
+STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "120"))    # 옛 잡이 이 시간 안에 안 내려가면 WaitingForStop으로 알림
 # 복구 컨트롤러는 옛 실행 종료를 15분 기다린 뒤 HOLD한다 (장애 복구 규약 2절). 그 뒤에 실행기가 혼자 재제출하지 않게
-# 요청 생성부터 이 시간이 지나면 자동 확인으로는 진행하지 않고 Held로 멈춘다. 확인 어노테이션(수동 재개)만 받는다
+# 펜싱 종료 대기 기준(없으면 RR 생성)부터 기한이 지나면 Held. 확인 어노테이션(수동 재개)만 받는다
 STOP_HOLD_SECONDS = int(os.getenv("STOP_HOLD_SECONDS", "900"))
 # 재제출 잡이 이 시간 안에 입장 못 하면 AdmitDelayed로 알리고 계속 기다린다 (JobSet은 그대로 둠).
 # 복구 성공·실패 판단은 복구 컨트롤러 몫 (복원·학습 진행 확인 30분 뒤 HOLD)
@@ -253,16 +256,20 @@ class Unreachable(str):
 def old_gone_on_worker(x: Ctx, ns, name):
     """옛 잡의 복사본이 있을 수 있는 모든 워커에서 JobSet·Workload·Pod가 전부 없어졌는지. (멈춤확인, 이유)
     볼 곳 = 입장했던 워커(sourceCluster) + 지명만 됐던 워커(seenClusters). 하나라도 확인 못 하면 멈췄다고 보지 않는다"""
+    x.stop_evidence = []  # 이번 조회에서 확인한 워커별 근거
     places = sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c})
     if not places:
         return True, "워커에 보내지기 전이었음"
     whys = []
     for src in places:
         gone, why = gone_on(x, src, ns, name)
+        kind = "automatic"
         if not gone and isinstance(why, Unreachable):   # 닿지 않는 워커는 그 워커의 EC2 증거로만 대신한다
             gone, why = ec2_stop_evidence(x, why, src)
+            kind = "ec2"
         if not gone:
             return False, why
+        x.stop_evidence.append({"cluster": src, "kind": kind, "detail": str(why)})
         whys.append(why)
     return True, "; ".join(whys)
 
@@ -298,6 +305,26 @@ def gone_on(x: Ctx, src, ns, name):
         return False, Unreachable(f"{src} 접속 안 됨 ({type(e).__name__})")
 
 
+def stop_held(x: Ctx):
+    """펜싱 deadline 우선, 없으면 시작 시각 + 15분. epoch seconds/RFC3339 지원."""
+    rec = x.store.get_fencing(x.job_id()) or {}
+
+    def age(value):
+        try:
+            return time.time() - float(value)
+        except (TypeError, ValueError):
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("종료 대기 시각에 시간대가 없음")
+            return time.time() - parsed.timestamp()
+
+    if rec.get("stop_wait_deadline") not in (None, ""):
+        return age(rec["stop_wait_deadline"]) >= 0
+    if rec.get("stop_wait_started_at") not in (None, ""):
+        return age(rec["stop_wait_started_at"]) >= STOP_HOLD_SECONDS
+    return kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
+
+
 def stop_old(x: Ctx):
     ns, name = x.job()
     note_copies(x, kube.workload_for_jobset(x.mgr, ns, name))   # 지우기 전에: 접수 뒤 디스패처가 지명했을 수 있음
@@ -313,17 +340,29 @@ def stop_old(x: Ctx):
     mgr_gone = left is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
     confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
-    held = kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
+    held = stop_held(x)
     if confirmed or (mgr_gone and worker_gone and not held):
-        how = f"옛 Workload 삭제 확인 ({why})" if (mgr_gone and worker_gone) else f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인"
-        advance(x, ("GENERATION_ADVANCED", "OLD_RUN_STOPPED"), "OLD_RUN_STOPPED")
+        how = f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인" if confirmed else f"옛 Workload 삭제 확인 ({why})"
+        stopped_at = kube.now_rfc3339()
+        checks = [] if confirmed else getattr(x, "stop_evidence", [])
+        evidence = {
+            "generation": R.parse_name(name)[1], "namespace": ns, "jobset_name": name,
+            "clusters": sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c}),
+            "kind": "manual" if confirmed else ("ec2" if any(c["kind"] == "ec2" for c in checks) else "automatic"),
+            "checks": checks, "confirmed_at": stopped_at,
+            "confirmed_by": "unknown (RR annotation)" if confirmed else "relocator",
+            "recorded_by": os.getenv("POD_NAME") or f"{socket.gethostname()}-{os.getpid()}",
+            "detail": how,
+        }
+        advance(x, ("GENERATION_ADVANCED", "OLD_RUN_STOPPED"), "OLD_RUN_STOPPED",
+                {"old_run_stop_evidence": json.dumps(evidence, ensure_ascii=False, sort_keys=True)})
         log.info("%s: 옛 실행 멈춤 (%s) -> OLD_RUN_STOPPED", x.name, how)
-        x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=how)
+        x.save(phase="Executing", stoppedAt=stopped_at, message=how)
         return
     if held:
         # 복구 컨트롤러가 이미 HOLD했을 시간. 뒤늦게 멈춘 게 보여도 혼자 재제출하지 않는다
         if x.st.get("phase") != "Held":
-            msg = (f"요청 후 {STOP_HOLD_SECONDS}s 안에 옛 실행 종료를 확인 못 함 ({why}) -> 멈춤 (복구 컨트롤러 HOLD 시간). "
+            msg = (f"종료 대기 기한 안에 옛 실행 종료를 확인 못 함 ({why}) -> 멈춤 (복구 컨트롤러 HOLD 시간). "
                    f"재개하려면 옛 실행이 멈춘 걸 확인하고 이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
             log.warning("%s: %s", x.name, msg)
             x.save(phase="Held", message=msg)

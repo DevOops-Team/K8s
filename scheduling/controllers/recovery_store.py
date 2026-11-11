@@ -8,7 +8,7 @@ RECOVERY_STORE=configmap kind. 관리 클러스터 전용 네임스페이스 sch
                          e2e 하네스(harness/jobs.py·recovery.py)가 백엔드·복구 컨트롤러 몫을 대신 쓴다.
 
 재배치 실행기가 쓰는 필드는 recovery_phase(OLD_RUN_STOPPED, NEW_RUN_SUBMITTED) · new_jobset_name · new_jobset_uid ·
-recovery_updated_at 뿐이고, 전부 조건부 갱신이다:
+old_run_stop_evidence(JSON 문자열) · recovery_updated_at 이고, 전부 조건부 갱신이다:
     recovery_id = 이번 요청 AND recovery_to_gen = 새 세대 AND recovery_phase IN (넘어올 수 있는 단계)
 """
 import json

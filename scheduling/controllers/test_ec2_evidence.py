@@ -147,8 +147,9 @@ class StopPathTests(unittest.TestCase):
     def test_no_terminate_before_wait(self):
         e = ev({"i-1": "running"})
         x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        with mock.patch.object(relocator.kube, "since", return_value=0):
-            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
+        for seconds in (0, 110, 120):
+            with mock.patch.object(relocator.kube, "since", return_value=seconds):
+                relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
         self.assertEqual(e.ec2.terminated, [])
 
     def gone(self, results, ec2_ok, **st):

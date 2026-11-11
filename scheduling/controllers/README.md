@@ -76,6 +76,24 @@ kind는 위처럼 `scheduling-controllers:dev`를 그대로 쓴다.
 - **디스패처가 읽는 어노테이션**(`devoops/target-cluster`·`exclude-clusters`·`manual-dispatch`)은 재배치 실행기와
   클러스터 관리자만 붙이거나 바꿀 수 있다 (`deploy/admission-policy.yaml`의 `scheduling-dispatch-annotations`).
 
+## EKS OFF 때 fenced 확인 (11/11, GPU-125)
+
+디스패처는 루프를 시작할 때 `devoops/fenced` 라벨을 한 번 읽는다. 라벨을 붙이기 직전에 시작된 루프 하나는
+옛 정보로 그 클러스터에 지명할 수 있다. 그래서 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에
+`devoops/fenced-ack=<그 루프 시작 시각>`(RFC3339 UTC, 초 버림)을 남긴다. 루프가 중간에 실패하면 안 남긴다.
+
+```
+T=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+kubectl label multikueuecluster eks-a devoops/fenced=true
+# fenced-ack가 T보다 뒤가 될 때까지 (보통 5~10초)
+kubectl get multikueuecluster eks-a -o jsonpath='{.metadata.annotations.devoops/fenced-ack}'
+# 그다음 OFF 전 확인(clusterName·nominatedClusterNames·reserved-cluster·RelocationRequest)을 다시 돌린다
+```
+
+- 비교는 `ack > T`(같으면 안 됨). 둘 다 초를 버리므로 같은 초 안에서 라벨보다 먼저 시작한 루프는 통과하지 못한다.
+- 라벨을 떼도 ack는 지우지 않는다. 다음 OFF에서는 새 T와 비교하니 옛 ack는 통과하지 못한다.
+- 리더가 바뀌는 순간 옛 리더가 돌던 루프는 이 ack로 덮이지 않는다. 그래서 ack 뒤에도 OFF 전 확인을 한 번 더 돌린다.
+
 ## 조정 값 (환경 변수)
 
 | 변수 | 기본 | 뜻 |
@@ -86,8 +104,8 @@ kind는 위처럼 `scheduling-controllers:dev`를 그대로 쓴다.
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
 | `RECOVERY_STORE` | configmap | 복구 원본·펜싱 기록 저장소 (`aws`면 `CKPT_BUCKET`·`FENCING_TABLE`·`AWS_REGION`) |
 | `FENCING_WAIT_SECONDS` | 300 | 요청을 받고 세대 +1 기록이 이 시간 안에 안 보이면 Failed |
-| `STOP_WAIT_SECONDS` | 60 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
-| `STOP_HOLD_SECONDS` | 900 | 요청 생성부터 이 시간 안에 옛 실행 종료를 확인 못 하면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 (복구 컨트롤러 HOLD 15분과 맞춤) |
+| `STOP_WAIT_SECONDS` | 120 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
+| `STOP_HOLD_SECONDS` | 900 | 펜싱 `stop_wait_deadline` 우선. 없으면 `stop_wait_started_at`부터 이 시간, 둘 다 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 |
 | `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 기록한 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만, `terminate` = 워커가 `STOP_WAIT_SECONDS` 넘게 안 닿으면 격리 때 기록한 옛 노드 인스턴스만 한 번 강제 종료(ID로 조회 후 태그 확인, 증거는 여전히 클러스터 전체 기준). 필요 IAM: `ec2:DescribeInstances`(+`ec2:TerminateInstances`, Karpenter NodePool 태그 조건) |
 | `EC2_CLUSTERS` / `EC2_NODEPOOLS` | `{}` / training,spare | MultiKueueCluster 이름 → EKS 클러스터 이름(JSON, 없으면 같은 이름) / 찾을 Karpenter NodePool (`karpenter.sh/nodepool` 태그) |
 | `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |
@@ -95,3 +113,11 @@ kind는 위처럼 `scheduling-controllers:dev`를 그대로 쓴다.
 ## 아직 없는 것
 
 노드당 GPU 여러 개일 때의 배치(지금은 노드당 GPU 1장이라 남은 GPU 수만 셈), 재배치 실패 시 되돌리기, 장애복구 파트 HTTP API(`contracts.md`의 fence/restart/status) 어댑터.
+
+### 옛 실행 종료 기록
+
+펜싱 시각은 epoch seconds(숫자/문자열) 또는 시간대가 있는 RFC3339를 읽는다. 잘못된 시각은 오류로 보류하며 RR 시각으로 대체하지 않는다.
+`OLD_RUN_STOPPED` 조건부 갱신에 `old_run_stop_evidence` JSON 문자열을 함께 저장한다(AWS/ConfigMap 동일 형식).
+필드는 `generation`, `namespace`, `jobset_name`, `clusters`, `kind`(`automatic`/`ec2`/`manual`), `checks`(워커별 `cluster`·`kind`·`detail`), `confirmed_at`, `confirmed_by`, `recorded_by`, `detail`이다.
+EC2와 API 확인이 섞이면 전체 `kind`는 `ec2`, 세부 경로는 `checks`로 구분한다. 워커에 보내기 전이면 `clusters`·`checks`는 빈 배열이다.
+수동 확인은 기존 `devoops/old-execution-stopped=true`를 따른다. 어노테이션만으로 작성자를 알 수 없어 `confirmed_by`는 `unknown (RR annotation)`으로 기록한다. 자동 확인은 `relocator`, `recorded_by`는 `POD_NAME` 또는 호스트명·PID이며 `confirmed_at`은 relocator가 확인한 시각이다.
