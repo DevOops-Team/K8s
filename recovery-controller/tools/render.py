@@ -10,7 +10,7 @@ import sys
 import yaml
 from main import validate_config
 
-DEFAULT_MANIFEST = Path(__file__).resolve().parents[4] / 'gpu-gitops/onprem/controllers/recovery-controller/resources.yaml'
+DEFAULT_MANIFEST = Path(__file__).resolve().parents[3] / 'gpu-gitops/onprem/controllers/recovery-controller/resources.yaml'
 
 def render(image, config, manifest=None):
     if not re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}', image) or image.endswith('0'*64):
