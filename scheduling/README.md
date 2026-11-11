@@ -50,15 +50,14 @@ python -m unittest discover -s scheduling/relocator -p 'test_*.py'
 
 ### CI / deployment handoff
 
-The existing `.github/workflows/scheduling-controllers-image.yml` still references
-`scheduling/controllers/`. The CI owner must update path filters, test paths and
-build each Dockerfile above with context `scheduling/`. Dependencies are now in
-`scheduling/common/requirements.txt`.
-The Gitops owner must configure separate images and update any command overrides
-from `python dispatcher.py` / `python relocator.py` to the default commands above.
-CRD, RBAC and environment variable contracts remain unchanged. CRDs must already
-be installed before running `run-local.sh`. CI workflows and operational manifests
-are outside this restructuring and have not been modified.
+CI는 저장소 루트 `.github/workflows/ci.yml` 하나다 (GPU-127, 담당 노찬경).
+
+- 이미지: `ghcr.io/devoops-team/dispatcher`, `ghcr.io/devoops-team/relocator` (Dockerfile은 각 폴더, 빌드 컨텍스트는 `scheduling/`)
+- PR · develop push: `common` + 자기 폴더 테스트 → 이미지 빌드 (push 안 함)
+- main push: 자기 폴더나 `scheduling/common/`이 바뀐 이미지만 `main`, `sha-<7자리>`로 push
+  → K8s Variable `DEPLOY_IMAGES`에 든 이미지만 봇이 Gitops `onprem/controllers/<이름>/overlays/onprem` digest 갱신
+- 운영 매니페스트(CRD · RBAC · Deployment)는 Gitops에서 관리한다. Deployment는 Dockerfile 기본 CMD를 쓴다.
+  CRD는 `run-local.sh` 실행 전에 설치돼 있어야 한다.
 
 ## 뺀 것 (11/09)
 
