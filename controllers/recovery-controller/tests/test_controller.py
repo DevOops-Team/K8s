@@ -1,0 +1,66 @@
+import unittest
+from recovery.policy import plan
+
+class PolicyTests(unittest.TestCase):
+    def event(self, kind):
+        return dict(event_id='e1', job_id='j1', cluster='eks-a', fault_type=kind)
+    def test_hardware_never_executes(self):
+        result=plan(self.event('node_hardware'))
+        self.assertEqual(result['suggested_action'], 'QUARANTINE_AND_RETRY')
+        self.assertFalse(result['executed'])
+    def test_preemptive_and_legacy_spot_use_spare_recovery(self):
+        for event in (self.event('spot_interruption'),
+                      dict(self.event('unknown'), suggested_action='evacuate_preemptive')):
+            self.assertEqual(plan(event)['suggested_action'], 'QUARANTINE_AND_RETRY')
+    def test_az_requires_fencing(self):
+        self.assertEqual(plan(self.event('az_failure'))['suggested_action'], 'FENCE_AND_EVACUATE')
+    def test_permanent_error_rejected(self):
+        self.assertEqual(plan(self.event('software_permanent'))['suggested_action'], 'NEEDS_CONFIG_FIX')
+    def test_bad_event_rejected(self):
+        for event in ({}, self.event('unknown') | {'cluster':'onprem'}, self.event('unknown') | {'job_id':3}):
+            with self.assertRaises(ValueError): plan(event)
+    def test_unknown_requires_review(self):
+        self.assertEqual(plan(self.event('unknown'))['suggested_action'], 'HOLD')
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_execution_cannot_be_enabled(self):
+        from main import validate_config
+        with self.assertRaises(ValueError):
+            validate_config(dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=True))
+    def test_manual_render_requires_digest(self):
+        from tools.render import render
+        with self.assertRaises(ValueError): render('ghcr.io/team/controller:latest', {})
+    def test_manual_render_uses_three_replicas_without_kafka_credentials(self):
+        from tools.render import render
+        config=dict(schema_version=1, mode='observe', event_source='disabled', execution_enabled=False)
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        # The real deployment template and RBAC are validated in Gitops.
+        with TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'resources.yaml'
+            manifest.write_text(
+                'kind: ConfigMap\nmetadata: {name: test-config}\ndata: {}\n---\n'
+                'kind: Deployment\nmetadata: {name: test-controller}\n'
+                'spec:\n  strategy: {type: Recreate}\n  template:\n'
+                '    metadata: {}\n    spec:\n      containers: [{name: controller}]\n'
+            )
+            docs = render('ghcr.io/team/controller@sha256:'+'a'*64, config, manifest)
+        dep=next(d for d in docs if d['kind']=='Deployment')
+        self.assertEqual(dep['spec']['replicas'],3)
+        self.assertEqual(dep['spec']['strategy']['type'],'Recreate')
+        self.assertFalse(dep['spec']['template']['spec']['automountServiceAccountToken'])
+
+    def test_execute_requires_reviewed_A_policy(self):
+        from main import validate_config
+        config=dict(schema_version=1,mode='execute',event_source='kafka',execution_enabled=True,
+                    aws_region='ap-northeast-2',recovery_table='recovery',fencing_table='fencing',
+                    kafka_bootstrap_servers='kafka:9093',kafka_group_id='recovery-v1',
+                    fault_topic='gpu.fault',result_topic='recovery.action',executor_url='https://executor',
+                    redispatch_policy='controller-only',scheduler_policy_confirmed=False)
+        with self.assertRaises(ValueError):validate_config(config)
+        config['scheduler_policy_confirmed']=True
+        self.assertEqual(validate_config(config)['redispatch_policy'],'controller-only')
+        config['fencing_table']='recovery'
+        with self.assertRaises(ValueError):validate_config(config)
