@@ -16,7 +16,7 @@ Kafka 모드에서는 Lease 리더만 소비·복구 작업을 실행합니다.
 실행은 mode=execute, execution_enabled=true, redispatch_policy=controller-only,
 scheduler_policy_confirmed=true를 요구합니다. job_namespace는 기본 training입니다.
 해당 namespace에 scheduling RelocationRequest CRD와 relocator를 먼저 설치해야 합니다.
-요청 생성은 create/get 권한만 사용합니다. Node·NodeClaim 변경 권한은 relocator 담당입니다.
+요청 생성은 create/get 권한만 사용합니다. Node 변경 권한은 relocator 담당입니다.
 
 AWS 인증은 boto3 기본 인증 체인을 사용합니다. Roles Anywhere helper, 인증서/키,
 AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 필요합니다.

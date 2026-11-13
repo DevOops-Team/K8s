@@ -55,6 +55,21 @@ def _pod_specs(js):
         yield tmpl
 
 
+def _master_addresses(values, old_names, name):
+    """Rewrite only master-address values, preserving argv and shell formatting."""
+    option = re.compile(r"(?<![\w-])(--master-addr(?:=|\s+))([^\s;]+)")
+    out = []
+    previous = None
+    for value in values:
+        if previous == "--master-addr":
+            updated = old_names.sub(name, value)
+        else:
+            updated = option.sub(lambda m: m[1] + old_names.sub(name, m[2]), value)
+        out.append(updated)
+        previous = value
+    return out
+
+
 def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude) -> dict:
     """원본 jobset.json -> gen 세대 재제출본. orig는 바꾸지 않는다"""
     new = copy.deepcopy(orig)
@@ -95,9 +110,13 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude)
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:
                     e["value"] = str(gen)
-            for field in ("command", "args"):
-                if ct.get(field):
-                    ct[field] = [old_names.sub(name, a) if "--master-addr" in a else a for a in ct[field]]
+            command = ct.get("command") or []
+            args = ct.get("args") or []
+            values = _master_addresses(command + args, old_names, name)
+            if command:
+                ct["command"] = values[:len(command)]
+            if args:
+                ct["args"] = values[len(command):]
     return new
 
 

@@ -4,7 +4,7 @@
 
 복구 컨트롤러는 Kafka 판단·세대 증가·RelocationRequest 생성·실제 학습 재개 확인을 담당합니다.
 relocator는 노드 격리·옛 실행 종료 확인·JobSet 작성과 재제출을 담당합니다.
-이 컨트롤러는 관리 Kubernetes API만 호출하며 EKS Node/NodeClaim/JobSet을 변경하지 않습니다.
+이 컨트롤러는 관리 Kubernetes API만 호출하며 EKS Node/JobSet을 변경하지 않습니다.
 
 관리 클러스터의 scheduling.devoops.site/v1alpha1, RelocationRequest를
 job_namespace(기본 training)에 생성합니다. 이 namespace는 실제 JobSet과 같아야 합니다.

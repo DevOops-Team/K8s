@@ -14,7 +14,7 @@
 
 공식 cert-manager 차트 v1.21.3은 cainjector livenessProbe를 렌더링하지 않습니다. 차트 cainjector.enabled=false로 중복 배포를 막고, 동일 버전 차트에서 추출한 Deployment/ServiceAccount/Service/RBAC를 onprem/platform/cert-manager/cainjector에서 관리합니다. 기존 2개 replica·워커 배치·권한을 유지합니다. cert-manager 버전 변경 시 cainjector 이미지·매니페스트도 함께 갱신해야 합니다. CA 주입 기능은 제거하지 않았습니다.
 
-Kubespray 설치 Calico·CoreDNS와 Kubernetes 시스템 컴포넌트는 upstream 프로브를 사용합니다. EKS Kueue/JobSet/Karpenter는 해당 설치 담당의 공식 설정 영역이며 이 저장소에 임의 엔드포인트를 생성하지 않습니다. Argo CD bootstrap은 아직 적용 전이며 공식 HA 매니페스트의 기본 프로브를 유지합니다. 위 표는 이 작업에서 직접 관리·추가한 서비스 범위입니다.
+Kubespray 설치 Calico·CoreDNS와 Kubernetes 시스템 컴포넌트는 upstream 프로브를 사용합니다. EKS Kueue/JobSet은 해당 설치 담당의 공식 설정 영역이며 이 저장소에 임의 엔드포인트를 생성하지 않습니다. Argo CD bootstrap은 아직 적용 전이며 공식 HA 매니페스트의 기본 프로브를 유지합니다. 위 표는 이 작업에서 직접 관리·추가한 서비스 범위입니다.
 
 전체 manifest 검증은 직접 관리하는 모든 Deployment/StatefulSet/DaemonSet의 각 컨테이너에 livenessProbe가 있는지 확인합니다. Helm 차트는 별도로 렌더링해 확인합니다. Job/init 컨테이너는 완료돼야 하는 실행이므로 장기 서비스와 같은 생존 프로브를 추가하지 않습니다.
 

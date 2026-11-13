@@ -96,6 +96,43 @@ class Render(unittest.TestCase):
     def test_original_untouched(self):
         self.assertEqual(self.orig, ORIG)
 
+    def test_master_address_formats_preserve_unrelated_arguments(self):
+        old = "job-3f9a1c2e-g0001"
+        new = "job-3f9a1c2e-g0002"
+        address = f"{old}-workers-0-0.{old}"
+        updated = f"{new}-workers-0-0.{new}"
+        cases = [
+            (["--master-addr", address], ["--master-addr", updated]),
+            ([f"--master-addr={address}"], [f"--master-addr={updated}"]),
+            ([f"exec torchrun --master-addr {address} --log-dir=/{old}"],
+             [f"exec torchrun --master-addr {updated} --log-dir=/{old}"]),
+            ([f'--master-addr="{address}" --log-dir=/{old}'],
+             [f'--master-addr="{updated}" --log-dir=/{old}']),
+            (["--master-addr-extra", address], ["--master-addr-extra", address]),
+        ]
+        for field in ("command", "args"):
+            for values, expected in cases:
+                with self.subTest(field=field, values=values):
+                    orig = copy.deepcopy(ORIG)
+                    trainer = orig["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+                    trainer.clear()
+                    trainer.update(name="trainer", **{field: values})
+                    snapshot = copy.deepcopy(orig)
+                    rendered = R.render(orig, "3f9a1c2e", 2, "r", None, [])
+                    actual = rendered["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+                    self.assertEqual(actual[field], expected)
+                    self.assertEqual(orig, snapshot)
+
+    def test_master_address_split_across_command_and_args(self):
+        orig = copy.deepcopy(ORIG)
+        trainer = orig["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        trainer.update(command=["torchrun", "--master-addr"],
+                       args=["job-3f9a1c2e-g0001-workers-0-0.job-3f9a1c2e-g0001"])
+        rendered = R.render(orig, "3f9a1c2e", 2, "r", None, [])
+        actual = rendered["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(actual["command"], trainer["command"])
+        self.assertEqual(actual["args"], ["job-3f9a1c2e-g0002-workers-0-0.job-3f9a1c2e-g0002"])
+
     def test_target_replaces_old_hints(self):
         orig = copy.deepcopy(ORIG)
         orig["metadata"]["annotations"]["devoops/exclude-clusters"] = "worker3"
