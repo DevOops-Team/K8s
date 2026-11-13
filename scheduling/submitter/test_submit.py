@@ -1,7 +1,11 @@
-"""잡 투입기: 실험 사건 모양, Kafka 전달 확인, 잡 종료 판단 (Kafka·클러스터 없이)"""
+"""잡 투입기: 실험 ID 전달, 실험 사건, Kafka 전달 확인, 잡 종료 판단 (외부 접속 없이)"""
+from contextlib import redirect_stdout
 import io
 import json
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 import submit
 
@@ -61,6 +65,54 @@ class EventTest(unittest.TestCase):
         out = io.StringIO()
         submit.record_experiment(None, out, "experiment.started", "e")
         self.assertIn("Kafka 안 보냄", out.getvalue())
+
+
+class SubmissionTest(unittest.TestCase):
+    def test_cli_propagates_exp_id_to_every_job_and_event(self):
+        for options, expected in ((["--exp-id", "exp-f-on-r1"], "exp-f-on-r1"),
+                                  ([], "exp-test-run")):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
+                scenario, results = Path(tmp) / "scenario.csv", Path(tmp) / "results.csv"
+                scenario.write_text("0, 2, 600, fsdp\n0, 1, 300, fsdp\n", encoding="utf-8")
+                requests = []
+                producer = FakeProducer()
+
+                def respond(request, timeout):
+                    requests.append(request)
+                    response = io.StringIO(json.dumps({"id": f"j{len(requests)}"}))
+                    response.status = 201
+                    return response
+
+                with patch.object(submit.urllib.request, "urlopen", side_effect=respond), \
+                     patch.object(submit, "KafkaEvents", return_value=submit.KafkaEvents(producer=producer)), \
+                     patch.object(submit, "jobset_lister", return_value=lambda: [
+                         js("j1", 1, "Completed"), js("j2", 1, "Completed")]), \
+                     redirect_stdout(io.StringIO()):
+                    code = submit.main([str(scenario), "--prefix", "test-run", "--out", str(results), *options])
+
+                self.assertEqual(code, 0)
+                self.assertEqual(len(requests), 2)
+                for request in requests:
+                    self.assertEqual(request.full_url, f"{submit.BACKEND_URL}/api/jobs")
+                    self.assertEqual(request.get_method(), "POST")
+                    self.assertEqual(json.loads(request.data)["exp_id"], expected)
+                events = [value for _, _, value in producer.sent]
+                self.assertEqual([event["type"] for event in events],
+                                 ["experiment.started", "experiment.ended"])
+                self.assertEqual([event["payload"]["exp_id"] for event in events], [expected, expected])
+
+    def test_kind_preserves_exp_id_in_jobset_and_recovery_source(self):
+        kind = submit.KindSubmitter.__new__(submit.KindSubmitter)
+        kind.client = Mock()
+        kind.co, kind.core = Mock(), Mock()
+        row = {"gpus": 2, "steps": 600, "strategy": "fsdp", "duration": 720}
+        result = kind(1, row, "test-run", "exp-kind-r1")
+        self.assertEqual(result[-1], "201")
+        jobset = kind.co.create_namespaced_custom_object.call_args.args[-1]
+        self.assertEqual(jobset["metadata"]["annotations"]["devoops/exp-id"], "exp-kind-r1")
+        source_data = kind.client.V1ConfigMap.call_args_list[0].kwargs["data"]
+        source = json.loads(source_data["jobset.json"])
+        self.assertEqual(source["metadata"]["annotations"]["devoops/exp-id"], "exp-kind-r1")
 
 
 class DoneTest(unittest.TestCase):
