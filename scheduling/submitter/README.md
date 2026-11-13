@@ -32,8 +32,18 @@ python submit.py scenario.csv --exp-id exp-0001 --policy ours --fault-type xid79
 
 필요 패키지: `confluent-kafka`(Kafka), `kubernetes`(JobSet 조회·`--kind`). `job.yaml`은 시작할 때 /tmp에 설치함.
 
+## 실험과 작업 연결 (GPU-150)
+
+실험 ID는 투입기 `--exp-id`로 지정하며, 생략하면 `exp-<prefix>`를 쓴다. 데이터 수집기가 `experiment.started`를 받아 `experiments` 행을 만든다 (GPU-77 확인).
+
+- 백엔드 모드는 모든 `POST /api/jobs` 요청 본문에 같은 `exp_id`를 넣는다. `experiment.started/ended`에도 이 값을 쓴다.
+- Backend는 `exp_id`를 받아 `job.submitted` payload와 JobSet 주석 `devoops/exp-id`에 전달해야 한다 (노찬경 연계). 수집기는 `job.submitted.payload.exp_id`로 `job_runs.exp_id`를 채운다. Backend가 필드를 받지 않거나 버리면 투입기 수정만으로 실험별 결과를 연결할 수 없다.
+- `--kind` 직접 제출도 JobSet과 복구 원본의 `devoops/exp-id` 주석에 같은 값을 넣는다. 이 경로는 Backend를 거치지 않아 `job.submitted`를 발행하지 않으므로 DB 연결을 검증하는 용도로 쓰지 않는다.
+
+로컬 검증: 저장소 루트에서 `python -B -m unittest discover -s scheduling/submitter -p 'test_*.py'`.
+실제 연계 검증은 Backend 반영 뒤 작은 시나리오로 `job.submitted.payload.exp_id`, JobSet 주석, `job_runs.exp_id`가 같은지 확인한다.
+
 ## 아직 정할 것
 
 - step 수·실행 시간을 백엔드에 넘길 칸: 서비스 API는 `max_steps`를 사용자에게 열지 않음 → 노찬경과 정하기 (지금은 결과 파일에만 남김)
-- `exp_id`를 누가 매기는지 (지금은 `--exp-id`, 기본 `exp-<prefix>`) → 수집기가 started 사건으로 행을 만드는지 김현수와 확인
 - 장애 주입 시점은 이 파일에 넣지 않고 따로 (복구·모니터링과 정함)

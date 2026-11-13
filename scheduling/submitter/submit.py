@@ -76,9 +76,9 @@ def queue_for(gpus):
 
 # ---------- 제출 방법 두 가지
 
-def submit_backend(i, row, prefix):
+def submit_backend(i, row, prefix, exp_id):
     body = {"name": f"{prefix}-{i:04d}", "model": MODEL, "strategy": row["strategy"], "gpus": row["gpus"],
-            "dataset": DATASET}
+            "dataset": DATASET, "exp_id": exp_id}
     req = urllib.request.Request(f"{BACKEND_URL}/api/jobs", data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
@@ -100,7 +100,7 @@ class KindSubmitter:
         api = config.new_client_from_config(context=context)
         self.co, self.core = client.CustomObjectsApi(api), client.CoreV1Api(api)
 
-    def __call__(self, i, row, prefix):
+    def __call__(self, i, row, prefix, exp_id):
         q = queue_for(row["gpus"])
         if not q:
             return "", "", "", f"거부: GPU {row['gpus']} > {MAX_JOB_GPUS}"
@@ -112,7 +112,7 @@ class KindSubmitter:
                            "labels": {"kueue.x-k8s.io/queue-name": q, "kueue.x-k8s.io/priority-class": "training",
                                       "devoops/job-id": job_id, "devoops/generation": "1"},
                            "annotations": {"devoops/strategy": row["strategy"], "devoops/world-size": str(gpus),
-                                           "submitter/steps": str(row["steps"])}},
+                                           "submitter/steps": str(row["steps"]), "devoops/exp-id": exp_id}},
               "spec": {"failurePolicy": {"maxRestarts": 0},
                        "network": {"enableDNSHostnames": True, "subdomain": name},
                        "replicatedJobs": [{"name": "workers", "replicas": 1, "template": {"spec": {
@@ -280,7 +280,7 @@ def main(argv=None):
             wait = row["at"] / a.speed - (time.monotonic() - t0)
             if wait > 0:
                 time.sleep(wait)
-            job_id, jobset, queue, result = submit(i, row, a.prefix)
+            job_id, jobset, queue, result = submit(i, row, a.prefix, exp_id)
             if job_id and result.startswith("20"):
                 job_ids.append(job_id)
             w.writerow([i, row["at"], row["gpus"], row["steps"], row["strategy"], row["duration"] or "",
