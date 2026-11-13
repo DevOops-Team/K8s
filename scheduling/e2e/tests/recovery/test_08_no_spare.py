@@ -1,6 +1,6 @@
 """예비 없음: moveToSpare인데 예비 노드가 없으면 반쪽 배치 대신 자리가 날 때까지 대기 (정본 R5·R8, I2, 3.4 재배치 자리 지키기).
 
-"예비 없음"은 예비 노드 cordon으로, "새 노드 확보"(EKS에선 Karpenter 보충)는 uncordon으로 흉내 낸다.
+"예비 없음"은 예비 노드 cordon으로, "새 노드 확보"(EKS에선 예비 노드그룹 ASG가 대체 노드를 띄움)는 uncordon으로 흉내 낸다.
 05(예비 있음)와 resubmitted -> admitted 간격을 비교할 수 있게 기록한다.
 """
 import pytest

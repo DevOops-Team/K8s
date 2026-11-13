@@ -63,6 +63,44 @@ class InitPolicyTests(unittest.TestCase):
         self.flow.accept(signal)
         return self.flow.tick(self.store.get(signal['event_id']))
 
+    def test_corrupt_checkpoint_respects_no_scratch_policy(self):
+        self.store.table.item['allow_restart_from_scratch'] = False
+        before = copy.deepcopy(self.store.fencing.item)
+        result = self.process(event(7))
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(self.store.fencing.item, before)
+        self.assertEqual(self.requests.calls, [])
+
+    def test_no_scratch_policy_still_allows_previous_good_checkpoint(self):
+        self.store.table.item['allow_restart_from_scratch'] = False
+        self.store.fencing.item.update(prev_approved_gen=1, prev_approved_step=900)
+        signal = event(7)
+        self.assertEqual(self.process(signal)['state'], 'CLAIMED')
+        result = self.flow.tick(self.store.get(signal['event_id']))
+        self.assertEqual(result['state'], 'REQUESTED')
+        self.assertEqual(self.store.fencing.item['recovery_resume_step'], 900)
+
+    def test_no_scratch_policy_blocks_claimed_replay_before_generation_advance(self):
+        signal = event(7)
+        self.assertEqual(self.process(signal)['state'], 'CLAIMED')
+        self.store.table.item['allow_restart_from_scratch'] = False
+        before = copy.deepcopy(self.store.fencing.item)
+        result = self.flow.tick(self.store.get(signal['event_id']))
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(self.store.fencing.item, before)
+        self.assertEqual(self.requests.calls, [])
+
+    def test_no_scratch_policy_blocks_advanced_replay_before_request(self):
+        signal = event(7)
+        self.assertEqual(self.process(signal)['state'], 'CLAIMED')
+        self.store.adapter.claim(signal)  # Crash after generation advance, before RR creation.
+        self.store.table.item['allow_restart_from_scratch'] = False
+        before = copy.deepcopy(self.store.fencing.item)
+        result = self.flow.tick(self.store.get(signal['event_id']))
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(self.store.fencing.item, before)
+        self.assertEqual(self.requests.calls, [])
+
     def test_exit_codes_override_generic_recommendation(self):
         expected = {2:'HOLD', 3:'HOLD', 4:'RETRY_GROUP', 5:'NEEDS_CONFIG_FIX', 6:'NEEDS_CONFIG_FIX', 7:'RETRY_GROUP'}
         for code, action in expected.items():

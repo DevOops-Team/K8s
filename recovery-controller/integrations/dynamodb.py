@@ -98,6 +98,11 @@ class Store:
         item = self.table.get_item(Key={'pk': key}, ConsistentRead=True).get('Item', {})
         return item.get('blocked') is True
 
+    @staticmethod
+    def require_restart_policy(metadata, resume_gen):
+        if resume_gen is None and metadata.get('allow_restart_from_scratch', True) is not True:
+            raise RecoveryBlocked('no usable checkpoint; restart from scratch is disabled')
+
     def select_checkpoint(self, job_id, current):
         """A blocked approved baseline falls back once; never treats transport errors as corruption."""
         generation, step = current.get('approved_gen'), current.get('approved_step')
@@ -139,6 +144,7 @@ class Store:
         if metadata is None:
             return None
         if current.get('recovery_id') == event['event_id']:
+            self.require_restart_policy(metadata, current.get('recovery_resume_gen', current.get('approved_gen')))
             self.require_usable_checkpoint(event['job_id'], current.get('recovery_resume_gen'), current.get('recovery_resume_step', 0))
             phase = current.get('recovery_phase')
             if phase == 'CLAIMED':
@@ -171,6 +177,7 @@ class Store:
                                   and int(current['approved_step']) >= 0):
             raise RecoveryBlocked('invalid approved checkpoint fields')
         resume_gen, resume_step, warning, fallback = self.select_checkpoint(event['job_id'], current)
+        self.require_restart_policy(metadata, resume_gen)
         # Lock the exact approved baseline. A simultaneous sidecar approval causes a
         # conditional failure and a reread on the next reconciliation cycle.
         values = {':old':event['generation'], ':new':event['generation']+1,

@@ -7,7 +7,7 @@ from unittest import mock
 import ec2_evidence as E
 import relocator
 
-GOOD = {"eks:eks-cluster-name": "devoops-eks-a", "karpenter.sh/nodepool": "training"}
+GOOD = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "training"}
 
 
 class FakeEc2:
@@ -62,18 +62,29 @@ class CheckTests(unittest.TestCase):
 
     def test_no_instances_found_is_not_evidence(self):
         self.assertFalse(ev({}).check("worker1")[0])
-        other = {"eks:eks-cluster-name": "other", "karpenter.sh/nodepool": "training"}
+        other = {"eks:cluster-name": "other", "eks:nodegroup-name": "training"}
         self.assertFalse(ev({"i-1": ("running", other)}).check("worker1")[0])
 
     def test_ec2_error_is_not_evidence(self):
         self.assertFalse(ev({}, fail=RuntimeError("AccessDenied")).check("worker1")[0])
 
-    def test_filters_use_karpenter_tags_and_cluster_mapping(self):
+    def test_filters_use_nodegroup_tags_and_cluster_mapping(self):
         e = ev({"i-1": "terminated"})
         e.check("worker1")
         f = {x["Name"]: x["Values"] for x in e.ec2.filters[0]}
-        self.assertEqual(f["tag:eks:eks-cluster-name"], ["devoops-eks-a"])
-        self.assertEqual(f["tag:karpenter.sh/nodepool"], ["training", "spare"])
+        self.assertEqual(f["tag:eks:cluster-name"], ["devoops-eks-a"])
+        self.assertEqual(f["tag:eks:nodegroup-name"], ["training", "spare"])
+
+    def test_karpenter_tags_are_not_matched(self):
+        """고정 노드그룹 채택(ADR-25 v2) 뒤로 Karpenter 태그만 있는 인스턴스는 찾지 않는다"""
+        old = {"eks:eks-cluster-name": "devoops-eks-a", "karpenter.sh/nodepool": "training"}
+        self.assertFalse(ev({"i-1": ("terminated", old)}).check("worker1")[0])
+
+    def test_from_env_reads_nodegroups(self):
+        env = {"EC2_EVIDENCE": "describe", "EC2_NODEGROUPS": " gpu-train , gpu-spare ,"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch.dict("sys.modules", {"boto3": mock.Mock()}):
+            e = E.from_env()
+        self.assertEqual((e.nodegroups, e.can_terminate), (["gpu-train", "gpu-spare"], False))
 
     def test_terminate_only_recorded_live_instances(self):
         e = ev({"i-1": "running", "i-2": "terminated", "i-3": "running"})
@@ -81,7 +92,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(e.ec2.terminated, ["i-1"])
 
     def test_terminate_looks_up_by_id_only_and_refuses_wrong_tags(self):
-        bad = {"eks:eks-cluster-name": "devoops-eks-a", "karpenter.sh/nodepool": "system"}
+        bad = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "system"}
         e = ev({"i-1": "running", "i-2": ("running", bad)})
         with self.assertRaises(PermissionError):
             e.terminate("worker1", ["i-1", "i-2"])
@@ -136,7 +147,7 @@ class StopPathTests(unittest.TestCase):
         self.assertTrue(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
 
     def test_terminate_refusal_is_recorded_and_not_retried(self):
-        bad = {"eks:eks-cluster-name": "devoops-eks-a", "karpenter.sh/nodepool": "system"}
+        bad = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "system"}
         e = ev({"i-1": ("running", bad)})
         x, saved = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
         with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):

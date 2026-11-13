@@ -3,8 +3,8 @@
 K8s API가 죽어도 EC2 API는 살아 있을 수 있다. 그 클러스터의 GPU 인스턴스가 전부 stopped/terminated면
 그 위의 Pod도 돌 수 없으니 "옛 실행 멈춤" 증거로 인정한다 (체크포인트 규약 8절의 독립 종료 증거).
 
-종료 증거 = 그 클러스터의 학습·예비 인스턴스 전부 꺼짐 (Karpenter 태그 기준):
-  tag:eks:eks-cluster-name = <EKS 클러스터 이름>   tag:karpenter.sh/nodepool ∈ EC2_NODEPOOLS
+종료 증거 = 그 클러스터의 학습·예비 인스턴스 전부 꺼짐 (EKS 관리형 노드그룹 태그 기준, ADR-25 고정 노드그룹):
+  tag:eks:cluster-name = <EKS 클러스터 이름>   tag:eks:nodegroup-name ∈ EC2_NODEGROUPS
   격리 때 기록한 옛 노드만 보지 않는다: 워커가 우리 쪽에서만 끊기고(망 분리) 안에서는 살아 있으면
   JobSet이 Pod를 기록에 없는 다른 노드에 다시 띄울 수 있다.
 
@@ -18,10 +18,12 @@ EC2 호출 실패도 증거 아님.
 설정 (기본 off — kind와 IAM 권한 받기 전에는 아무 것도 안 함):
   EC2_EVIDENCE     off | describe | terminate
   EC2_CLUSTERS     {"worker1": "devoops-eks-a", ...}  MultiKueueCluster 이름 -> EKS 클러스터 이름 (없으면 같은 이름)
-  EC2_NODEPOOLS    학습·예비 NodePool 이름, 쉼표 구분 (기본 training,spare)
+  EC2_NODEGROUPS   학습·예비 관리형 노드그룹 이름, 쉼표 구분 (기본 training,spare — 실제 이름으로 넣을 것)
   AWS_REGION       recovery_store와 같은 값
 필요 IAM (relocator 역할): ec2:DescribeInstances (Resource *),
-  terminate 모드면 ec2:TerminateInstances (조건 aws:ResourceTag/karpenter.sh/nodepool = 학습·예비 NodePool)
+  terminate 모드면 ec2:TerminateInstances (조건 aws:ResourceTag/eks:nodegroup-name = 학습·예비 노드그룹)
+고정 노드그룹은 ASG가 대수를 유지하므로 강제 종료하면 대체 인스턴스가 뜬다. 그 인스턴스가 running이면
+종료 증거가 안 되고 사람 확인으로 넘어간다 (안전한 쪽). EC2 증거가 서는 건 사실상 노드그룹을 0대로 내린 경우.
 """
 import json
 import logging
@@ -30,8 +32,8 @@ import os
 log = logging.getLogger("relocator")
 
 DEAD = {"stopped", "terminated"}
-TAG_CLUSTER = "eks:eks-cluster-name"   # Karpenter v1이 붙이는 클러스터 태그
-TAG_NODEPOOL = "karpenter.sh/nodepool"
+TAG_CLUSTER = "eks:cluster-name"       # EKS 관리형 노드그룹이 인스턴스에 붙이는 클러스터 태그
+TAG_NODEGROUP = "eks:nodegroup-name"   # 같은 방식으로 붙는 노드그룹 태그
 
 
 def instance_id(provider_id):
@@ -43,12 +45,12 @@ def instance_id(provider_id):
 
 
 class Ec2Evidence:
-    def __init__(self, ec2, clusters=None, nodepools=("training", "spare"), terminate=False):
-        self.ec2, self.clusters, self.nodepools, self.can_terminate = ec2, clusters or {}, list(nodepools), terminate
+    def __init__(self, ec2, clusters=None, nodegroups=("training", "spare"), terminate=False):
+        self.ec2, self.clusters, self.nodegroups, self.can_terminate = ec2, clusters or {}, list(nodegroups), terminate
 
     def _filters(self, src):
         return [{"Name": f"tag:{TAG_CLUSTER}", "Values": [self.clusters.get(src, src)]},
-                {"Name": f"tag:{TAG_NODEPOOL}", "Values": self.nodepools}]
+                {"Name": f"tag:{TAG_NODEGROUP}", "Values": self.nodegroups}]
 
     def _describe(self, filters):
         out = {}
@@ -75,15 +77,15 @@ class Ec2Evidence:
 
     def terminate(self, src, old_ids):
         """옛 노드 인스턴스만 내린다. ID로만 조회하고 태그를 하나씩 맞춰 본 것만 대상
-        (다른 클러스터·NodePool 인스턴스 보호, 태그가 하나라도 안 맞으면 아무것도 안 내림)"""
+        (다른 클러스터·노드그룹 인스턴스 보호, 태그가 하나라도 안 맞으면 아무것도 안 내림)"""
         if not (self.can_terminate and old_ids):
             return []
         found = self._describe([{"Name": "instance-id", "Values": list(old_ids)}])
         want = self.clusters.get(src, src)
         wrong = [i for i, (_, t) in found.items()
-                 if t.get(TAG_CLUSTER) != want or t.get(TAG_NODEPOOL) not in self.nodepools]
+                 if t.get(TAG_CLUSTER) != want or t.get(TAG_NODEGROUP) not in self.nodegroups]
         if wrong:
-            raise PermissionError(f"EC2: {wrong}가 {want} 학습·예비 NodePool 태그가 아님 -> 강제 종료 안 함")
+            raise PermissionError(f"EC2: {wrong}가 {want} 학습·예비 노드그룹 태그가 아님 -> 강제 종료 안 함")
         targets = [i for i, (s, _) in found.items() if s not in DEAD and s != "shutting-down"]
         if targets:
             self.ec2.terminate_instances(InstanceIds=targets)
@@ -97,6 +99,6 @@ def from_env():
         return None
     import boto3   # kind·단위 테스트에서는 필요 없게 여기서 import
     clusters = json.loads(os.getenv("EC2_CLUSTERS", "{}") or "{}")
-    pools = [p.strip() for p in os.getenv("EC2_NODEPOOLS", "training,spare").split(",") if p.strip()]
+    groups = [g.strip() for g in os.getenv("EC2_NODEGROUPS", "training,spare").split(",") if g.strip()]
     ec2 = boto3.client("ec2", region_name=os.getenv("AWS_REGION", "us-east-2"))
-    return Ec2Evidence(ec2, clusters, pools, terminate=(mode == "terminate"))
+    return Ec2Evidence(ec2, clusters, groups, terminate=(mode == "terminate"))
