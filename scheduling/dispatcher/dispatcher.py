@@ -20,7 +20,11 @@
   - fenced ACK: 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에 devoops/fenced-ack=<루프 시작 시각>.
     라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
 """
+import json
 import os
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import sys
 from pathlib import Path
 
@@ -99,6 +103,10 @@ def fill_capacity(c: Cluster, api):
         else:
             c.quota_total += nominal
             c.quota_free += nominal - reserved
+    fill_node_capacity(c, api)
+
+
+def fill_node_capacity(c, api, excluded_node=None, released_job=None):
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
     #    예비 노드(devoops/spare taint)는 자리 표시 Pod가 있든 없든 전부 복구 잡 몫 (학습 잡 Pod는 taint로 못 감)
     #    일반 노드의 자리 표시 Pod 자리도 복구 잡 몫 (예비 taint 도입 전 구성 호환)
@@ -107,6 +115,11 @@ def fill_capacity(c: Cluster, api):
     pods = core.list_pod_for_all_namespaces(
         field_selector="status.phase!=Succeeded,status.phase!=Failed", _request_timeout=kube.TIMEOUT).items
     for p in pods:
+        if released_job and getattr(p, 'metadata', None):
+            namespace, jobset = released_job
+            if (p.metadata.namespace == namespace
+                    and (p.metadata.labels or {}).get('jobset.sigs.k8s.io/jobset-name') == jobset):
+                continue
         if not p.spec.node_name:
             continue
         g = sum(int(((ct.resources.requests or {}) if ct.resources else {}).get(K.GPU, 0)) for ct in p.spec.containers)
@@ -116,14 +129,16 @@ def fill_capacity(c: Cluster, api):
             used[p.spec.node_name] = used.get(p.spec.node_name, 0) + g
     for n in core.list_node(label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items:
         ready = any(x.type == "Ready" and x.status == "True" for x in n.status.conditions or [])
-        if n.spec.unschedulable or not ready:
+        taints = n.spec.taints or []
+        if (n.metadata.name == excluded_node or n.spec.unschedulable or not ready
+                or any(t.key == K.TAINT_FAULTY for t in taints)):
             continue
         alloc = int((n.status.allocatable or {}).get(K.GPU, 0))
         if any(t.key == K.TAINT_SPARE for t in (n.spec.taints or [])):
             c.spare_free += max(alloc - used.get(n.metadata.name, 0), 0)
             continue
         free = alloc - used.get(n.metadata.name, 0) - held.get(n.metadata.name, 0)
-        c.node_total += max(alloc - held.get(n.metadata.name, 0), 0)
+        c.node_total = (c.node_total or 0) + max(alloc - held.get(n.metadata.name, 0), 0)
         c.node_free += max(free, 0)
         c.spare_free += held.get(n.metadata.name, 0)
 
@@ -310,7 +325,74 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved):
              pick, c.quota_free, c.recovery_free, quota_wait(wl))
 
 
+def recovery_capacity(mgr, workers, payload):
+    job_id, generation = payload.get('job_id'), payload.get('generation')
+    cluster, node = payload.get('cluster'), payload.get('node')
+    count = payload.get('gpu_count')
+    if (not isinstance(job_id, str) or len(job_id) > 230
+            or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', job_id)
+            or type(generation) is not int or not 1 <= generation <= 999999999
+            or not isinstance(cluster, str) or not isinstance(node, str) or not node
+            or type(count) is not int or not 1 <= count <= 4):
+        raise ValueError('invalid recovery capacity request')
+    namespace = os.getenv('RECOVERY_JOB_NAMESPACE', 'training')
+    jobset = f'job-{job_id}-g{generation:04d}'
+    workload = kube.workload_for_jobset(mgr, namespace, jobset)
+    if ((workload or {}).get('status') or {}).get('clusterName') != cluster:
+        raise ValueError('current workload placement could not be verified')
+    worker = workers.get().get(cluster)
+    if worker is None:
+        raise RuntimeError('worker unavailable')
+    mkc = kube.kueue(mgr).get_cluster_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, 'multikueueclusters', cluster, _request_timeout=kube.TIMEOUT)
+    if not kube.is_true(mkc, 'Active') or (mkc['metadata'].get('labels') or {}).get(K.LABEL_FENCED) == 'true':
+        raise RuntimeError('worker unavailable')
+    capacity = Cluster(cluster)
+    fill_node_capacity(capacity, worker, excluded_node=node, released_job=(namespace, jobset))
+    return {'available': capacity.spare_free > 0 and capacity.nodes_for(True) >= count,
+            'spare_free': capacity.spare_free, 'normal_free_after_stop': capacity.node_free}
+
+
+def start_capacity_server(port):
+    # Separate API clients from the scheduling loop, which can update nominations.
+    mgr = kube.manager_client()
+    workers = kube.Workers(mgr)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != '/v1/recovery-capacity':
+                self.send_error(404)
+                return
+            self.connection.settimeout(5)
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 4096:
+                    raise ValueError('invalid request length')
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('invalid request body')
+                body = json.dumps(recovery_capacity(mgr, workers, payload)).encode()
+            except ValueError:
+                self.send_error(400)
+                return
+            except Exception:
+                log.exception('recovery capacity unavailable')
+                self.send_error(503)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 def main():
+    port = int(os.getenv('DISPATCHER_CAPACITY_PORT', '0'))
+    if port:
+        start_capacity_server(port)
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)

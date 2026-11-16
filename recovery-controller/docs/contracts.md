@@ -231,3 +231,93 @@ relocator가 회수 예정 노드를 격리하고 옛 실행 종료를 확인한
 마지막 저장·승인 후 세대를 증가시키는 PLANNED_MIGRATE 절차는 향후 확장으로 보류한다.
 예비 소진의 타 클러스터 자동 승격은 이 변경에 포함하지 않는다. 이미 HOLD인 사건도 자동 재개하지 않는다.
 Kafka 토픽·사건 필드는 바꾸지 않으며, source=spot 또는 legacy fault_type은 요청 reason=spot으로 전달한다.
+
+### HOLD 사건 이름 (2026-11-10)
+
+Kafka 토픽은 `recovery.action`, 복구 보류 사건의 봉투 `type`은 `recovery.held`로 정한다.
+모니터링 매핑 `suggested_action=hold → action=HOLD → RelocationRequest 없음`을 따른다.
+분류기 입력 `gpu.fault`의 `fault.held`와 구분한다. 단계 제한 시간/API 오류/Watchdog 등으로
+컨트롤러가 HOLD를 결정한 경우도 같은 이름을 쓰며 구체적 이유와 단계는 payload에 남긴다.
+기존 REVIEW 상태도 보류 사건으로 분류한다. NEEDS_CONFIG_FIX/REJECTED는 HOLD로 분류하지 않는다.
+
+봉투 필드: `schema_version=1`, `event_id`, `type`, `occurred_at`(UTC ISO 8601),
+`source=recovery-controller`, `job_id`, `generation`, `cluster`, `node`, `payload`.
+기존 최상위 결과 필드는 호환을 위해 유지한다. payload에는 기존 결과 필드와
+`source_event_id`, `recovery_id`(현재 구현의 원본 event_id), `dedup_key`를 넣는다.
+`event_id`는 기존 `{원본 event_id}:result`를 유지하며 `occurred_at`은 최초 outbox 발행 준비 시
+영속 기록하고 Kafka 재전송에서도 보존한다(정확한 HOLD 전이 시각과는 구분).
+다른 최종 판단은 `recovery.decided`로 기록한다. 이 변경은 제출 단계 사건을 새로 발행하지 않는다.
+
+HOLD는 새 세대나 재배치 요청을 만들지 않는다. outbox 재전송도 복구를 다시 실행하지 않는다.
+PostgreSQL의 기존 text `type` 컬럼에 저장하는 계약이며 컬럼 추가는 필요 없다.
+현수 수집기 허용 목록과 태림 알림 쿼리에 `recovery.held` 반영은 별도 연동 확인이 필요하다.
+Slack 직접 전송은 구현하지 않는다. Kafka 접속 예시는 .40/.41/.42 세 브로커가 이미 반영돼 있다.
+
+### 종료 대기 HOLD 이후 같은 복구 재개 (11/10 로컬 구현)
+
+종료 대기 제한 시간 초과로 HOLD된 REQUESTED/GENERATION_ADVANCED 사건만 추적한다.
+기존 relocation_request가 있어야 하며 설정 오류·API 실패·분류기 hold·복원 실패·재개 시간 초과는
+이 경로로 해제하지 않는다. observe 모드와 Watchdog 보류 중에도 해제하지 않는다.
+
+relocator가 fencing에 기록한 OLD_RUN_STOPPED/NEW_RUN_SUBMITTED/RESUMING을 강한 일관성으로 읽고,
+동일 recovery_id, 현재 세대, recovery_from_gen/recovery_to_gen을 대조한다.
+제출 이후 단계는 new_jobset_uid도 요구한다. RR status나 어노테이션 자체를 증거로 읽지 않는다.
+사람의 종료 승인·실제 종료 증거 검증과 OLD_RUN_STOPPED 작성은 relocator 책임이다.
+복구 컨트롤러는 그 권한 있는 기록을 확인해 기존 요청의 추적·복원·step 검증을 이어간다.
+세대 증가·새 RR 생성·retry_count 변경/초기화는 수행하지 않는다.
+
+중단 이후 제출 대기(15분) 또는 재개 확인(30분) 예산은 검증된 후속 단계를 최초 관측할 때 한 번 시작하고
+DB에 보존한다. 재조회/리더 교체로 연장하지 않는다. 후속 단계에서 다시 HOLD되면 자동 재해제하지 않는다.
+종료 대기 공통 stop_wait_*의 기록·컨트롤러 소비는 아래 후속 연결을 따른다. relocator 소비와 실제 증거 시각 연동은 별도다.
+조회 오류는 HOLD를 유지한 채 5초부터 최대 300초까지 간격을 늘려 재조회한다.
+hold_resume_history에 복구 ID·세대·이전 사유·관측 단계·시각·확인 주체를 기록한다.
+이는 사람의 승인자 감사 기록을 대신하지 않으며 수동 승인 RBAC는 relocator/운영 계약에서 관리한다.
+
+미전송 HOLD 결과는 pending_results에 보존하고 활성 복구 중에도 재전송한다.
+첫 결과 ID는 {원본 event_id}:result, 재개 후 결과는 :result:1 등 result_sequence 접미사를 사용한다.
+같은 결과의 재전송 ID·시각은 고정하되 HOLD와 이후 완료를 서로 다른 사건으로 적재한다.
+기존 HOLD 결과의 published=true 때문에 이후 완료 사건이 누락되지 않도록 발행 상태를 분리한다.
+실제 DynamoDB·수동 승인·Kafka/EKS 통합 검증과 배포는 별도다.
+
+## 컨트롤러 측 후속 연결 (11/10)
+
+### 공통 종료 대기 시각
+
+세대 증가·owner 제거·retry_count 증가와 같은 조건부 UpdateItem에
+`stop_wait_started_at`과 `stop_wait_deadline`을 함께 기록한다. 값은 UTC Unix 초(Number),
+기본 deadline=시작+900초이며 retry_policy.stop_timeout_seconds를 사용한다.
+동일 recovery_id의 재처리에서는 변경하지 않고 새 복구의 세대 전환 때 교체한다.
+JobSet 재제출·승인본·owner 선점·완료 처리는 이 두 시각을 초기화하지 않는다.
+
+컨트롤러는 이를 event 항목에도 보존한다. 종료 대기 마감 판단은 같은 복구 ID·세대의 펜싱 항목을 강한 일관성으로 읽어 적용한다. 종료 확인 이후에는 다음 단계의 시간 제한을 적용한다.
+단계 전환/프로세스 재기동으로 마감을 늦추지 않는다. 두 값이 일부만 있거나 잘못됐으면 HOLD한다.
+기존 필드가 전혀 없는 진행 건은 기존 로컬 단계 시각을 사용하며 시간을 임의로 소급 생성하지 않는다.
+relocator의 공통 deadline 읽기 변경은 성모님 작업이며, 그 변경 전에는 양쪽 타이머 통일 완료가 아니다.
+
+### 펜싱 테이블의 학습 진행 입력 어댑터
+
+`integrations/fencing_input.py`는 현수님 제안 경로의 컨트롤러 수신부다. 기본 비활성이다.
+별도 설정 fencing_progress_input.enabled=true 및 producer_contract_confirmed=true가 있어야 동작한다.
+실제 생산자 조건부 쓰기·IAM·필드 계약을 확인하기 전에는 켜지 않는다.
+IAM 권한을 생성하거나 임의 Kafka 본문을 신뢰하는 변경은 하지 않았다.
+
+제안 속성 `recovery_training_evidence`는 fencing 항목 안의 Map이며 아직 외부 확정 스키마가 아니다.
+Map에는 evidence-contract.md의 progress 메시지를 넣고 producer·received_at은 넣지 않는다.
+사이드카는 generation·owner·recovery_id를 조건으로 전체 Map을 쓰고 실제 학습 복원·첫 업데이트
+완료를 보고해야 한다. 컨트롤러가 만든 성공 값이나 init 다운로드 성공으로 대체하지 않는다.
+
+어댑터는 강한 일관성 읽기로 현재 job_id·복구 ID·세대·owner·JobSet UID를 대조한 뒤
+EvidenceWriter에 producer=training으로 연결한다. 이 이름의 신뢰는 외부 IAM/속성 쓰기 계약에서
+오며 설정 확인 플래그 자체가 AWS 인증·조건부 쓰기를 보장하지 않는다.
+EvidenceWriter는 fencing을 재조회해 조건과 복원 기준·시각·진행 step을 다시 검증하고
+기존 recovery_table projection에 조건부 기록한다. 배치 증거·등록된 job이 없으면 완료하지 않는다.
+DynamoDB Decimal 정수 변환, 중복 수신 시각 보존, 지연/옛 세대/가짜 producer 거부를 적용한다.
+조회/형식/쓰기 오류는 증거로 수락하지 않고 5초부터 최대 300초까지 backoff한다.
+기존 복구 제한 시간을 연장하지 않으므로 증거가 끝내 없으면 HOLD한다.
+
+### 이번 변경의 경계
+
+참여 EC2 수집/배치 기록 생산자, 예비 용량 신호와 자동 타 EKS 승격,
+사이드카 실제 증거 쓰기·IAM, relocator 공통 deadline 소비, AWS/EKS 운영 장애 시험은
+다른 담당자와의 실제 연동이 남아 있다. 직접 EC2 호출·종료 권한을 추가하지 않았다.
+로컬 컨트롤러 테스트 145개 통과. push·이미지 게시·클러스터 적용·AWS 통합 검증 전이다.

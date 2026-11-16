@@ -55,3 +55,21 @@ class RelocationClient:
             if existing.get('spec') != spec:
                 raise ValueError('RelocationRequest name belongs to a different request') from exc
         return name
+
+
+class DispatcherCapacity:
+    def __init__(self, url):
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            raise ValueError('dispatcher_capacity_url must be an HTTP(S) URL')
+        self.url = url
+
+    def check(self, event, gpu_count):
+        payload = {key: event[key] for key in ('job_id', 'generation', 'cluster', 'node')}
+        payload['gpu_count'] = gpu_count
+        request = urllib.request.Request(self.url, data=json.dumps(payload).encode(),
+                                         headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            result = json.loads(response.read(4096))
+        if not isinstance(result, dict) or type(result.get('available')) is not bool:
+            raise ValueError('invalid dispatcher response')
+        return result['available']

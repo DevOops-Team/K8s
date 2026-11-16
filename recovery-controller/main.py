@@ -13,6 +13,12 @@ from recovery.policy import plan
 def validate_config(config):
     if not isinstance(config, dict) or config.get('schema_version') != 1:
         raise ValueError('schema_version must be 1')
+    enabled = config.get('straggler_auto_migration_enabled', False)
+    if type(enabled) is not bool:
+        raise ValueError('straggler_auto_migration_enabled must be boolean')
+    if enabled:
+        from integrations.relocation import DispatcherCapacity
+        DispatcherCapacity(config.get('dispatcher_capacity_url'))
     source=config.get('event_source')
     if type(config.get('execution_enabled')) is not bool:
         raise ValueError('execution_enabled must be boolean')
@@ -40,6 +46,10 @@ def validate_config(config):
             if not isinstance(namespace, str) or not re.fullmatch('[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?', namespace):
                 raise ValueError('invalid job_namespace')
 
+    from integrations.fencing_input import input_config
+    progress_input = input_config(config.get('fencing_progress_input'))
+    if progress_input['enabled'] and source != 'kafka':
+        raise ValueError('fencing progress input requires DynamoDB/Kafka runtime')
     from recovery.evidence import policy_config
     policy_config(config.get('evidence_policy'))
     watchdog = config.get('watchdog', {})

@@ -168,3 +168,20 @@ new persisted REJECTED transitions, including `retry_limit_reached`,
 `config_mismatch`, `registration_missing`, and `classifier_refuse`.
 Repeated saves of the same state and Kafka result retries do not increment it.
 Like the HOLD counter, it resets on Pod restart and can first be scraped at 1.
+
+### ADR-37 스트래글러 자동 이전
+
+기본값은 `straggler_auto_migration_enabled: false`다. 활성화하려면 관리 클러스터의
+`dispatcher-capacity` Service와 `dispatcher_capacity_url`을 연결한다. dispatcher의
+`RECOVERY_JOB_NAMESPACE`와 복구 컨트롤러의 `job_namespace` 기본값은 `training`이다.
+
+Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preemptive`,
+`collector_healthy: true` 및 `straggler_evidence`가 필요하다. 증거 입력 계약은
+`duration_seconds`(600 이상), `cause_node`(이벤트 node와 동일),
+`estimated_gain_seconds`(이전 비용을 포함한 순절감 시간, 양의 정수)다.
+이 값은 탐지·분류 쪽에서 공급해야 한다. 증거가 없거나 조회에 실패하면 HOLD로 남긴다.
+
+디스패처는 해당 JobSet의 종료를 가정해 읽기 전용으로 노드 용량을 계산한다.
+예비 GPU가 한 장 이상이고 전체 요청량을 수용할 수 있으면 용량 조건을 통과한다.
+이 결과는 물리 용량 추정치다. 실제 Kueue 쿼터·승인과 GPU 예약은 별도다.
+`straggler_migration_count`는 펜싱 항목에서 세대 증가와 같은 조건부 쓰기로 1을 기록한다.

@@ -235,3 +235,49 @@ class WorkflowTests(unittest.TestCase):
         result=self.tick()
         self.assertEqual(result['state'],'RECOVERED')
         self.assertEqual(result['checkpoint_warning'],'NO_APPROVED_CHECKPOINT_RESTART_FROM_SCRATCH')
+
+
+class StragglerWorkflowTests(unittest.TestCase):
+    def test_only_verified_straggler_with_spare_submits_relocation(self):
+        from unittest.mock import Mock
+
+        event = dict(EVENT, category='straggler', suggested_action='evacuate_preemptive',
+                     collector_healthy=True, straggler_evidence={
+                         'duration_seconds': 600, 'cause_node': EVENT['node'],
+                         'estimated_gain_seconds': 120,
+                     })
+        for case, expected in (
+            ('disabled', 'straggler_auto_migration_disabled'),
+            ('used', 'straggler_migration_limit'),
+            ('missing_evidence', 'straggler_evidence_incomplete'),
+            ('unreachable', 'straggler_capacity_unknown'),
+            ('insufficient', 'straggler_capacity_insufficient'),
+            ('available', None),
+        ):
+            with self.subTest(case=case):
+                store, requests = MemoryStore(), Requests()
+                store.nodes['gpu_count'] = 4
+                capacity = Mock()
+                capacity.check.return_value = case == 'available'
+                if case == 'unreachable':
+                    capacity.check.side_effect = TimeoutError()
+                if case == 'used':
+                    store.fence['straggler_migration_count'] = 1
+                signal = dict(event)
+                if case == 'missing_evidence':
+                    signal.pop('straggler_evidence')
+                workflow = Workflow(store, requests, execute=True,
+                                    straggler_capacity=None if case == 'disabled' else capacity)
+                workflow.accept(signal)
+                result = workflow.tick(store.get(event['event_id']))
+                if expected:
+                    self.assertEqual((result['state'], result['reason']), ('HOLD', expected))
+                    self.assertEqual(store.job['generation'], 1)
+                    self.assertEqual(requests.calls, [])
+                else:
+                    capacity.check.assert_called_once_with(signal, 4)
+                    self.assertEqual(result['state'], 'REQUESTED')
+                    self.assertEqual(requests.calls, [(signal, 'moveToSpare')])
+                    capacity.check.side_effect = TimeoutError()
+                    workflow.tick(result)
+                    self.assertEqual(capacity.check.call_count, 1)

@@ -1,6 +1,10 @@
 """Select a recovery action for a fault event."""
 
 
+def is_straggler(event):
+    return event.get('category') == 'straggler' or event.get('fault_type') == 'straggler'
+
+
 def plan(event):
     required = ('event_id', 'cluster')
     if not isinstance(event, dict) or any(not isinstance(event.get(k), str) or not event[k].strip() for k in required):
@@ -30,6 +34,8 @@ def plan(event):
     if not init and recommendation not in actions:
         raise ValueError('unknown suggested_action')
     action = init['action'] if init else actions[recommendation]
+    if is_straggler(event):
+        action = 'HOLD'
     if event.get('collector_healthy') is False and event.get('category') != 'site':
         action = 'HOLD'
     return {'event_id': event['event_id'], 'job_id': event.get('job_id'),

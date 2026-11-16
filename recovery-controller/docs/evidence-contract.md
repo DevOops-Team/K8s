@@ -81,3 +81,11 @@ Workflow.tick은 두 증거의 v1 메타데이터, 허용 생산자 역할, 기�
 - 김성모·김현수·노찬경과 역할 이름·사건 형식·기록 어댑터·시계 동기화를 합의한다.
 - 초기 job 등록, 실제 생산자 호출, 인증 경로·IAM과 테이블 이름을 연결한다.
 - 관찰 모드 이후 실제 새 배치→복원→첫 step→COMPLETED, 실패·누락·지연·중복·재기동을 통합 시험한다.
+
+## DynamoDB 학습 진행 수신부 (11/10 로컬 구현)
+
+`integrations/fencing_input.py`가 fencing의 전용 Map을 읽어 progress를 EvidenceWriter에 연결한다.
+제안 속성은 recovery_training_evidence이며 실제 생산자 필드·조건부 쓰기·IAM 합의 전까지
+기본 비활성이다. ../examples/config.kafka.example.json의 fencing_progress_input 설정을 참조한다.
+기존 placement 입력·작업 등록을 대체하지 않고, 복원·학습 사실을 생성하지 않는다.
+어댑터와 중복·옛 세대·owner·UID·시각·복원 기준 거부 테스트만 로컬 구현했다.

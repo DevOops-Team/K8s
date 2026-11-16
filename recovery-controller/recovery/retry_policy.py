@@ -1,5 +1,7 @@
 """Durable operation budgets, stage deadlines and independent result outbox."""
 import json
+import copy
+from datetime import datetime, timezone
 from urllib.error import HTTPError
 
 DEFAULTS = dict(max_recovery_attempts=3, api_attempts=3, claim_timeout_seconds=300,
@@ -19,9 +21,50 @@ class Runner:
         return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason,
                                stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])))
 
+    def poll_held(self, record, now, monitoring_hold):
+        # Polling is read-only and continues after HOLD. Failed reads back off;
+        # they neither release HOLD nor reset an execution/API retry budget.
+        if monitoring_hold or now < int(record.get('hold_poll_next_at', 0)):
+            return record
+        inspect = getattr(self.workflow, 'held_relocation_progress', None)
+        if inspect is None:
+            return record
+        rid = record['event']['event_id']
+        try:
+            progress = inspect(record)
+        except Exception as exc:
+            failures = int(record.get('hold_poll_errors', 0)) + 1
+            delay = min(300, 5 * 2 ** min(failures - 1, 6))
+            return self.store.save(rid, hold_poll_errors=failures, hold_poll_error=type(exc).__name__,
+                                   hold_poll_next_at=now + delay)
+        if not progress:
+            return record
+        pending = copy.deepcopy(record.get('pending_results', []))
+        if not record.get('published'):
+            snapshot = copy.deepcopy(record)
+            snapshot.pop('pending_results', None)
+            pending.append(snapshot)
+        phase = progress['phase']
+        budget = 'OLD_RUN_STOPPED' if phase == 'OLD_RUN_STOPPED' else 'RESUME'
+        audit = list(record.get('hold_resume_history', []))
+        audit.append(dict(recovery_id=rid, generation=progress['generation'],
+                          prior_reason=record.get('reason'), observed_phase=phase,
+                          observed_at=now, checked_by='recovery-controller',
+                          basis='relocator-owned fencing phase'))
+        return self.store.save(rid, state='REQUESTED', action=progress['action'],
+                               reason='continuing same recovery after relocator stop confirmation',
+                               stage=phase, waiting_phase=phase, stopped_stage=None,
+                               budget_stage=budget, stage_started_at=now, api_attempts=0,
+                               hold_resume_history=audit, hold_poll_errors=0, hold_poll_next_at=0,
+                               pending_results=pending, published=False, publish_attempts=0,
+                               publish_next_at=0, result_occurred_at=None,
+                               result_sequence=int(record.get('result_sequence', 0)) + 1)
+
     def operation(self, record, now, monitoring_hold):
         from recovery.workflow import TERMINAL
         rid = record['event']['event_id']
+        if record['state'] == 'HOLD':
+            record = self.poll_held(record, now, monitoring_hold)
         finish = record['state'] == 'RECOVERED'
         if finish and record.get('finalized'):
             return record
@@ -41,7 +84,9 @@ class Runner:
                   'OLD_RUN_STOPPED':'submit', 'NEW_RUN_SUBMITTED':'resume', 'RESUMING':'resume',
                   'REQUESTED':'stop', 'SUBMITTED':'resume', 'RESUME':'resume', 'FINALIZE':'claim'}
         timeout = self.policy[limits.get(stage, 'claim') + '_timeout_seconds']
-        if now - int(record['stage_started_at']) >= timeout:
+        deadline = int(record['stage_started_at']) + timeout
+        waiting_for_stop = stage in ('REQUESTED', 'GENERATION_ADVANCED')
+        if not waiting_for_stop and now >= deadline:
             return self.hold(record, 'stage deadline exceeded: ' + stage)
         attempts = int(record.get('api_attempts', 0))
         if attempts >= self.policy['api_attempts']:
@@ -49,6 +94,21 @@ class Runner:
         # Persist intent BEFORE any external operation. Crashes conservatively consume an attempt.
         record = self.store.save(rid, api_attempts=attempts + 1)
         try:
+            if waiting_for_stop:
+                from recovery.evidence import whole
+                fence = self.store.fencing_record(record['event']['job_id'])
+                if fence.get('recovery_id') != rid or fence.get('generation') != record.get('generation'):
+                    return self.hold(record, 'recovery authority changed')
+                if fence.get('recovery_phase') not in ('OLD_RUN_STOPPED', 'NEW_RUN_SUBMITTED', 'RESUMING'):
+                    if any(key in source for source in (fence, record)
+                           for key in ('stop_wait_started_at', 'stop_wait_deadline')):
+                        start = fence.get('stop_wait_started_at')
+                        end = fence.get('stop_wait_deadline')
+                        if not whole(start) or not whole(end) or start < 0 or end <= start:
+                            return self.hold(record, 'invalid shared stop wait deadline')
+                        deadline = int(end)
+                    if now >= deadline:
+                        return self.hold(record, 'stage deadline exceeded: ' + stage)
             if finish:
                 self.store.finish(record)
                 result = self.store.save(rid, finalized=True)
@@ -73,6 +133,19 @@ class Runner:
         return self.store.save(rid, **changes)
 
     def deliver(self, record, now):
+        rid = record['event']['event_id']
+        pending = copy.deepcopy(record.get('pending_results', []))
+        for index in range(len(pending)):
+            if pending[index].get('published'):
+                continue
+            def persist(**values):
+                pending[index].update(values)
+                self.store.save(rid, pending_results=pending)
+                return copy.deepcopy(pending[index])
+            self._deliver_result(pending[index], now, persist)
+        self._deliver_result(record, now, lambda **values: self.store.save(rid, **values))
+
+    def _deliver_result(self, record, now, persist):
         from recovery.workflow import TERMINAL
         if record['state'] not in TERMINAL or record.get('published'):
             return
@@ -85,9 +158,12 @@ class Runner:
         delay = min(self.policy['kafka_max_backoff_seconds'],
                     self.policy['kafka_backoff_seconds'] * 2 ** min(attempt - 1, 20))
         # Keep durable outbox even if delivery succeeds but its acknowledgement is lost.
-        self.store.save(rid, publish_attempts=attempt, publish_next_at=now + delay)
+        record = persist(publish_attempts=attempt, publish_next_at=now + delay,
+                                 result_occurred_at=record.get('result_occurred_at') or
+                                 datetime.fromtimestamp(now, timezone.utc).isoformat().replace('+00:00', 'Z'))
         errors = []
-        payload = dict(event_id=rid + ':result', job_id=record['event'].get('job_id'),
+        suffix = ':result' + (':' + str(int(record['result_sequence'])) if record.get('result_sequence') else '')
+        payload = dict(event_id=rid + suffix, job_id=record['event'].get('job_id'),
                        state=record['state'], generation=(int(record.get('generation', record['event'].get('generation')))
                            if record.get('generation', record['event'].get('generation')) is not None else None),
                        action=record.get('action'), reason=record.get('reason'),
@@ -95,14 +171,21 @@ class Runner:
                        stage=record.get('stopped_stage', record.get('stage', record.get('waiting_phase', record.get('budget_stage', record['state'])))),
                        retry_count=int(record['retry_count']) if record.get('retry_count') is not None else None,
                        exit_code=int(record['exit_code']) if record.get('exit_code') is not None else None, failure_class=record.get('failure_class'))
-        if record['state'] == 'HOLD':
-            payload['type'] = 'recovery.held'
+        # fault.held is the classifier's input; recovery.held is this controller's decision.
+        # Keep legacy flat result fields while adding the collector's event envelope.
+        envelope = dict(payload, schema_version=1,
+                        type='recovery.held' if record['state'] in ('HOLD', 'REVIEW') else 'recovery.decided',
+                        occurred_at=record['result_occurred_at'], source='recovery-controller',
+                        cluster=record['event'].get('cluster'), node=record['event'].get('node'),
+                        payload=dict(payload, recovery_id=rid,
+                                     source_event_id=rid,
+                                     dedup_key=record['event'].get('dedup_key')))
         try:
-            self.producer.produce(self.topic, key=payload['job_id'], value=json.dumps(payload),
+            self.producer.produce(self.topic, key=payload['job_id'], value=json.dumps(envelope),
                                   on_delivery=lambda err, msg: errors.append(err))
             if self.producer.flush(10) or not errors or errors[0]:
                 raise RuntimeError('result delivery unconfirmed')
         except Exception as exc:
-            self.store.save(rid, publish_error=type(exc).__name__)
+            persist(publish_error=type(exc).__name__)
             return
-        self.store.save(rid, published=True)
+        persist(published=True)
