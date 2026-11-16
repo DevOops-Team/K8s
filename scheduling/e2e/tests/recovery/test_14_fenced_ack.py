@@ -14,12 +14,12 @@ from harness.jobs import submit_auto
 from harness.verdict import precondition
 
 pytestmark = [pytest.mark.recovery, pytest.mark.doc("fenced ACK 뒤 새 잡 제외")]
-WORKER = "worker3"
+WORKER = WORKERS[-1]
 
 
 def test_fenced_ack(kube, check, info):
-    precondition(set(("worker1", "worker2", WORKER)) <= set(WORKERS), "kind worker1~3이 필요함")
-    precondition(R.mkc_active(kube, WORKER), "worker3 연결이 Active가 아님")
+    precondition(len(WORKERS) >= 2, "워커 2개 이상이 필요함")
+    precondition(R.mkc_active(kube, WORKER), f"{WORKER} 연결이 Active가 아님")
 
     def label(value):
         kube.co.patch_cluster_custom_object(
@@ -42,6 +42,6 @@ def test_fenced_ack(kube, check, info):
             return
         submit_auto(kube, "after-fenced-ack", 1, "20m")
         placed = R.wait_placed(kube, "job-after-fenced-ack-g0001", 90)
-        check.true("ACK 뒤 새 잡은 worker3 외 워커로", placed in ("worker1", "worker2"), placed)
+        check.true(f"ACK 뒤 새 잡은 {WORKER} 외 워커로", placed in set(WORKERS) - {WORKER}, placed)
     finally:
         label(None)

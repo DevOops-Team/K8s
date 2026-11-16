@@ -4,6 +4,7 @@ import pathlib
 import sys
 
 from kubernetes import client, config
+from .topology import profile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]          # scheduling/
 CONTROLLERS_DIR = ROOT
@@ -11,13 +12,16 @@ sys.path.insert(0, str(ROOT / "common"))
 import keys as K  # noqa: E402
 
 MGR_CONTEXT = os.getenv("MGR_CONTEXT", "kind-manager")
-WORKERS = os.getenv("WORKERS", "worker1,worker2,worker3").split(",")
+PROFILE = profile(os.getenv("E2E_PROFILE", "gpu10"))
+WORKERS = os.getenv("WORKERS", ",".join(PROFILE.workers)).split(",")
+if len(WORKERS) != len(PROFILE.workers) or len(set(WORKERS)) != len(WORKERS) or any(not w.strip() for w in WORKERS):
+    raise ValueError("WORKERS must match the selected E2E_PROFILE worker count and contain unique names")
 WORKER_CONTEXTS = {w: f"kind-{w}" for w in WORKERS}
 NS = K.NAMESPACE                       # training
 STORE_NS = "scheduling-local-store"    # kind에서 S3·DynamoDB 대신 쓰는 ConfigMap 자리
 GPU_SELECTOR = K.GPU_NODE_SELECTOR
 
-TRAINING_GPUS_PER_WORKER = 4           # KWOK 학습 노드 4 (+ 예비 1은 학습 잡이 안 씀)
+TRAINING_GPUS_PER_WORKER = PROFILE.training_per_worker
 TRAINING_GPUS = TRAINING_GPUS_PER_WORKER * len(WORKERS)
 HEAVY_MIN_GPUS = int(os.getenv("HEAVY_MIN_GPUS", "3"))   # 잡 투입기 규칙: 한 클러스터 학습 노드의 절반 초과 -> Heavy
 MAX_JOB_GPUS = int(os.getenv("MAX_JOB_GPUS", "4"))       # 한 클러스터 학습 노드 수를 넘으면 거부

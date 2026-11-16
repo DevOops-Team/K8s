@@ -7,7 +7,7 @@ import pytest
 
 from harness import cluster as C
 from harness import recovery as R
-from harness.env import K
+from harness.env import K, WORKERS
 from harness.jobs import submit
 from harness.situations import wait
 from harness.verdict import precondition
@@ -22,6 +22,12 @@ def test_move_to_spare_without_spare(kube, check, info):
     spare = R.spare_nodes(kube, SRC)
     precondition(len(spare) == 1, f"{SRC} 예비 노드가 1대가 아님 ({spare})")
     R.set_cordon(kube, SRC, spare[0], True)
+    # ADR-38: 다른 워커도 포화돼야 '어디에도 자리 없음' 대기가 된다.
+    for i, worker in enumerate(w for w in WORKERS if w != SRC):
+        jid = f"block-{i}"
+        submit(kube, jid, 4, "queue-heavy", "30m", {K.ANN_TARGET: worker})
+        precondition(R.wait_placed(kube, R.jsname(jid), 120) == worker, f"{worker} 채우기 실패")
+        precondition(R.wait_running(kube, worker, R.jsname(jid), 4) is not None, f"{worker} 실행 확인 실패")
     submit(kube, "train-a", 4, "queue-heavy", "30m", {K.ANN_TARGET: SRC})
     old = "job-train-a-g0001"
     precondition(R.wait_placed(kube, old, 120) == SRC, f"train-a가 {SRC}에 안 들어감")
@@ -43,4 +49,4 @@ def test_move_to_spare_without_spare(kube, check, info):
     check.eq("예비 확보 뒤 RR Done", st.get("phase"), "Done")
     check.eq("새 세대 클러스터", R.placed_on(kube, new), SRC)
     check.eq("새 세대 Pod 4개 Running", len(R.running_nodes(kube, SRC, new)), 4)
-    R.check_resubmission(check, kube, "train-a", new, "rr-nospare", "evt-008", target=SRC)
+    R.check_resubmission(check, kube, "train-a", new, "rr-nospare", "evt-008", preferred=SRC)

@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime
 
@@ -14,7 +15,7 @@ from .verdict import Invalid
 
 log = logging.getLogger("e2e")
 ALL = ("dispatcher", "relocator")
-PY = CONTROLLERS_DIR / ".venv" / "bin" / "python"
+PY = os.getenv('CONTROLLER_PYTHON', sys.executable)
 
 
 class Controllers:
@@ -34,11 +35,10 @@ class Controllers:
         if key == self.key and not self.dead():
             return self
         self.stop()
-        if not PY.exists():
-            raise Invalid(f"{PY} 없음: scheduling/run-local.sh를 한 번 돌려 venv를 만들 것")
         self.seq += 1
         self.logfile = self.logdir / f"controllers-{self.seq:02d}-{'+'.join(names) or 'none'}.log"
         full = {**os.environ, **env, "KUBE_CONTEXT": MGR_CONTEXT, "PYTHONUNBUFFERED": "1",
+                "RECOVERY_STORE": "configmap",
                 "WORKER_CONTEXTS": ",".join(f"{w}={c}" for w, c in WORKER_CONTEXTS.items())}
         out = open(self.logfile, "a", buffering=1)
         out.write(f"# {datetime.now():%H:%M:%S} 설정: {names} {env}\n")

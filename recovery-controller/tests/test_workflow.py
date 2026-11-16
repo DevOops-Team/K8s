@@ -125,10 +125,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.job['generation'], 1)
         self.assertEqual(self.requests.calls, [])
 
-    def test_preemptive_does_not_resume_in_another_cluster(self):
+    def test_cross_cluster_owner_without_matching_evidence_does_not_complete(self):
         self.store.events['e1']['event']['suggested_action'] = 'evacuate_preemptive'
         self.tick()
         self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-b')
+        self.assertEqual(self.tick()['state'], 'RESUMING')
+
+    def test_node_recovery_can_complete_in_another_cluster(self):
+        self.tick()
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-b')
+        self.store.nodes.update(cluster='eks-b', active_nodes=[EVENT['node']])
+        self.store.nodes['progress']['cluster'] = 'eks-b'
+        result = self.tick()
+        self.assertEqual(result['state'], 'RECOVERED')
+        self.assertEqual(result['target_cluster'], 'eks-b')
+        self.assertEqual(self.requests.calls[0][1], 'moveToSpare')
+
+    def test_restart_in_place_can_complete_in_another_cluster(self):
+        self.store.events['e1']['event']['suggested_action'] = 'restart_in_place'
+        self.tick()
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-b')
+        self.store.nodes['cluster'] = 'eks-b'
+        self.store.nodes['progress']['cluster'] = 'eks-b'
+        self.assertEqual(self.tick()['state'], 'RECOVERED')
+        self.assertEqual(self.requests.calls[0][1], 'restartInPlace')
+
+    def test_failed_node_still_excluded_inside_source_cluster(self):
+        self.tick()
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-a')
+        self.store.nodes['active_nodes'] = [EVENT['node']]
+        self.assertEqual(self.tick()['state'], 'RESUMING')
+
+    def test_cluster_evacuation_cannot_return_to_failed_source(self):
+        self.store.events['e1']['event'].update(fault_type='az_failure', node=None)
+        self.tick()
+        self.store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-a')
         self.assertEqual(self.tick()['state'], 'HOLD')
 
     def test_no_fresh_placement_cannot_complete(self):

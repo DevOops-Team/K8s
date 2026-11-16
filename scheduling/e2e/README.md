@@ -1,5 +1,18 @@
 # 스케줄링 e2e
 
+현재 GPU-164 기본 테스트 프로필은 **gpu10: 워커 2개, 학습 8/예비 2, 관리 quota 6/2/4**다.
+`E2E_PROFILE=full`로 기존 워커 3개·quota 8/4/4를 선택한다. 프로필은 설치된 큐 설정을 자동 변경하지 않는다.
+프로필·운영 설정 인계 및 준비 조건은 [GPU-164·165 인계](../../docs/gpu164-165-handoff.md)를 따른다.
+
+설치된 kind 환경에서 A→B 복구만 검사:
+
+```bash
+E2E_PROFILE=gpu10 bash run.sh tests/recovery/test_15_cross_cluster.py
+```
+
+`restartInPlace`와 `moveToSpare` 두 경우를 실행한다. KWOK 배치 테스트이며 실제 trainer 복원·step 증거는 단위 테스트와 별도로 검증한다.
+아래 기존 setup/bootstrap 예시는 Gitops로 이동한 매니페스트 경로를 참조하므로 새 환경 설치에는 현재 담당자 절차가 필요하다.
+
 kind 로컬 클러스터에서 평소 학습·장애복구 스케줄링 규칙(정본 「학습 스케줄링 정본」 3·4절)을 자동으로 판정한다.
 11/10에 bash 장애복구 시나리오(`scenarios/04~11`)를 정본 기준으로 다시 써서 `tests/recovery/`로 옮기고 bash는 지웠다.
 

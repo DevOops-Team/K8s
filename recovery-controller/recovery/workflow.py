@@ -195,15 +195,17 @@ class Workflow:
         target = fencing.get('owner')
         if target not in ('eks-a', 'eks-b', 'eks-c'):
             return record
-        same_cluster = action in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY')
-        if (target == e['cluster']) != same_cluster:
+        # ADR-38: dispatcher may place node recovery in another healthy cluster.
+        # Cluster evacuation must still leave the failed source cluster.
+        if action == 'FENCE_AND_EVACUATE' and target == e['cluster']:
             return self.store.save(rid, state='HOLD', action='HOLD', reason='new owner violates relocation action')
         if phase == 'NEW_RUN_SUBMITTED':
             self.store.resuming(e, generation)
         # Completion uses training progress independent of checkpoint publication.
         placement = self.store.placement(e['job_id'])
         verdict, reason = assess(placement, fencing, job, rid, generation, target, action,
-                                 e.get('node'), int(self.clock()), self.evidence_policy)
+                                 e.get('node') if target == e['cluster'] else None,
+                                 int(self.clock()), self.evidence_policy)
         if verdict == 'failed':
             return self.store.save(rid, state='HOLD', stage='RESUMING', stopped_stage='RESUMING',
                                    action='HOLD', reason=reason)

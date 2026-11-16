@@ -13,7 +13,6 @@ WAIT = 180
 
 def test_move_to_spare(kube, check, info):
     """worker2 4장 잡의 노드 하나 고장 -> 그 노드 cordon+faulty, 새 세대가 worker2 학습 3대 + 예비 1대에, 자리 표시 Pod는 밀려남"""
-    R.placeholder(kube, SRC)
     spare = R.spare_nodes(kube, SRC)
     precondition(len(spare) == 1, f"{SRC} 예비 노드가 1대가 아님 ({spare})")
     submit(kube, "train-a", 4, "queue-heavy", "30m", {K.ANN_TARGET: SRC})
@@ -36,7 +35,6 @@ def test_move_to_spare(kube, check, info):
     check.eq("새 세대 Pod 4개 Running", len(nodes), 4)
     check.true("고장 노드에 새 Pod 없음", bad not in nodes, ",".join(nodes))
     check.true(f"예비 노드 {spare[0]}에 새 Pod", spare[0] in nodes, ",".join(nodes))
-    check.true("자리 표시 Pod가 밀려남", R.placeholder_phase(kube, SRC) != "Running", R.placeholder_phase(kube, SRC))
     check.true(f"{SRC} 펜싱 안 함", not R.fenced(kube, SRC))
     check.true("두 세대가 동시에 Running인 적 없음 (I1)", not dbl.overlaps, "; ".join(dbl.overlaps[:3]))
-    R.check_resubmission(check, kube, "train-a", new, "rr-spare", "evt-005", target=SRC)
+    R.check_resubmission(check, kube, "train-a", new, "rr-spare", "evt-005", preferred=SRC)

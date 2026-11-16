@@ -10,7 +10,7 @@
 | annotation devoops/recovery-id                    | (없음) -> recovery-... |
 | trainer args --master-addr                        | job-{id}-g0001-workers-0-0.job-{id}-g0001 -> ...g0002 |
 | env GENERATION (모든 컨테이너)                    | 1 -> 2 |
-| target / exclude 어노테이션                       | (없음) -> devoops/target-cluster · devoops/exclude-clusters |
+| 배치 힌트 어노테이션                              | recovery-source-cluster(원래 우선) · exclude-clusters |
 | Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
 
 예비 노드 toleration을 Kueue ResourceFlavor가 아니라 여기서 넣는 이유: 4장 복구 잡이 학습 노드 3대 + 예비 1대에
@@ -23,6 +23,7 @@ import re
 import keys as K
 
 LEAVE_SOURCE = {"moveToOtherCluster", "evacuateCluster"}   # 원래 클러스터를 떠나는 action
+PREFER_SOURCE = {"restartInPlace", "moveToSpare"}
 SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
 
@@ -40,13 +41,13 @@ def parse_name(name: str):
 
 def placement_hints(action, src, old_exclude_csv, extra_exclude):
     """재제출 잡의 (target-cluster, exclude-clusters 목록)
-    restartInPlace·moveToSpare: 원래 클러스터로 고정 / moveToOtherCluster·evacuateCluster: 원래 클러스터를 뺌"""
+    restartInPlace·moveToSpare는 별도 원래 클러스터 선호 힌트로 배치한다 (ADR-38)."""
     exclude = {c for c in (old_exclude_csv or "").split(",") if c} | set(extra_exclude or [])
     if action in LEAVE_SOURCE:
         if src:
             exclude.add(src)
         return None, sorted(exclude)
-    return (src or None), sorted(exclude - {src})
+    return None, sorted(exclude)
 
 
 def _pod_specs(js):
@@ -70,7 +71,7 @@ def _master_addresses(values, old_names, name):
     return out
 
 
-def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude) -> dict:
+def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None) -> dict:
     """원본 jobset.json -> gen 세대 재제출본. orig는 바꾸지 않는다"""
     new = copy.deepcopy(orig)
     new.pop("status", None)
@@ -88,9 +89,12 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude)
     ann = meta.setdefault("annotations", {})
     ann[K.ANN_RECOVERY_ID] = recovery_id
     ann.pop(K.ANN_TARGET, None)
+    ann.pop(K.ANN_PREFERRED, None)
     ann.pop(K.ANN_EXCLUDE, None)
     if target:
         ann[K.ANN_TARGET] = target
+    if preferred:
+        ann[K.ANN_PREFERRED] = preferred
     if exclude:
         ann[K.ANN_EXCLUDE] = ",".join(exclude)
 

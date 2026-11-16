@@ -1,5 +1,9 @@
 # 스케줄링 컨트롤러 2개 (최소 기능)
 
+ADR-38: `restartInPlace`·`moveToSpare` 재제출본은 `devoops/recovery-source-cluster`로 원래 EKS를 우선한다.
+원래 EKS가 부족하면 디스패처가 다른 EKS를 검토하고, 모두 부족하면 대기한다. 일반 `target-cluster`는 계속 강제 제한이다.
+복구 완료 판정 연계와 GPU-164의 6/2 ↔ 8/4 테스트 프로필은 [변경·배포 인계](../docs/gpu164-165-handoff.md)를 참고한다.
+
 | 파일 | 일감 | 보는 것 | 바꾸는 것 |
 |---|---|---|---|
 | `dispatcher.py` | GPU-67 | 쿼터는 잡았고 워커는 미정인 Workload, 진행 중인 `RelocationRequest`(읽기만) | `status.nominatedClusterNames`, 찜 어노테이션 `devoops/reserved-cluster` |

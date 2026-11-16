@@ -5,8 +5,8 @@
 바꾸는 것: 워커 노드 cordon·taint / MultiKueueCluster 펜싱 라벨 / 잡 내리기·재제출 / 요청 status
 
 action:
-  restartInPlace   같은 클러스터에 다시 띄움
-  moveToSpare      고장 노드 cordon·taint -> 같은 클러스터에 복구 우선순위로 재제출 (빈자리는 예비 노드)
+  restartInPlace   노드 격리 없이 재제출, 원래 클러스터 우선·부족하면 다른 곳 (ADR-38)
+  moveToSpare      고장 노드 cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
   moveToOtherCluster  (예비 소진, SDC) 의심 노드 cordon·taint -> 원래 클러스터를 빼고 재제출.
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
   evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
@@ -434,7 +434,8 @@ def build_new(x: Ctx):
     oid = (ometa.get("labels") or {}).get(K.LABEL_JOB_ID)
     if oid and oid != x.job_id():
         raise PermissionError(f"복구 원본 {K.LABEL_JOB_ID}={oid} != 요청 잡 {x.job_id()}")
-    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude)
+    preferred = x.st.get("sourceCluster") if x.spec["action"] in R.PREFER_SOURCE else None
+    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude, preferred=preferred)
     new["metadata"]["namespace"] = x.ns
     return new
 
