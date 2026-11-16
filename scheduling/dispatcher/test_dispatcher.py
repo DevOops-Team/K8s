@@ -134,6 +134,71 @@ class Reconcile(unittest.TestCase):
         self.assertEqual(self.nominated, {"job-b-g0002": "worker2"})
 
 
+class RecoveryFallback(unittest.TestCase):
+    run_loop = Reconcile.run_loop
+    def annotations(self, _api, workload):
+        if workload['metadata']['name'].startswith('rec'):
+            return {K.ANN_RECOVERY_ID: 'r1', K.ANN_PREFERRED: 'eks-a'}
+        return {}
+
+    def recovery(self, name='rec', nominated=None):
+        return wl(name, 4, 'T1', priority=K.RECOVERY_PRIORITY_VALUE, nominated=nominated)
+
+    def test_source_wins_even_when_another_cluster_has_tighter_fit(self):
+        self.run_loop([cl('eks-a', 5, total=5), cl('eks-b', 4)], [self.recovery()], self.annotations)
+        self.assertEqual(self.nominated, {'rec': 'eks-a'})
+
+    def test_source_uses_training_plus_spare(self):
+        self.run_loop([cl('eks-a', 3, spare_free=1, recovery_free=1), cl('eks-b', 4)],
+                      [self.recovery()], self.annotations)
+        self.assertEqual(self.nominated, {'rec': 'eks-a'})
+
+    def test_insufficient_source_falls_back_and_releases_its_hold(self):
+        self.run_loop([cl('eks-a', 3), cl('eks-b', 4)],
+                      [self.recovery(), wl('small', 1, 'T2')], self.annotations,
+                      holds={'eks-a': 'rec'})
+        self.assertEqual(self.nominated, {'rec': 'eks-b', 'small': 'eks-a'})
+
+    def test_no_cluster_fits_waits_at_source_without_partial_nomination(self):
+        self.run_loop([cl('eks-a', 3), cl('eks-b', 3)], [self.recovery()], self.annotations)
+        self.assertEqual(self.nominated, {})
+        self.assertEqual(self.reserved, {'rec': 'eks-a'})
+
+    def test_unreserved_destination_precedes_training_reservation(self):
+        self.run_loop([cl('eks-a', 3), cl('eks-b', 4), cl('eks-c', 4)],
+                      [wl('heavy', 4, 'T0', reserved='eks-b'), self.recovery()], self.annotations)
+        self.assertEqual(self.nominated['rec'], 'eks-c')
+
+    def test_only_reserved_destination_is_used_and_audited(self):
+        with self.assertLogs('dispatcher', level='WARNING') as logs:
+            self.run_loop([cl('eks-a', 3), cl('eks-b', 4)],
+                          [wl('heavy', 4, 'T0', reserved='eks-b'), self.recovery()], self.annotations)
+        self.assertEqual(self.nominated['rec'], 'eks-b')
+        self.assertTrue(any('heavy' in line and 'rec' in line and 'eks-b' in line for line in logs.output))
+
+    def test_fenced_inactive_and_excluded_destinations_are_not_used(self):
+        for changes in ({'fenced': True}, {'active': False}, {}):
+            def annotations(api, w):
+                return dict(self.annotations(api, w), **{K.ANN_EXCLUDE: 'eks-b' if not changes else ''})
+            with self.subTest(changes=changes):
+                self.run_loop([cl('eks-a', 3), cl('eks-b', 4, **changes)], [self.recovery()], annotations)
+                self.assertEqual(self.nominated, {})
+
+    def test_explicit_target_stays_hard_for_normal_and_recovery_jobs(self):
+        for priority in (100, K.RECOVERY_PRIORITY_VALUE):
+            self.run_loop([cl('eks-a', 3), cl('eks-b', 4)], [wl('pinned', 4, 'T1', priority=priority)],
+                          lambda _a, _w: {K.ANN_TARGET: 'eks-a', K.ANN_PREFERRED: 'eks-a', K.ANN_RECOVERY_ID: 'r'})
+            self.assertEqual(self.nominated, {})
+
+    def test_failed_nomination_can_be_replaced_after_existing_retry_interval(self):
+        self.run_loop([cl('eks-a', 3), cl('eks-b', 4)], [self.recovery(nominated=['eks-a'])], self.annotations)
+        self.assertEqual(self.nominated, {'rec': 'eks-b'})
+
+    def test_same_loop_does_not_double_book_fallback(self):
+        self.run_loop([cl('eks-a', 3), cl('eks-b', 4)], [self.recovery('rec1'), self.recovery('rec2')], self.annotations)
+        self.assertEqual(self.nominated, {'rec1': 'eks-b'})
+
+
 class FencedAck(unittest.TestCase):
     """GPU-125: 끝까지 돈 루프만, fenced로 본 클러스터에만 그 루프 시작 시각을 남긴다"""
 
@@ -179,11 +244,16 @@ def rr(action="moveToSpare", phase="Executing", **st):
 
 
 class RelocationHolds(unittest.TestCase):
-    def holds(self, rrs, wls=()):
+    def holds(self, rrs, wls=(), clusters=None):
         co = mock.Mock()
         co.list_namespaced_custom_object.return_value = {"items": rrs}
         with mock.patch.object(D.kube, "kueue", return_value=co):
-            return D.relocation_holds(None, list(wls))
+            return D.relocation_holds(None, list(wls), clusters)
+
+    def test_submitted_job_releases_insufficient_source_hold(self):
+        self.assertEqual(self.holds([rr()], [wl('job-a-g0002', 4, 'T1')], [cl('worker1', 3)]), {})
+        self.assertEqual(self.holds([rr()], [wl('job-a-g0002', 4, 'T1')], [cl('worker1', 4)]),
+                         {'worker1': 'job-a-g0002'})
 
     def test_in_place_actions_hold_source(self):
         self.assertEqual(self.holds([rr()]), {"worker1": "job-a-g0002"})

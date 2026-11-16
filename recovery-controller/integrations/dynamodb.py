@@ -16,9 +16,12 @@ class RetryLimitReached(RecoveryBlocked):
 
 
 class Store:
-    def __init__(self, table, fencing_table, max_recovery_attempts=3):
+    def __init__(self, table, fencing_table, max_recovery_attempts=3, stop_timeout_seconds=900, clock=time.time):
         if type(max_recovery_attempts) is not int or max_recovery_attempts < 1:
             raise ValueError("max_recovery_attempts must be a positive integer")
+        if type(stop_timeout_seconds) is not int or stop_timeout_seconds < 1:
+            raise ValueError('stop_timeout_seconds must be a positive integer')
+        self.stop_timeout_seconds, self.clock = stop_timeout_seconds, clock
         self.max_recovery_attempts = max_recovery_attempts
         self.table = table  # Our durable event inbox and placement/template metadata.
         self.fencing = fencing_table  # Hyunsu's table: PK job_id, sole generation/owner authority.
@@ -154,7 +157,8 @@ class Store:
                     or int(current.get('recovery_to_gen',0)) != event['generation']+1):
                 raise RecoveryBlocked('recovery record generation mismatch')
             # Never revoke an owner already acquired by the new init on replay.
-            return dict(metadata, generation=current['generation'], retry_count=int(current.get('retry_count', 0)),
+            return dict(metadata, **{key:current[key] for key in ('stop_wait_started_at', 'stop_wait_deadline') if key in current},
+                        generation=current['generation'], retry_count=int(current.get('retry_count', 0)),
                         resume_step=int(current.get('recovery_resume_step', current.get('approved_step', 0))),
                         resume_gen=current.get('recovery_resume_gen', current.get('approved_gen')),
                         allow_restart_from_scratch=current.get('recovery_resume_gen') is None,
@@ -220,18 +224,29 @@ class Store:
             raise RecoveryBlocked('claimed recovery generation mismatch')
         if int(current.get('retry_count', 0)) >= self.max_recovery_attempts:
             raise RetryLimitReached(f'automatic recovery limit reached ({self.max_recovery_attempts})')
+        straggler = event.get('category') == 'straggler' or event.get('fault_type') == 'straggler'
+        count_condition = (' AND (attribute_not_exists(straggler_migration_count) '
+                           'OR straggler_migration_count = :zero)') if straggler else ''
+        count_update = (', straggler_migration_count = if_not_exists(straggler_migration_count, :zero) + :one'
+                        if straggler else '')
+        stop_started = int(self.clock())
+        stop_deadline = stop_started + self.stop_timeout_seconds
         self.fencing.update_item(Key={'job_id':event['job_id']},
             UpdateExpression=('SET generation = :new, recovery_phase = :phase, recovery_updated_at = :now, '
-                              'retry_count = if_not_exists(retry_count, :zero) + :one REMOVE #owner'),
+                              'retry_count = if_not_exists(retry_count, :zero) + :one, '
+                              'stop_wait_started_at = :stop_started, stop_wait_deadline = :stop_deadline'
+                              + count_update + ' REMOVE #owner'),
             ConditionExpression=('generation = :old AND recovery_id = :rid AND recovery_phase = :claimed '
                                  'AND recovery_from_gen = :old AND recovery_to_gen = :new '
                                  'AND (attribute_not_exists(retry_count) OR retry_count < :limit) '
-                                 'AND (attribute_not_exists(#owner) OR #owner = :source)'),
+                                 'AND (attribute_not_exists(#owner) OR #owner = :source)' + count_condition),
             ExpressionAttributeNames={'#owner':'owner'},
             ExpressionAttributeValues={':old':old, ':new':old+1, ':rid':event['event_id'],
                 ':claimed':'CLAIMED', ':phase':'GENERATION_ADVANCED', ':source':event['cluster'],
-                ':now':datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), ':zero':0, ':one':1, ':limit':self.max_recovery_attempts})
+                ':now':datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), ':zero':0, ':one':1, ':limit':self.max_recovery_attempts,
+                ':stop_started':stop_started, ':stop_deadline':stop_deadline})
         return dict(metadata, generation=old+1, retry_count=int(current.get('retry_count', 0))+1,
+                    stop_wait_started_at=stop_started, stop_wait_deadline=stop_deadline,
                     resume_step=int(current.get('recovery_resume_step', 0)),
                     resume_gen=current.get('recovery_resume_gen'),
                     allow_restart_from_scratch=current.get('recovery_resume_gen') is None,

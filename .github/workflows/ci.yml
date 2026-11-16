@@ -6,8 +6,13 @@
 #   ghcr.io/devoops-team/relocator             scheduling/relocator/            scheduling/{common,relocator}
 #
 #   PR(→ develop, → main), develop push : 세 이미지 모두 테스트 + 이미지 빌드 (push 안 함)
-#   main push(머지)                     : 같은 검사 → 바뀐 이미지만 push {main, sha-<7자리>}
-#                                         → Variable DEPLOY_IMAGES에 든 이미지만 Gitops overlay digest 갱신 (봇)
+#   main push(머지)                     : 같은 검사 → 릴리스 버전 계산 → 바뀐 이미지만 push {X.Y.Z, X.Y, main, sha-<7자리>}
+#                                         → 버전 봇이 태그 vX.Y.Z · Release 생성
+#                                         → Variable DEPLOY_IMAGES에 든 이미지만 Gitops overlay에 X.Y.Z@digest 반영 (배포 봇)
+#
+# 버전은 레포 단위 하나 (GPU-136). develop → main PR 본문의 '## 릴리스 노트'에서 버전 · description이 나오고
+#   (형식은 .github/pull_request_template.md), 이번 머지에서 바뀐 이미지에만 그 버전 태그가 붙는다.
+#   main 머지 커밋이 PR 머지가 아니거나 릴리스 노트가 없으면 push · 배포를 하지 않는다.
 #
 # 바뀐 이미지 판단: 자기 폴더 · scheduling/common(디스패처 · 재배치) · 이 파일.
 #   안 바뀐 이미지를 다시 push하면 digest가 달라져 봇이 불필요한 재배포를 하므로 main에서도 바뀐 것만 push한다.
@@ -33,6 +38,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # 버전 계산 (main push에서만 release=true). 로직은 Gitops 재사용 워크플로.
+  plan:
+    name: version
+    uses: DevOops-Team/Gitops/.github/workflows/release-plan.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+
   # main push에서 push · 배포할 이미지 고르기. PR · develop은 결과와 관계없이 전부 빌드만 한다.
   changes:
     name: changes
@@ -69,7 +82,7 @@ jobs:
 
   build:
     name: ${{ matrix.name }} · test · image
-    needs: changes
+    needs: [changes, plan]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -99,7 +112,7 @@ jobs:
               python -m unittest discover -s scheduling/relocator -p 'test_*.py' -v
     env:
       IMAGE: ghcr.io/devoops-team/${{ matrix.name }}     # GHCR 이름은 소문자만
-      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(format(' {0} ', needs.changes.outputs.images), format(' {0} ', matrix.name)) }}
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && contains(format(' {0} ', needs.changes.outputs.images), format(' {0} ', matrix.name)) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5.6.0
@@ -123,10 +136,15 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
+            type=semver,pattern={{version}},value=${{ needs.plan.outputs.version }},enable=${{ env.PUSH }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.version }},enable=${{ env.PUSH }}
             type=raw,value=main
             type=sha,prefix=sha-,format=short
           labels: |
             org.opencontainers.image.title=${{ matrix.name }}
+            ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
+          annotations: |
+            ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8   # v6.19.2
         with:
@@ -136,6 +154,7 @@ jobs:
           push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
@@ -158,8 +177,8 @@ jobs:
   # push한 이미지 중 DEPLOY_IMAGES에 든 것만 배포 대상으로 묶는다.
   deploy-targets:
     name: deploy targets
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, plan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
@@ -185,10 +204,25 @@ jobs:
           echo "### 배포 대상 (DEPLOY_IMAGES=${DEPLOY_IMAGES:-비어 있음})" >> "$GITHUB_STEP_SUMMARY"
           jq -r '.[] | "- \(.name) → \(.overlay)"' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
 
+  # GPU-136: 이미지 push가 끝난 뒤 버전 봇이 태그 vX.Y.Z · Release를 만든다 (바뀐 이미지가 없어도 레포 버전은 올라감).
+  #   Variable VERSION_APP_ID, 비밀키는 Environment release(main만)의 Secret VERSION_APP_PRIVATE_KEY.
+  release:
+    name: release
+    needs: [plan, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
+    uses: DevOops-Team/Gitops/.github/workflows/release-publish.yml@main
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      notes: ${{ needs.plan.outputs.notes }}
+      app-id: ${{ vars.VERSION_APP_ID }}
+    secrets:
+      VERSION_APP_PRIVATE_KEY: ${{ secrets.VERSION_APP_PRIVATE_KEY }}   # 이름으로 넘김 — 값은 Environment release(main만)
+
   # 로직은 Gitops 재사용 워크플로 한 곳 (Frontend · Backend와 같음). 봇 push 충돌을 피하려고 하나씩.
+  #   비밀키는 Environment gitops-deploy(main만)의 Secret DEPLOY_APP_PRIVATE_KEY (GPU-136).
   deploy:
     name: gitops deploy (${{ matrix.name }})
-    needs: deploy-targets
+    needs: [deploy-targets, plan, release]
     if: needs.deploy-targets.outputs.count > 0
     strategy:
       max-parallel: 1
@@ -199,8 +233,9 @@ jobs:
     with:
       image: ${{ matrix.image }}
       digest: ${{ matrix.digest }}
+      version: ${{ needs.plan.outputs.version }}
       overlay: ${{ matrix.overlay }}
       app-id: ${{ vars.DEPLOY_APP_ID }}
       gitops-repo: ${{ vars.GITOPS_REPO }}
     secrets:
-      app-private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+      DEPLOY_APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}     # 이름으로 넘김 — 값은 Environment gitops-deploy(main만)

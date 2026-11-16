@@ -4,7 +4,7 @@ import threading
 import time
 from integrations.dynamodb import Store
 from integrations.kafka import accept_message, create_clients
-from integrations.relocation import RelocationClient
+from integrations.relocation import DispatcherCapacity, RelocationClient
 from recovery.workflow import Workflow
 from runtime.watchdog import Watchdog
 from recovery.retry_policy import Runner
@@ -18,10 +18,18 @@ def run(config, stop, health):
                                     retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))
     table = dynamodb.Table(config['recovery_table'])
     store = Store(table, dynamodb.Table(config['fencing_table']),
-                  max_recovery_attempts=config.get('retry_policy', {}).get('max_recovery_attempts', 3))
+                  max_recovery_attempts=config.get('retry_policy', {}).get('max_recovery_attempts', 3),
+                  stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900))
+    from integrations.fencing_input import FencingProgressInput
+    from recovery.evidence import EvidenceWriter
+    evidence_input = FencingProgressInput(store, EvidenceWriter(store, config.get('evidence_policy')),
+                                         config.get('fencing_progress_input'))
     execute = config['execution_enabled']
     executor = RelocationClient(config.get('job_namespace', 'training')) if execute else None
-    workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'))
+    capacity = (DispatcherCapacity(config.get('dispatcher_capacity_url'))
+                if execute and config.get('straggler_auto_migration_enabled', False) else None)
+    workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'),
+                        straggler_capacity=capacity)
     watchdog_config = config.get('watchdog', {})
     guard = Watchdog(store, watchdog_config['url'],
                      watchdog_config.get('timeout_seconds', 300),
@@ -39,6 +47,8 @@ def run(config, stop, health):
                 for record in store.records():
                     if stop.is_set(): break
                     try:
+                        if execute:
+                            record = evidence_input.reconcile(record, int(time.time()))
                         record = runner.operation(record, int(time.time()), monitoring_hold)
                         runner.deliver(record, int(time.time()))
                     except Exception as exc:

@@ -3,8 +3,8 @@ import hashlib
 import json
 import re
 import time
-from recovery.evidence import assess, policy_config
-from recovery.policy import plan
+from recovery.evidence import assess, policy_config, whole
+from recovery.policy import is_straggler, plan
 from recovery.init_failure import decision as init_decision
 from integrations.dynamodb import RecoveryBlocked, RetryLimitReached
 
@@ -30,7 +30,8 @@ def validate_event(event):
 
 
 class Workflow:
-    def __init__(self, store, executor, execute=False, evidence_policy=None, clock=time.time):
+    def __init__(self, store, executor, execute=False, evidence_policy=None, clock=time.time, straggler_capacity=None):
+        self.straggler_capacity = straggler_capacity
         self.store, self.executor, self.execute = store, executor, execute
         self.evidence_policy, self.clock = policy_config(evidence_policy), clock
 
@@ -38,6 +39,69 @@ class Workflow:
         validate_event(event)
         canonical = json.dumps(event, sort_keys=True, separators=(',', ':'))
         self.store.accept(event, hashlib.sha256(canonical.encode()).hexdigest())
+
+    def held_relocation_progress(self, record):
+        """Read relocator-owned fencing progress; never create a request or claim here.
+
+        OLD_RUN_STOPPED is the trusted relocator contract, not a user-supplied
+        RR status/annotation. Relocator authenticates/validates the stop evidence.
+        """
+        if not self.execute or record.get('state') != 'HOLD':
+            return None
+        stop_stages = ('REQUESTED', 'GENERATION_ADVANCED')
+        expected_reason = 'stage deadline exceeded: ' + str(record.get('stopped_stage'))
+        if (record.get('reason') != expected_reason or record.get('stopped_stage') not in stop_stages
+                or not record.get('relocation_request') or record.get('budget_stage') not in stop_stages):
+            return None
+        event = record['event']
+        if not event.get('job_id') or type(event.get('generation')) is not int:
+            return None
+        generation = event['generation'] + 1
+        if record.get('generation') != generation:
+            return None
+        action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
+        if action not in RELOCATION_ACTIONS:
+            return None
+        fence = self.store.fencing_record(event['job_id'])
+        if (not all(whole(fence.get(key)) for key in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
+                or fence.get('recovery_id') != event['event_id']
+                or fence.get('generation') != generation
+                or fence.get('recovery_from_gen') != event['generation']
+                or fence.get('recovery_to_gen') != generation):
+            return None
+        phase = fence.get('recovery_phase')
+        if phase not in ('OLD_RUN_STOPPED', 'NEW_RUN_SUBMITTED', 'RESUMING'):
+            return None
+        if phase != 'OLD_RUN_STOPPED' and not fence.get('new_jobset_uid'):
+            return None
+        return dict(phase=phase, action=action, generation=generation)
+
+    def straggler_hold_reason(self, event):
+        if not event.get('job_id') or not event.get('generation') or not event.get('node'):
+            return 'straggler_identity_unresolved'
+        fence = self.store.fencing_record(event['job_id'])
+        if fence.get('recovery_id') == event['event_id']:
+            return None
+        if self.straggler_capacity is None:
+            return 'straggler_auto_migration_disabled'
+        if fence.get('straggler_migration_count', 0) >= 1:
+            return 'straggler_migration_limit'
+        facts = event.get('straggler_evidence')
+        if (event.get('collector_healthy') is not True
+                or event.get('suggested_action') != 'evacuate_preemptive'
+                or not isinstance(facts, dict)
+                or type(facts.get('duration_seconds')) is not int
+                or facts['duration_seconds'] < 600
+                or facts.get('cause_node') != event['node']
+                or type(facts.get('estimated_gain_seconds')) is not int
+                or facts['estimated_gain_seconds'] <= 0):
+            return 'straggler_evidence_incomplete'
+        job = self.store.placement(event['job_id'])
+        try:
+            available = self.straggler_capacity.check(event, int(job.get('gpu_count', 0)))
+        except (OSError, ValueError, TypeError):
+            return 'straggler_capacity_unknown'
+        return None if available else 'straggler_capacity_insufficient'
 
     def tick(self, record, monitoring_hold=False):
         e = record['event']
@@ -81,6 +145,13 @@ class Workflow:
             if e['exit_code'] not in (4, 7):
                 terminal = 'REJECTED' if action == 'NEEDS_CONFIG_FIX' else 'HOLD'
                 return self.store.save(rid, state=terminal, action=action, reason=init['reason'])
+        if is_straggler(e):
+            if monitoring_hold and state == 'RECEIVED':
+                return record
+            reason = self.straggler_hold_reason(e)
+            if reason:
+                return self.store.save(rid, state='HOLD', action='HOLD', reason=reason)
+            action = 'QUARANTINE_AND_RETRY'
         if action in ('HOLD', 'NEEDS_CONFIG_FIX', 'NONE'):
             terminal = {'HOLD':'HOLD', 'NEEDS_CONFIG_FIX':'REJECTED', 'NONE':'IGNORED'}[action]
             return self.store.save(rid, state=terminal, action=action, reason=action)
@@ -98,7 +169,8 @@ class Workflow:
                                    retry_count=self.store.fencing_record(e['job_id']).get('retry_count'))
         if job is None:
             return self.store.save(rid, state='STALE')
-        record = self.store.save(rid, retry_count=job.get('retry_count'))
+        record = self.store.save(rid, retry_count=job.get('retry_count'),
+                                 **{key:job[key] for key in ('stop_wait_started_at', 'stop_wait_deadline') if key in job})
         if job.get('checkpoint_warning'):
             record = self.store.save(rid, checkpoint_warning=job['checkpoint_warning'])
         if job.get('claim_pending'):
@@ -123,15 +195,17 @@ class Workflow:
         target = fencing.get('owner')
         if target not in ('eks-a', 'eks-b', 'eks-c'):
             return record
-        same_cluster = action in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY')
-        if (target == e['cluster']) != same_cluster:
+        # ADR-38: dispatcher may place node recovery in another healthy cluster.
+        # Cluster evacuation must still leave the failed source cluster.
+        if action == 'FENCE_AND_EVACUATE' and target == e['cluster']:
             return self.store.save(rid, state='HOLD', action='HOLD', reason='new owner violates relocation action')
         if phase == 'NEW_RUN_SUBMITTED':
             self.store.resuming(e, generation)
         # Completion uses training progress independent of checkpoint publication.
         placement = self.store.placement(e['job_id'])
         verdict, reason = assess(placement, fencing, job, rid, generation, target, action,
-                                 e.get('node'), int(self.clock()), self.evidence_policy)
+                                 e.get('node') if target == e['cluster'] else None,
+                                 int(self.clock()), self.evidence_policy)
         if verdict == 'failed':
             return self.store.save(rid, state='HOLD', stage='RESUMING', stopped_stage='RESUMING',
                                    action='HOLD', reason=reason)

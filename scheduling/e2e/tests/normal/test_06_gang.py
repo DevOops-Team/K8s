@@ -43,6 +43,6 @@ def test_no_partial_placement(kube, check, info):
     precondition(len(placed) < len(SIZES), "전부 들어감 -> 자리가 모자란 상황이 안 만들어짐")
     precondition(running > 0, "아무것도 안 들어감")
     check.true(f"{WATCH}s 동안 반쪽 배치 0건 (10s마다 확인)", not seen, ", ".join(seen))
-    check.true("쓰는 GPU가 학습 몫 12 이하", running <= TRAINING_GPUS, str(running))
+    check.true(f"쓰는 GPU가 학습 몫 {TRAINING_GPUS} 이하", running <= TRAINING_GPUS, str(running))
     want = sum(g for i, g in enumerate(SIZES, 1) if any(w.id == f"mix-{i}" for w in placed))
     check.eq("들어간 잡의 GPU 합 = Running Pod 수", running, want)

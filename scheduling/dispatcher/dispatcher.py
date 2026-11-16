@@ -20,7 +20,11 @@
   - fenced ACK: 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에 devoops/fenced-ack=<루프 시작 시각>.
     라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
 """
+import json
 import os
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import sys
 from pathlib import Path
 
@@ -33,7 +37,7 @@ import keys as K
 import kube
 import leader
 import recovery_render as R
-from placement import Cluster, choose, reserve
+from placement import Cluster, choose, reserve, eligible
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
@@ -99,6 +103,10 @@ def fill_capacity(c: Cluster, api):
         else:
             c.quota_total += nominal
             c.quota_free += nominal - reserved
+    fill_node_capacity(c, api)
+
+
+def fill_node_capacity(c, api, excluded_node=None, released_job=None):
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
     #    예비 노드(devoops/spare taint)는 자리 표시 Pod가 있든 없든 전부 복구 잡 몫 (학습 잡 Pod는 taint로 못 감)
     #    일반 노드의 자리 표시 Pod 자리도 복구 잡 몫 (예비 taint 도입 전 구성 호환)
@@ -107,6 +115,11 @@ def fill_capacity(c: Cluster, api):
     pods = core.list_pod_for_all_namespaces(
         field_selector="status.phase!=Succeeded,status.phase!=Failed", _request_timeout=kube.TIMEOUT).items
     for p in pods:
+        if released_job and getattr(p, 'metadata', None):
+            namespace, jobset = released_job
+            if (p.metadata.namespace == namespace
+                    and (p.metadata.labels or {}).get('jobset.sigs.k8s.io/jobset-name') == jobset):
+                continue
         if not p.spec.node_name:
             continue
         g = sum(int(((ct.resources.requests or {}) if ct.resources else {}).get(K.GPU, 0)) for ct in p.spec.containers)
@@ -116,14 +129,16 @@ def fill_capacity(c: Cluster, api):
             used[p.spec.node_name] = used.get(p.spec.node_name, 0) + g
     for n in core.list_node(label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items:
         ready = any(x.type == "Ready" and x.status == "True" for x in n.status.conditions or [])
-        if n.spec.unschedulable or not ready:
+        taints = n.spec.taints or []
+        if (n.metadata.name == excluded_node or n.spec.unschedulable or not ready
+                or any(t.key == K.TAINT_FAULTY for t in taints)):
             continue
         alloc = int((n.status.allocatable or {}).get(K.GPU, 0))
         if any(t.key == K.TAINT_SPARE for t in (n.spec.taints or [])):
             c.spare_free += max(alloc - used.get(n.metadata.name, 0), 0)
             continue
         free = alloc - used.get(n.metadata.name, 0) - held.get(n.metadata.name, 0)
-        c.node_total += max(alloc - held.get(n.metadata.name, 0), 0)
+        c.node_total = (c.node_total or 0) + max(alloc - held.get(n.metadata.name, 0), 0)
         c.node_free += max(free, 0)
         c.spare_free += held.get(n.metadata.name, 0)
 
@@ -144,7 +159,7 @@ def csv(s):
     return {x.strip() for x in (s or "").split(",") if x.strip()}
 
 
-def relocation_holds(mgr, all_wls) -> dict:
+def relocation_holds(mgr, all_wls, clusters=None) -> dict:
     """진행 중인 재배치가 지켜야 할 자리: {원래 클러스터: 재제출 JobSet 이름}.
     요청 status는 재배치 실행기만 쓴다 (admission-policy.yaml). 조회가 안 되면 지키기 없이 계속한다"""
     try:
@@ -155,6 +170,8 @@ def relocation_holds(mgr, all_wls) -> dict:
     placed = {kube.workload_owner(w)[1] for w in all_wls
               if (w.get("status") or {}).get("clusterName") or (w.get("status") or {}).get("nominatedClusterNames")}
     out = {}
+    by_name = {c.name: c for c in clusters or []}
+    new_sizes = {kube.workload_owner(w)[1]: sum(kube.workload_pods(w)) for w in all_wls}
     for rr in rrs:
         st, spec = rr.get("status") or {}, rr.get("spec") or {}
         if st.get("phase") in RR_FINAL or spec.get("action") not in IN_PLACE:
@@ -164,6 +181,9 @@ def relocation_holds(mgr, all_wls) -> dict:
         if not (src and job_id and gen and since_at) or kube.since(since_at) > RELOCATION_HOLD_SECONDS:
             continue
         new = R.jobset_name(job_id, int(gen))
+        # 제출본이 생긴 뒤에는 부족한 원래 워커를 막지 않는다. 옛 실행 종료 전의 자리 보호는 유지한다.
+        if new in new_sizes and src in by_name and by_name[src].free_for(True) < new_sizes[new]:
+            continue
         if new not in placed:   # 새 잡이 지명·입장했으면 그 자리는 이미 계산에 들어가 있음
             out[src] = new
     return out
@@ -222,11 +242,14 @@ def reconcile(mgr, workers):
 
     # 찜한 워커 -> (찜한 잡이 복구 잡인지, 그 잡의 JobSet 이름). 앞 순서 잡의 찜만 뒤 잡을 막는다
     # 진행 중인 재배치의 원래 클러스터는 재제출 잡(복구) 몫으로 미리 찜해 둔다
-    reserved = {c: (True, new) for c, new in relocation_holds(mgr, all_wls).items() if c in by_name}
+    reserved = {c: (True, new) for c, new in relocation_holds(mgr, all_wls, clusters).items() if c in by_name}
+    training_reservations = {(w['metadata'].get('annotations') or {}).get(K.ANN_RESERVED): kube.workload_owner(w)[1]
+                             for w in wls if not is_recovery(w)
+                             and (w['metadata'].get('annotations') or {}).get(K.ANN_RESERVED)}
     for wl in wls:
         name = wl["metadata"]["name"]
         try:
-            dispatch_one(mgr, wl, clusters, by_name, reserved)
+            dispatch_one(mgr, wl, clusters, by_name, reserved, training_reservations)
         except Exception as e:  # noqa: BLE001  이 잡만 건너뛰고 뒤 잡은 계속 (한 잡이 계속 실패해도 전체가 안 멈춤)
             if isinstance(e, client.ApiException) and e.status == 404:
                 log.info("%s: 보는 사이 사라짐 (404), 건너뜀", name)
@@ -252,7 +275,8 @@ def quota_wait(wl) -> int:
     return int(kube.since(c["lastTransitionTime"])) if c.get("lastTransitionTime") else 0
 
 
-def dispatch_one(mgr, wl, clusters, by_name, reserved):
+def dispatch_one(mgr, wl, clusters, by_name, reserved, training_reservations=None):
+    training_reservations = training_reservations or {}
     name = wl["metadata"]["name"]
     ann = kube.owner_annotations(mgr, wl)   # 조회 실패 = 예외 -> 이 잡은 이번 루프에서 건너뜀 (exclude 없이 보내지 않게)
     if ann.get(K.ANN_MANUAL) == "true":
@@ -279,10 +303,23 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved):
     blocked = {c for c, (by_recovery, holder) in reserved.items() if (by_recovery or not rec) and holder != owner}
     exclude = csv(ann.get(K.ANN_EXCLUDE)) | blocked
     opts = dict(recovery=rec, target=ann.get(K.ANN_TARGET))
+    preferred = ann.get(K.ANN_PREFERRED) if rec and ann.get(K.ANN_RECOVERY_ID) and not opts['target'] else None
+
+    def pick_from(avoided):
+        if preferred:
+            source = choose(gpus, clusters, recovery=True, target=preferred, exclude=avoided)
+            if source:
+                return source
+            # 같은 복구의 원래 자리 보호를 제외하고 학습 찜이 없는 곳부터 본다.
+            training_holds = set(training_reservations) | {c for c, (by_recovery, _) in reserved.items() if not by_recovery}
+            free = choose(gpus, clusters, recovery=True, exclude=avoided | training_holds)
+            if free:
+                return free
+        return choose(gpus, clusters, exclude=avoided, **opts)
     # 못 들어갔던 곳은 빼고 고른다. 그래도 없으면 지금 곳만 빼고 예전 곳을 다시 시도
-    pick = choose(gpus, clusters, exclude=exclude | tried, **opts)
+    pick = pick_from(exclude | tried)
     if pick is None and tried:
-        pick = choose(gpus, clusters, exclude=exclude | set(current), **opts)
+        pick = pick_from(exclude | set(current))
     if pick is None or current == [pick]:
         if current:   # 다시 지명할 곳이 없음 -> 지금 지명 유지, 시각만 갱신 (매 루프 반복 방지)
             log.info("%s: 다른 워커도 자리 없음 -> %s 지명 유지", name, current)
@@ -290,7 +327,11 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved):
             return
         # 들어갈 워커 없음 -> 워커 하나를 찜해서 뒤 순서 학습 잡이 그 빈 칸을 메우지 못하게
         pinned = meta_ann.get(K.ANN_RESERVED)
-        hold = reserve(gpus, clusters, exclude=exclude, pinned=pinned, **opts)
+        if preferred:
+            source = by_name.get(preferred)
+            hold = preferred if source and eligible(source, exclude=exclude) else None
+        else:
+            hold = reserve(gpus, clusters, exclude=exclude, pinned=pinned, **opts)
         if hold:
             reserved[hold] = (rec, owner)
         if hold != pinned:
@@ -304,13 +345,90 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved):
                 log.warning("%s (GPU %d): 찜할 워커도 없음 (펜싱·끊김·exclude·다른 잡의 찜), 대기", name, gpus)
         return
     patch_nomination(mgr, wl, pick, tried)
+    for cluster, (_, holder) in list(reserved.items()):
+        if holder == owner:
+            del reserved[cluster]
+    if preferred and pick != preferred:
+        log.info("%s: 원래 클러스터 %s 부족 -> %s로 복구 배치 (ADR-38)", name, preferred, pick)
+    displaced = training_reservations.get(pick)
+    if rec and pick in reserved and not reserved[pick][0]:
+        displaced = reserved.pop(pick)[1]
+    if rec and displaced:
+        log.warning("%s: 복구 잡 %s가 학습 잡 %s의 %s 찜 사용", name, owner, displaced, pick)
     c = by_name[pick]
     c.place(gpus, rec)
     log.info("%s (GPU %d%s) -> %s  [남은 쿼터 학습 %d / 복구 %d, 쿼터 뒤 %ds]", name, gpus, ", 복구" if rec else "",
              pick, c.quota_free, c.recovery_free, quota_wait(wl))
 
 
+def recovery_capacity(mgr, workers, payload):
+    job_id, generation = payload.get('job_id'), payload.get('generation')
+    cluster, node = payload.get('cluster'), payload.get('node')
+    count = payload.get('gpu_count')
+    if (not isinstance(job_id, str) or len(job_id) > 230
+            or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', job_id)
+            or type(generation) is not int or not 1 <= generation <= 999999999
+            or not isinstance(cluster, str) or not isinstance(node, str) or not node
+            or type(count) is not int or not 1 <= count <= 4):
+        raise ValueError('invalid recovery capacity request')
+    namespace = os.getenv('RECOVERY_JOB_NAMESPACE', 'training')
+    jobset = f'job-{job_id}-g{generation:04d}'
+    workload = kube.workload_for_jobset(mgr, namespace, jobset)
+    if ((workload or {}).get('status') or {}).get('clusterName') != cluster:
+        raise ValueError('current workload placement could not be verified')
+    worker = workers.get().get(cluster)
+    if worker is None:
+        raise RuntimeError('worker unavailable')
+    mkc = kube.kueue(mgr).get_cluster_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, 'multikueueclusters', cluster, _request_timeout=kube.TIMEOUT)
+    if not kube.is_true(mkc, 'Active') or (mkc['metadata'].get('labels') or {}).get(K.LABEL_FENCED) == 'true':
+        raise RuntimeError('worker unavailable')
+    capacity = Cluster(cluster)
+    fill_node_capacity(capacity, worker, excluded_node=node, released_job=(namespace, jobset))
+    return {'available': capacity.spare_free > 0 and capacity.nodes_for(True) >= count,
+            'spare_free': capacity.spare_free, 'normal_free_after_stop': capacity.node_free}
+
+
+def start_capacity_server(port):
+    # Separate API clients from the scheduling loop, which can update nominations.
+    mgr = kube.manager_client()
+    workers = kube.Workers(mgr)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != '/v1/recovery-capacity':
+                self.send_error(404)
+                return
+            self.connection.settimeout(5)
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 4096:
+                    raise ValueError('invalid request length')
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('invalid request body')
+                body = json.dumps(recovery_capacity(mgr, workers, payload)).encode()
+            except ValueError:
+                self.send_error(400)
+                return
+            except Exception:
+                log.exception('recovery capacity unavailable')
+                self.send_error(503)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 def main():
+    port = int(os.getenv('DISPATCHER_CAPACITY_PORT', '0'))
+    if port:
+        start_capacity_server(port)
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)

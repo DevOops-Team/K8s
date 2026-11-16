@@ -17,6 +17,7 @@ RR_GROUP, RR_VERSION, RR_PLURAL = "scheduling.devoops.site", "v1alpha1", "reloca
 
 # --- 잡(JobSet)에 붙이는 어노테이션: 디스패처가 읽음
 ANN_TARGET = "devoops/target-cluster"        # 이 클러스터로만
+ANN_PREFERRED = "devoops/recovery-source-cluster"  # 복구 원래 클러스터 우선, 부족하면 다른 곳 (ADR-38)
 ANN_EXCLUDE = "devoops/exclude-clusters"     # 쉼표 구분, 이 클러스터들은 빼고
 ANN_MANUAL = "devoops/manual-dispatch"       # "true"면 디스패처가 손대지 않음 (실습용 수동 지명)
 

@@ -152,14 +152,14 @@ class Names(unittest.TestCase):
 class PlacementHints(unittest.TestCase):
     hints = staticmethod(R.placement_hints)
 
-    def test_restart_in_place_pins_source(self):
-        self.assertEqual(self.hints("restartInPlace", "worker2", None, None), ("worker2", []))
+    def test_restart_in_place_does_not_hard_pin_source(self):
+        self.assertEqual(self.hints("restartInPlace", "worker2", None, None), (None, []))
 
-    def test_move_to_spare_pins_source(self):
-        self.assertEqual(self.hints("moveToSpare", "worker2", "worker3", None), ("worker2", ["worker3"]))
+    def test_move_to_spare_does_not_hard_pin_source(self):
+        self.assertEqual(self.hints("moveToSpare", "worker2", "worker3", None), (None, ["worker3"]))
 
-    def test_pinned_source_never_excluded(self):
-        self.assertEqual(self.hints("moveToSpare", "worker2", "worker2", None), ("worker2", []))
+    def test_explicit_exclusions_are_preserved(self):
+        self.assertEqual(self.hints("moveToSpare", "worker2", "worker2", None), (None, ["worker2"]))
 
     def test_move_to_other_cluster_leaves_source(self):   # 예비 소진·SDC: 펜싱 없이 원래 클러스터만 뺌
         self.assertEqual(self.hints("moveToOtherCluster", "worker2", None, None), (None, ["worker2"]))

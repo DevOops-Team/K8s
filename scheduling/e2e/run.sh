@@ -9,8 +9,12 @@
 # 종료 코드: FAIL 또는 INVALID가 있으면 1, 준비 안 됨 3
 set -uo pipefail
 cd "$(dirname "$0")"
-if [ ! -x .venv/bin/pytest ]; then
-  python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt || { echo "venv 준비 실패"; exit 3; }
+if [ ! -x .venv/bin/python ]; then
+  python3 -m venv .venv || { echo "venv 준비 실패"; exit 3; }
+fi
+if [ ! -f .venv/.requirements-installed ] || [ requirements.txt -nt .venv/.requirements-installed ]; then
+  .venv/bin/python -m pip install -q -r requirements.txt || { echo "테스트 의존성 설치 실패"; exit 3; }
+  touch .venv/.requirements-installed
 fi
 export E2E_LOG="$PWD/logs/$(date +%m%d-%H%M%S)"
 mkdir -p "$E2E_LOG"

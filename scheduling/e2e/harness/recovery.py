@@ -15,7 +15,7 @@ from kubernetes import client
 
 from . import cluster as C
 from .cluster import jsname
-from .env import NS, REQUEST_TIMEOUT, ROOT, STORE_NS, WORKER_CONTEXTS, WORKERS, K
+from .env import NS, REQUEST_TIMEOUT, ROOT, STORE_NS, WORKER_CONTEXTS, WORKERS, PROFILE, K
 from .verdict import Invalid, precondition
 
 log = logging.getLogger("e2e")
@@ -306,7 +306,7 @@ class DoubleRunWatch(threading.Thread):
 
 
 # ---------------------------------------------------------------- 재제출 공통 판정 (R7·I6, 템플릿 6절)
-def check_resubmission(check, kube, job_id, new, rr_name, recovery_id, *, target=None, exclude=None):
+def check_resubmission(check, kube, job_id, new, rr_name, recovery_id, *, target=None, exclude=None, preferred=None):
     """재제출본과 펜싱 기록이 정본 4.1·5절대로인지. target/exclude는 기대하는 디스패처 힌트"""
     st = rr_status(kube, rr_name)
     js = jobset(kube, new)
@@ -320,6 +320,7 @@ def check_resubmission(check, kube, job_id, new, rr_name, recovery_id, *, target
     check.eq("재제출본 recovery-id", ann.get(K.ANN_RECOVERY_ID), recovery_id)
     check.true("재제출본 예비 노드 toleration", tolerates_spare(js))
     check.eq("재제출본 target-cluster", ann.get(K.ANN_TARGET), target)
+    check.eq("재제출본 원래 클러스터 선호", ann.get(K.ANN_PREFERRED), preferred)
     if exclude is not None:
         check.true(f"재제출본 exclude에 {exclude}", exclude in (ann.get(K.ANN_EXCLUDE) or "").split(","),
                    ann.get(K.ANN_EXCLUDE, ""))
@@ -351,11 +352,11 @@ def under_load(kube, wait):
     """Heavy 8(train-a w1, train-b w2) + Light 4(lite-1·2 w3)로 학습 12장을 채우고 Heavy 대기 잡 wait-c(4장)를 둔 뒤
     train-a 노드 하나 고장 -> moveToSpare. 반환: 복구 잡이 wait초 안에 쿼터·입장했는지와 그 사이 기록."""
     from .jobs import submit
-    placeholder(kube, "worker1")
-    for jid, gpus, q, w in (("train-a", 4, "queue-heavy", "worker1"), ("train-b", 4, "queue-heavy", "worker2"),
-                            ("lite-1", 2, "queue-light", "worker3"), ("lite-2", 2, "queue-light", "worker3")):
+    worker_names = dict(zip(PROFILE.workers, WORKERS))
+    jobs = [(jid, gpus, q, worker_names[w]) for jid, gpus, q, w in PROFILE.load_jobs()]
+    for jid, gpus, q, w in jobs:
         submit(kube, jid, gpus, q, "30m", {K.ANN_TARGET: w})
-    for jid, w in (("train-a", "worker1"), ("train-b", "worker2"), ("lite-1", "worker3"), ("lite-2", "worker3")):
+    for jid, _, _, w in jobs:
         precondition(wait_placed(kube, jsname(jid), 150) == w, f"{jid}가 {w}에 안 들어감")
     precondition(wait_running(kube, "worker1", "job-train-a-g0001", 4) is not None, "train-a Pod 4개가 Running 안 됨")
     submit(kube, "wait-c", 4, "queue-heavy", "30m")

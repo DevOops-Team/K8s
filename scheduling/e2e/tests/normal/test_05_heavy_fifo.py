@@ -3,6 +3,7 @@ import time
 import pytest
 
 from harness import cluster as C
+from harness.env import TRAINING_GPUS
 from harness.jobs import submit_auto
 from harness.situations import fill_light
 
@@ -11,7 +12,7 @@ pytestmark = [pytest.mark.normal, pytest.mark.doc("배분(1)")]
 
 def test_heavy_strict_fifo(kube, check):
     """Heavy StrictFIFO: 3장만 남은 상태에서 4장 잡 h4 뒤의 3장 잡 h3은 들어갈 수 있어도 대기"""
-    fill_light(kube, 9)
+    fill_light(kube, TRAINING_GPUS - 3)
     submit_auto(kube, "h4", 4, "20m")
     time.sleep(3)
     submit_auto(kube, "h3", 3, "20m")

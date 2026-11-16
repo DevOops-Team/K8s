@@ -1,4 +1,6 @@
 {
+  "straggler_auto_migration_enabled": false,
+  "dispatcher_capacity_url": "http://dispatcher-capacity.platform.svc:8081/v1/recovery-capacity",
   "schema_version": 1,
   "mode": "observe",
   "event_source": "kafka",
@@ -39,5 +41,10 @@
     "progress_producers": [
       "training"
     ]
+  },
+  "fencing_progress_input": {
+    "enabled": false,
+    "producer_contract_confirmed": false,
+    "attribute": "recovery_training_evidence"
   }
 }

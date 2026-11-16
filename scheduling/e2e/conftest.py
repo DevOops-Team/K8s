@@ -14,7 +14,7 @@ import pytest
 
 from harness import cluster as C
 from harness.controllers import ALL, Controllers
-from harness.env import WORKERS, Kube, K
+from harness.env import WORKERS, MGR_CONTEXT, WORKER_CONTEXTS, PROFILE, Kube, K
 from harness.health import Watchdog
 from harness.reset import reset
 from harness.verdict import Checks, Inconclusive, Invalid
@@ -36,6 +36,8 @@ def logdir():
 
 @pytest.fixture(scope="session")
 def kube():
+    if not MGR_CONTEXT.startswith('kind-') or any(not c.startswith('kind-') for c in WORKER_CONTEXTS.values()):
+        pytest.exit('이 하네스는 잡·노드를 초기화하는 kind/KWOK 전용 테스트입니다.', 3)
     k = Kube()
     _preflight(k)
     return k
@@ -152,7 +154,9 @@ def pytest_sessionfinish(session):
     if not d or not RESULTS:
         return
     d = pathlib.Path(d)
-    meta = {"finished": datetime.now().isoformat(timespec="seconds")}
+    meta = {"finished": datetime.now().isoformat(timespec="seconds"),
+            "workers": WORKERS, "heavy_quota": PROFILE.heavy, "light_quota": PROFILE.light,
+            "recovery_quota": PROFILE.recovery}
     (d / "results.json").write_text(json.dumps({"meta": meta, "results": RESULTS}, ensure_ascii=False, indent=2))
     lines = [f"# e2e 결과 {meta['finished']}", "",
              "| 판정 | 케이스 | 설명 | 항목 | 비고 |", "|---|---|---|---|---|"]

@@ -6,6 +6,10 @@ class Store:
     def __init__(self):
         self.record = dict(event=dict(event_id='e',job_id='j',generation=1),state='REQUESTED')
         self.finished = 0
+        self.fence = dict(recovery_id='e', generation=2, recovery_phase='GENERATION_ADVANCED')
+        self.record['generation'] = 2
+    def fencing_record(self, job_id):
+        return copy.deepcopy(self.fence)
     def save(self, rid, **values):
         self.record.update(values)
         return copy.deepcopy(self.record)
