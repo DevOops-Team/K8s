@@ -8,7 +8,7 @@
 ```text
 Pod
 ├─ 앱 컨테이너 (relocator · recovery-controller · Backend · Mimir …)   ← 수정 없음, 인증서 없음
-│    env AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911
+│    env AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911/   ← 끝의 / 필수 (없으면 SDK가 …9911latest/… 로 붙임)
 │    AWS SDK가 "EC2 메타데이터 서버"에서 임시 자격 증명을 받는다고 생각하고 sidecar에 묻는다
 └─ sidecar: aws_signing_helper serve   ← 인증서(client.pem · client.key)는 여기에만 마운트
      client.key로 서명해 Roles Anywhere CreateSession → 1시간 임시 키를 IMDSv2 형식으로 내준다
@@ -47,7 +47,7 @@ spec:
   containers:
   - name: main
     env:
-    - {name: AWS_EC2_METADATA_SERVICE_ENDPOINT, value: "http://127.0.0.1:9911"}
+    - {name: AWS_EC2_METADATA_SERVICE_ENDPOINT, value: "http://127.0.0.1:9911/"}   # 끝의 / 필수
     - {name: AWS_REGION, value: us-east-2}
   volumes:
   - name: aws-cert
@@ -65,3 +65,8 @@ spec:
 docker buildx build --platform linux/amd64 --load -t aws-signing-helper:local aws-signing-helper
 docker run --rm aws-signing-helper:local            # 1.8.6
 ```
+
+## 실제 확인 (11/16)
+
+relocator 인증서(새 CA v2) + 이 이미지 `serve` + 같은 네트워크의 AWS CLI(`AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911/`):
+`sts get-caller-identity` = `assumed-role/devoops-prod-onprem-relocator/…`, 펜싱 테이블 GetItem 허용, 모니터링 버킷 AccessDenied (권한 밖).
