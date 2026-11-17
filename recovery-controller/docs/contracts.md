@@ -39,7 +39,6 @@ job_id/generation을 특정하지 못한 신호는 기록하고 HOLD합니다.
 실제 이벤트 cluster는 eks-a/b/c 계약을 유지합니다. worker-a 같은 별칭은 생산자와 맞춰야 합니다.
 원본 v1과 payload 봉투 입력 모두 수용하며 Kafka rule_version 헤더를 inbox에 보관합니다.
 
-예비 소진·SDC의 moveToOtherCluster 자동 승격은 아직 구현하지 않았습니다.
 클러스터 전체 펜싱인 evacuateCluster로 대신 승격하지 않습니다.
 Watchdog 단절은 아래 HOLD 규칙으로 처리합니다.
 
@@ -83,7 +82,6 @@ executor_url와 EXECUTOR_TOKEN은 더 이상 사용하지 않습니다.
 FENCE_AND_EVACUATE / NEEDS_CONFIG_FIX / HOLD 로 통일합니다.
 새 내부 검토 결과도 HOLD로 기록하고 상세 원인은 reason에 남깁니다.
 기존 inbox REVIEW 레코드는 읽을 때 HOLD로 변환합니다.
-moveToOtherCluster는 같은 클러스터 재시도의 승격 경로이며 evacuateCluster와 구분합니다.
 Watchdog 단절은 ADR-18 후속 보완으로 HOLD·알림을 구현했습니다.
 
 ## Watchdog 단절 시 HOLD — ADR-18 후속 보완

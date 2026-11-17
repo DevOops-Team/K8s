@@ -260,7 +260,7 @@ class RelocationHolds(unittest.TestCase):
         self.assertEqual(self.holds([rr("restartInPlace")]), {"worker1": "job-a-g0002"})
 
     def test_leaving_actions_and_finished_requests_do_not_hold(self):
-        self.assertEqual(self.holds([rr("moveToOtherCluster"), rr("evacuateCluster")]), {})
+        self.assertEqual(self.holds([rr("evacuateCluster")]), {})
         self.assertEqual(self.holds([rr(phase="Done"), rr(phase="Failed"), rr(phase="Duplicate")]), {})
 
     def test_not_before_isolation_or_without_source(self):

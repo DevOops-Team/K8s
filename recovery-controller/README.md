@@ -72,7 +72,7 @@ Kafka 모드는 실제 값으로 채운 로컬 JSON을 --config로 지정하세�
 회수 예고 evacuate_preemptive(legacy spot_interruption)는 QUARANTINE_AND_RETRY → moveToSpare로 처리합니다.
 세대를 먼저 증가시키고 옛 실행 종료 확인 후 같은 클러스터의 예비 노드로 재배치해 마지막 승인본에서 재개합니다.
 마지막 저장 후 세대 증가(PLANNED_MIGRATE)는 향후 확장으로 보류합니다. 이미 HOLD된 사건은 자동 재개하지 않습니다.
-moveToOtherCluster 자동 승격은 미구현입니다. Watchdog HOLD는 아래와 같이 구현했습니다.
+Watchdog HOLD는 아래와 같이 구현했습니다.
 
 전체 제한과 기존 HTTP 복구에서의 전환 절차는 docs/contracts.md를 참고하세요.
 

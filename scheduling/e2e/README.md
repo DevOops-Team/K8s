@@ -137,7 +137,6 @@ def test_something(kube, check, info):
 | 07 all_down | 워커 전부 끊김 -> 지명 없음, 다시 붙으면 입장 | 3.4 |
 | 08 no_spare | 예비 없이 moveToSpare -> Pod 0개로 대기(반쪽 배치 없음), 예비 확보 뒤 입장 | R5·R8·I2 |
 | 09 duplicate | 같은 requestId 두 번 -> Done 하나 + Duplicate, 새 세대 하나 | R7·I1 |
-| 10 move_to_other_cluster | 의심 노드만 격리, 펜싱 없음, 새 세대는 다른 워커, 원래 워커는 새 잡 받음 | R8·I7 |
 | 11 recovery_under_load | 학습 12장 + Heavy 대기에서 4장 moveToSpare -> 복구 잡이 자기 몫으로 쿼터·원래 워커 입장 | R10 |
 | 12 fencing_gate | 세대 +1 전 RR은 Pending, 아무것도 안 함 -> 세대 +1 뒤 진행 | R7·I6 |
 | 13 admission_policy | 권한 없는 사용자는 복구 큐·우선순위·디스패처 어노테이션·RR 못 만듦, 학습 잡은 관리자도 예비 toleration 못 닮 (dry-run) | 3.1·I4 |

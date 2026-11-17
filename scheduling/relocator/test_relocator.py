@@ -161,15 +161,12 @@ class PlacementHints(unittest.TestCase):
     def test_explicit_exclusions_are_preserved(self):
         self.assertEqual(self.hints("moveToSpare", "worker2", "worker2", None), (None, ["worker2"]))
 
-    def test_move_to_other_cluster_leaves_source(self):   # 예비 소진·SDC: 펜싱 없이 원래 클러스터만 뺌
-        self.assertEqual(self.hints("moveToOtherCluster", "worker2", None, None), (None, ["worker2"]))
 
     def test_evacuate_leaves_source_and_keeps_old_excludes(self):
         self.assertEqual(self.hints("evacuateCluster", "worker2", "worker1", ["worker3"]),
                          (None, ["worker1", "worker2", "worker3"]))
 
     def test_not_dispatched_yet(self):
-        self.assertEqual(self.hints("moveToOtherCluster", "", None, None), (None, []))
         self.assertEqual(self.hints("restartInPlace", "", None, None), (None, []))
 
 

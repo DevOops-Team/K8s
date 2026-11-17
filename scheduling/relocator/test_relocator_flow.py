@@ -85,13 +85,12 @@ class Resubmit(unittest.TestCase):
         self.assertEqual(ann[relocator.K.ANN_PREFERRED], "worker1")
         self.assertNotIn(relocator.K.ANN_TARGET, ann)
 
-    def test_leaving_actions_do_not_inherit_source_preference(self):
-        for action in ("moveToOtherCluster", "evacuateCluster"):
-            co, store = FakeCO(), FakeStore(fencing())
-            relocator.resubmit(ctx(store, co, action=action, sourceCluster="worker1"))
-            ann = co.created[0]["metadata"]["annotations"]
-            self.assertNotIn(relocator.K.ANN_PREFERRED, ann)
-            self.assertIn("worker1", ann[relocator.K.ANN_EXCLUDE].split(','))
+    def test_evacuate_excludes_source_without_preference(self):
+        co, store = FakeCO(), FakeStore(fencing())
+        relocator.resubmit(ctx(store, co, action="evacuateCluster", sourceCluster="worker1"))
+        ann = co.created[0]["metadata"]["annotations"]
+        self.assertNotIn(relocator.K.ANN_PREFERRED, ann)
+        self.assertIn("worker1", ann[relocator.K.ANN_EXCLUDE].split(','))
 
     def test_lost_fencing_withdraws_created_jobset(self):
         co, store = FakeCO(), FakeStore(fencing(), steal_on_set=True)
