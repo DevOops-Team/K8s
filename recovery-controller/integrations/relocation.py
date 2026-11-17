@@ -26,6 +26,8 @@ class RelocationClient:
             return json.load(response)
 
     def submit(self, event, action):
+        if action not in ('restartInPlace', 'moveToSpare', 'evacuateCluster'):
+            raise ValueError(f'unsupported relocation action: {action}')
         # Stable across response loss and leader failover. No mutable status is consulted.
         name = 'recovery-' + hashlib.sha256(event['event_id'].encode()).hexdigest()[:40]
         path = (f'/apis/scheduling.devoops.site/v1alpha1/namespaces/'
@@ -39,9 +41,9 @@ class RelocationClient:
         spec = {'requestId': event['event_id'],
                 'jobRef': f"{self.namespace}/job-{event['job_id']}-g{event['generation']:04d}",
                 'action': action, 'reason': category}
-        if action in ('moveToSpare', 'moveToOtherCluster'):
+        if action == 'moveToSpare':
             spec['excludeNodes'] = [event['node']]
-        if action in ('moveToOtherCluster', 'evacuateCluster'):
+        if action == 'evacuateCluster':
             spec['excludeClusters'] = [event['cluster']]
         document = {'apiVersion': 'scheduling.devoops.site/v1alpha1',
                     'kind': 'RelocationRequest',

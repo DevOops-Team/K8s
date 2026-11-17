@@ -260,7 +260,7 @@ class RelocationHolds(unittest.TestCase):
         self.assertEqual(self.holds([rr("restartInPlace")]), {"worker1": "job-a-g0002"})
 
     def test_leaving_actions_and_finished_requests_do_not_hold(self):
-        self.assertEqual(self.holds([rr("moveToOtherCluster"), rr("evacuateCluster")]), {})
+        self.assertEqual(self.holds([rr("evacuateCluster")]), {})
         self.assertEqual(self.holds([rr(phase="Done"), rr(phase="Failed"), rr(phase="Duplicate")]), {})
 
     def test_not_before_isolation_or_without_source(self):
@@ -334,6 +334,68 @@ class FillCapacity(unittest.TestCase):
     def test_cordoned_spare_not_counted(self):
         c = self.fill([self.node("s", spare=True, cordon=True)], [])
         self.assertEqual(c.spare_free, 0)
+
+
+class RecoveryCapacity(unittest.TestCase):
+    """복구 자리 조회 API (ADR-37 조건 4): 원래 클러스터 우선, 없으면 다른 워커"""
+
+    REQ = {"job_id": "j1", "generation": 1, "cluster": "w1", "node": "g0", "gpu_count": 2}
+
+    @staticmethod
+    def mkc(name, active=True, fenced=False):
+        return {"metadata": {"name": name, "labels": {K.LABEL_FENCED: "true"} if fenced else {}},
+                "status": {"conditions": [{"type": "Active", "status": "True" if active else "False"}]}}
+
+    def ask(self, free, mkcs=None, exclude="", apis=None, failing=()):
+        """free: 클러스터 이름 → (node_free, spare_free)"""
+        mkcs = mkcs or [self.mkc(n) for n in free]
+        by_name = {m["metadata"]["name"]: m for m in mkcs}
+        kq = mock.Mock()
+        kq.get_cluster_custom_object.side_effect = lambda *a, **k: by_name[a[3]]
+        kq.list_cluster_custom_object.return_value = {"items": mkcs}
+        workers = mock.Mock()
+        workers.get.return_value = apis if apis is not None else {n: n for n in free}
+
+        def fill(c, api, **_):
+            if api in failing:
+                raise RuntimeError("down")
+            c.node_free, c.spare_free = free[api]
+
+        workload = {"metadata": {"namespace": "training", "ownerReferences": [{"kind": "JobSet", "name": "x"}]},
+                    "status": {"clusterName": "w1"}}
+        with mock.patch.object(D.kube, "workload_for_jobset", return_value=workload), \
+                mock.patch.object(D.kube, "kueue", return_value=kq), \
+                mock.patch.object(D.kube, "owner_annotations", return_value={K.ANN_EXCLUDE: exclude}), \
+                mock.patch.object(D, "fill_node_capacity", side_effect=fill):
+            return D.recovery_capacity(object(), workers, dict(self.REQ))
+
+    def test_source_spare_first(self):
+        r = self.ask({"w1": (1, 1), "w2": (4, 1)})
+        self.assertEqual((r["available"], r["cluster"]), (True, "w1"))
+
+    def test_source_without_spare_falls_back_to_other_worker(self):
+        r = self.ask({"w1": (4, 0), "w2": (1, 1)})
+        self.assertEqual((r["available"], r["cluster"]), (True, "w2"))
+        self.assertEqual((r["spare_free"], r["normal_free_after_stop"]), (0, 4))   # 원래 클러스터 값
+
+    def test_source_too_small_falls_back(self):
+        r = self.ask({"w1": (0, 1), "w2": (2, 0)})
+        self.assertEqual(r["cluster"], "w2")
+
+    def test_other_worker_skipped_when_fenced_inactive_excluded_or_failing(self):
+        free = {"w1": (0, 0), "w2": (4, 1), "w3": (4, 1), "w4": (4, 1), "w5": (4, 1)}
+        mkcs = [self.mkc("w1"), self.mkc("w2", fenced=True), self.mkc("w3", active=False),
+                self.mkc("w4"), self.mkc("w5")]
+        r = self.ask(free, mkcs=mkcs, exclude="w4", failing=("w5",))
+        self.assertEqual((r["available"], r["cluster"]), (False, None))
+
+    def test_no_room_anywhere(self):
+        r = self.ask({"w1": (1, 0), "w2": (1, 0)})
+        self.assertFalse(r["available"])
+
+    def test_source_unusable_is_error(self):
+        with self.assertRaises(RuntimeError):
+            self.ask({"w1": (4, 1)}, mkcs=[self.mkc("w1", fenced=True)])
 
 
 if __name__ == "__main__":

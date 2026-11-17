@@ -30,7 +30,7 @@
 - 찜 있는 곳만 수용 가능하면 복구 우선으로 배치하고 잡·클러스터를 로그에 남긴다. 다른 복구의 보호 자리는 침범하지 않는다.
 - 어디에도 전체 잡 자리가 없으면 원래 EKS에서 대기한다. 이미 지명했으나 입장하지 못한 잡은 기존 RENOMINATE_SECONDS 경과 후 후보를 다시 본다.
 - 원래 클러스터가 부족한 재제출본에는 이전 자리 보호를 유지하지 않고, 다른 곳을 지명한 루프에서도 자기 자리 보호를 해제한다.
-- `moveToOtherCluster`·`evacuateCluster`는 기존처럼 source를 exclude하고 원래 우선 힌트를 기록하지 않는다.
+- `evacuateCluster`는 기존처럼 source를 exclude하고 원래 우선 힌트를 기록하지 않는다.
 - relocator는 기존 `RelocationRequest.status.sourceCluster/targetCluster`로 원래/실제 입장 클러스터를 기록한다. 새 CRD 필드는 없다.
 - 복구 컨트롤러는 두 노드 복구 액션이 다른 EKS에서 재개해도 완료 판정을 진행한다. 기존 세대·복구 ID·JobSet UID·현재 owner와 일치하는 배치·복원·학습 step 증거가 모두 필요하다.
 - 고장 노드 이름 제외는 원래 클러스터에 재개할 때 적용한다. 서로 다른 클러스터의 동명 노드는 별개다. 클러스터 대피가 실패한 source로 돌아오는 경우는 계속 HOLD한다.

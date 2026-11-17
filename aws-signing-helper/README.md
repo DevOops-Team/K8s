@@ -8,7 +8,7 @@
 ```text
 Pod
 ├─ 앱 컨테이너 (relocator · recovery-controller · Backend · Mimir …)   ← 수정 없음, 인증서 없음
-│    env AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911
+│    env AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911/   ← 끝의 / 필수 (없으면 SDK가 …9911latest/… 로 붙임)
 │    AWS SDK가 "EC2 메타데이터 서버"에서 임시 자격 증명을 받는다고 생각하고 sidecar에 묻는다
 └─ sidecar: aws_signing_helper serve   ← 인증서(client.pem · client.key)는 여기에만 마운트
      client.key로 서명해 Roles Anywhere CreateSession → 1시간 임시 키를 IMDSv2 형식으로 내준다
@@ -16,6 +16,7 @@ Pod
 
 - 개인 키는 sidecar에만 있다. 앱 컨테이너에서는 1시간짜리 임시 키만 얻을 수 있다.
 - `serve`는 시작할 때 첫 자격 증명을 받지 못하면 종료한다 (설정 오류가 재시작으로 드러남). 받은 뒤에야 9911을 연다.
+- 9911은 **127.0.0.1에서만** 열린다 (같은 Pod 밖에서는 임시 키를 못 받음). 그래서 kubelet 탐침은 쓸 수 없고, 앱이 9911을 기다린다.
 - 인증 방식 · helper 버전은 배포 쪽(Gitops)에서 한 번에 관리한다. 앱 레포는 손대지 않는다.
 
 ## Pod에 붙이는 법 (네이티브 sidecar, k8s 1.29+)
@@ -38,16 +39,16 @@ spec:
     - {name: TRUST_ANCHOR_ARN, valueFrom: {configMapKeyRef: {name: <app>-aws, key: trust_anchor_arn}}}
     - {name: PROFILE_ARN, valueFrom: {configMapKeyRef: {name: <app>-aws, key: profile_arn}}}
     - {name: ROLE_ARN, valueFrom: {configMapKeyRef: {name: <app>-aws, key: role_arn}}}
-    startupProbe:                    # 첫 자격 증명을 받아 9911을 연 뒤에 앱이 시작한다
-      tcpSocket: {port: 9911}
-      periodSeconds: 2
-      failureThreshold: 30
+    # startupProbe를 달지 않는다: serve는 127.0.0.1에서만 열어 kubelet 탐침(Pod IP)이 닿지 않는다 (11/16 온프레에서 재시작 반복)
     volumeMounts:
     - {name: aws-cert, mountPath: /var/run/devoops-aws, readOnly: true}
   containers:
   - name: main
+    # 앱이 9911을 기다린 뒤 시작한다. boto3는 클라이언트를 만들 때 자격 증명을 정하므로 먼저 뜨면 키 없이 남는다
+    # 예: Gitops onprem/controllers/relocator/base/deployment.yaml 의 command
+    command: [python, -c, "import os,socket,time\nwhile True:\n  try: socket.create_connection(('127.0.0.1',9911),1).close(); break\n  except OSError: time.sleep(1)\nos.execvp('python',['python','app.py'])"]
     env:
-    - {name: AWS_EC2_METADATA_SERVICE_ENDPOINT, value: "http://127.0.0.1:9911"}
+    - {name: AWS_EC2_METADATA_SERVICE_ENDPOINT, value: "http://127.0.0.1:9911/"}   # 끝의 / 필수
     - {name: AWS_REGION, value: us-east-2}
   volumes:
   - name: aws-cert
@@ -65,3 +66,8 @@ spec:
 docker buildx build --platform linux/amd64 --load -t aws-signing-helper:local aws-signing-helper
 docker run --rm aws-signing-helper:local            # 1.8.6
 ```
+
+## 실제 확인 (11/16)
+
+relocator 인증서(새 CA v2) + 이 이미지 `serve` + 같은 네트워크의 AWS CLI(`AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911/`):
+`sts get-caller-identity` = `assumed-role/devoops-prod-onprem-relocator/…`, 펜싱 테이블 GetItem 허용, 모니터링 버킷 AccessDenied (권한 밖).

@@ -36,7 +36,11 @@ class RequestTests(unittest.TestCase):
     def test_evacuation_excludes_old_cluster_without_claiming_stop(self):
         saved = []
         client = RelocationClient('training', lambda m,p,d=None: saved.append(d))
-        client.submit(dict(EVENT,node=None,category='site'), 'evacuateCluster')
+        from recovery.policy import plan
+        from recovery.workflow import RELOCATION_ACTIONS
+        event = dict(EVENT, node=None, category='site', suggested_action='fence_evacuate')
+        client.submit(event, RELOCATION_ACTIONS[plan(event)['suggested_action']])
+        self.assertEqual(saved[0]['spec']['action'], 'evacuateCluster')
         self.assertEqual(saved[0]['spec']['excludeClusters'], ['eks-a'])
         self.assertNotIn('devoops/old-execution-stopped', str(saved))
 
