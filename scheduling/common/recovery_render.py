@@ -22,7 +22,6 @@ import re
 
 import keys as K
 
-LEAVE_SOURCE = {"moveToOtherCluster", "evacuateCluster"}   # 원래 클러스터를 떠나는 action
 PREFER_SOURCE = {"restartInPlace", "moveToSpare"}
 SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
@@ -43,10 +42,8 @@ def placement_hints(action, src, old_exclude_csv, extra_exclude):
     """재제출 잡의 (target-cluster, exclude-clusters 목록)
     restartInPlace·moveToSpare는 별도 원래 클러스터 선호 힌트로 배치한다 (ADR-38)."""
     exclude = {c for c in (old_exclude_csv or "").split(",") if c} | set(extra_exclude or [])
-    if action in LEAVE_SOURCE:
-        if src:
-            exclude.add(src)
-        return None, sorted(exclude)
+    if action == "evacuateCluster" and src:
+        exclude.add(src)
     return None, sorted(exclude)
 
 

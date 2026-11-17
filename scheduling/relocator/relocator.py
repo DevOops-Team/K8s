@@ -7,7 +7,6 @@
 action:
   restartInPlace   노드 격리 없이 재제출, 원래 클러스터 우선·부족하면 다른 곳 (ADR-38)
   moveToSpare      고장 노드 cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
-  moveToOtherCluster  (예비 소진, SDC) 의심 노드 cordon·taint -> 원래 클러스터를 빼고 재제출.
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
   evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
                    잡이 아직 워커에 안 보내졌으면 펜싱은 건너뛰고 재제출만
@@ -238,7 +237,7 @@ def isolate(x: Ctx):
         # 워커가 아직 살아 있을 때 옛 잡이 돌던 노드·인스턴스를 적어 둔다. 나중에 워커가 끊기면 강제 종료 대상 (증거 아님)
         x.st["oldNodes"] = record_old_nodes(x, src)
     nodes = x.spec.get("excludeNodes") or []
-    if action in ("moveToSpare", "moveToOtherCluster") and nodes:
+    if action == "moveToSpare" and nodes:
         if not src:
             raise PermissionError(f"잡이 아직 워커에 안 보내져서 {nodes}를 어느 클러스터에서 격리할지 모름")
         cordon_nodes(x, src, nodes)
@@ -523,6 +522,9 @@ def jobset_exists(x: Ctx, ns, name):
 
 
 def step(x: Ctx, all_rrs):
+    action = x.spec.get("action")
+    if action not in (*R.PREFER_SOURCE, "evacuateCluster"):
+        raise PermissionError(f"지원하지 않는 재배치 action: {action}")
     st = x.st
     if not st.get("acceptedAt"):
         if not accept(x, all_rrs):
