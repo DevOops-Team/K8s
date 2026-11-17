@@ -376,17 +376,44 @@ def recovery_capacity(mgr, workers, payload):
     workload = kube.workload_for_jobset(mgr, namespace, jobset)
     if ((workload or {}).get('status') or {}).get('clusterName') != cluster:
         raise ValueError('current workload placement could not be verified')
-    worker = workers.get().get(cluster)
+    apis = workers.get()
+    worker = apis.get(cluster)
     if worker is None:
         raise RuntimeError('worker unavailable')
-    mkc = kube.kueue(mgr).get_cluster_custom_object(
+    co = kube.kueue(mgr)
+    mkc = co.get_cluster_custom_object(
         K.KUEUE_GROUP, K.KUEUE_VERSION, 'multikueueclusters', cluster, _request_timeout=kube.TIMEOUT)
-    if not kube.is_true(mkc, 'Active') or (mkc['metadata'].get('labels') or {}).get(K.LABEL_FENCED) == 'true':
+    if not usable(mkc):
         raise RuntimeError('worker unavailable')
-    capacity = Cluster(cluster)
-    fill_node_capacity(capacity, worker, excluded_node=node, released_job=(namespace, jobset))
-    return {'available': capacity.spare_free > 0 and capacity.nodes_for(True) >= count,
-            'spare_free': capacity.spare_free, 'normal_free_after_stop': capacity.node_free}
+    source = Cluster(cluster)
+    fill_node_capacity(source, worker, excluded_node=node, released_job=(namespace, jobset))
+    result = {'spare_free': source.spare_free, 'normal_free_after_stop': source.node_free}
+    # 1) 원래 클러스터: 예비 1장 이상 + 잡 전체 수용
+    if source.spare_free > 0 and source.nodes_for(True) >= count:
+        return {'available': True, 'cluster': cluster, **result}
+    # 2) 원래 클러스터에 자리가 없으면 다른 워커 (ADR-38과 같은 기준: Active·펜싱 아님·exclude 아님).
+    #    exclude 조회 실패는 예외 그대로 → 503 → 복구 컨트롤러 HOLD
+    exclude = csv(kube.owner_annotations(mgr, workload).get(K.ANN_EXCLUDE))
+    others = co.list_cluster_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, 'multikueueclusters', _request_timeout=kube.TIMEOUT)['items']
+    for other in sorted(others, key=lambda m: m['metadata']['name']):
+        name = other['metadata']['name']
+        api = apis.get(name)
+        if name == cluster or name in exclude or api is None or not usable(other):
+            continue
+        c = Cluster(name)
+        try:
+            fill_node_capacity(c, api)
+        except Exception as e:  # noqa: BLE001  이 워커만 후보에서 뺌
+            log.warning('recovery capacity: %s 조회 실패: %s', name, e)
+            continue
+        if c.nodes_for(True) >= count:
+            return {'available': True, 'cluster': name, **result}
+    return {'available': False, 'cluster': None, **result}
+
+
+def usable(mkc):
+    return kube.is_true(mkc, 'Active') and (mkc['metadata'].get('labels') or {}).get(K.LABEL_FENCED) != 'true'
 
 
 def start_capacity_server(port):
