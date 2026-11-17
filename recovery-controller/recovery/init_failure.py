@@ -1,5 +1,6 @@
 """ckpt-init failure adapter and conservative recovery decisions (no worker API calls)."""
 import hashlib
+import json
 from decimal import Decimal
 
 POLICY = {
@@ -35,7 +36,8 @@ def decision(event):
                 or not _integer(checkpoint.get('generation'))
                 or not 1 <= checkpoint['generation'] <= event['generation']
                 or not _integer(checkpoint.get('step')) or checkpoint['step'] < 0):
-            raise ValueError('code 7 requires the failed checkpoint generation and step')
+            return dict(action='HOLD', failure_class='CHECKPOINT_CORRUPT',
+                        reason='code 7 requires the failed checkpoint generation and step')
     action, classification, reason = POLICY[code]
     return dict(action=action, failure_class=classification, reason=reason)
 
@@ -43,8 +45,8 @@ def decision(event):
 def collect(pod, *, cluster, job_id, generation, jobset_uid, checkpoint=None):
     """Called by a trusted Pod-status producer; never derives identity from arbitrary logs.
 
-    The caller must verify Pod -> Job -> JobSet ownership/UID and provide the actual
-    attempted checkpoint baseline. Current terminated status only; not lastState.
+    The caller must verify Pod -> Job -> JobSet ownership/UID and may provide the actual
+    attempted checkpoint for legacy Pods without a termination message. Current terminated status only; not lastState.
     """
     meta = pod.get('metadata', {})
     if meta.get('namespace') != 'training' or not meta.get('uid'):
@@ -65,6 +67,29 @@ def collect(pod, *, cluster, job_id, generation, jobset_uid, checkpoint=None):
                  component='ckpt-init', exit_code=terminated.get('exitCode'), cluster=cluster,
                  job_id=job_id, generation=generation, jobset_uid=jobset_uid, pod_uid=meta['uid'],
                  node=pod.get('spec', {}).get('nodeName'), category='app')
+    message = terminated.get('message')
+    if message:
+        checkpoint = None
+        try:
+            report = json.loads(message)
+        except (ValueError, TypeError, RecursionError):
+            report = None
+        if isinstance(report, dict) and report.get('exit_code', event['exit_code']) == event['exit_code']:
+            reason = report.get('reason')
+            allowed_reasons = {
+                2: ('generation_mismatch',),
+                3: ('owner_claim_failed',),
+                4: ('ddb_unreachable', 'download_failed'),
+                5: ('config_mismatch', 'world_size_mismatch'),
+                6: ('no_item',),
+                7: ('corrupt',),
+            }
+            if reason in allowed_reasons.get(event['exit_code'], ()):
+                event['init_reason'] = reason
+                gen, step = report.get('checkpoint_gen'), report.get('checkpoint_step')
+                if (type(gen) is int and 1 <= gen <= generation
+                        and type(step) is int and step >= 0):
+                    checkpoint = dict(generation=gen, step=step)
     if checkpoint is not None:
         event['checkpoint'] = checkpoint
     decision(event)

@@ -171,7 +171,7 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 }
 ```
 
-`checkpoint`는 실제 다운로드에 사용한 승인본의 세대/step이며 코드 7에서 필수다. `generation`(실행 세대)과 다를 수 있다. exit_code만 있는 메시지나 로그 문자열로 실행 권한을 바꾸지 않는다. bool·미지원 종료 코드·손상 승인본 식별 누락은 수신 검증에서 거부하고 offset을 커밋하지 않는다. 잘못된 사건의 별도 DLQ는 후속 작업이다.
+`checkpoint`는 실제 다운로드에 사용한 승인본의 세대/step이며 코드 7에서 필수다. `generation`(실행 세대)과 다를 수 있다. exit_code만 있는 메시지나 로그 문자열로 실행 권한을 바꾸지 않는다. bool·미지원 종료 코드는 수신 검증에서 거부한다. 코드 7의 실패 복원점이 누락되거나 현재 복원 기준과 다르면 승인본을 격리하지 않고 HOLD한다. 잘못된 사건의 별도 DLQ는 후속 작업이다.
 
 | 종료 코드 | failure_class | 기본 판단 |
 |---|---|---|
@@ -186,7 +186,7 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 ### Pod 상태 수집 어댑터
 
-`init_failure.collect(pod, cluster=..., job_id=..., generation=..., jobset_uid=..., checkpoint=...)`는 신뢰된 탐지기에서 호출할 순수 변환 함수다. `training` Pod의 job/generation 레이블을 검증하고 `status.initContainerStatuses[name=ckpt-init].state.terminated.exitCode`를 읽는다. 성공·실행 중·lastState의 과거 실패는 사건으로 만들지 않는다. Pod UID·컨테이너 종료 정보로 안정된 event_id를 만든다.
+`init_failure.collect(pod, cluster=..., job_id=..., generation=..., jobset_uid=..., checkpoint=...)`는 신뢰된 탐지기에서 호출할 순수 변환 함수다. `training` Pod의 job/generation 레이블을 검증하고 `status.initContainerStatuses[name=ckpt-init].state.terminated.exitCode`를 읽는다. 성공·실행 중·lastState의 과거 실패는 사건으로 만들지 않는다. Pod UID·컨테이너 종료 정보로 안정된 event_id를 만든다. GPU-120의 termination-log JSON은 현재 terminated.message에서 읽는다. 종료 코드는 Kubernetes의 exitCode를 기준으로 하고, 코드와 일치하는 reason을 init_reason에 남긴다. checkpoint_gen과 checkpoint_step은 실제 복원을 시도한 승인본의 값이며 유효한 쌍만 checkpoint로 전달한다. detail은 복구 판단에 사용하지 않는다. 메시지가 없는 이전 이미지에 한해 신뢰된 생산자가 전달한 checkpoint 인자를 사용할 수 있다.
 
 **생산자가 Pod → Job → JobSet의 ownerReference/UID를 검증해야 한다.** 함수의 jobset_uid 인자만으로 소유 관계를 검증했다고 볼 수 없다. 생산자는 실제 복원 기준도 확인해야 하며 컨트롤러는 클라이언트 로그가 주장하는 승인본을 임의로 신뢰하지 않는다. Kafka 생산 ACL·생산자 인증·탐지기 배포는 담당 파트에서 연결한다. 이 함수가 EKS Watch를 시작하거나 자동 발행하지 않는다.
 

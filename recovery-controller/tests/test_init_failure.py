@@ -241,10 +241,15 @@ class InitPolicyTests(unittest.TestCase):
         self.assertEqual(result['failure_class'], 'CHECKPOINT_CORRUPT')
         self.assertEqual(self.store.table.blocks, {})
 
-    def test_unknown_or_boolean_exit_code_and_missing_checkpoint_rejected(self):
-        for signal in [event(True), event(1), event(7, checkpoint=None)]:
+    def test_unknown_or_boolean_exit_code_rejected(self):
+        for signal in [event(True), event(1)]:
             with self.assertRaises(ValueError):
                 self.flow.accept(signal)
+
+    def test_missing_corrupt_checkpoint_identity_holds_without_quarantine(self):
+        result = self.process(event(7, checkpoint=None))
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(self.store.table.blocks, {})
 
     def test_result_event_exposes_stopped_stage_count_and_failure_class(self):
         self.store.fencing.item['retry_count'] = 3
@@ -314,3 +319,21 @@ class PodAdapterTests(unittest.TestCase):
     def test_wrong_job_label_is_rejected(self):
         pod=self.pod();pod['metadata']['labels']['devoops/generation']='2'
         with self.assertRaises(ValueError):self.collect(pod)
+
+    def test_corrupt_report_uses_attempted_checkpoint(self):
+        pod = self.pod()
+        terminated = pod['status']['initContainerStatuses'][0]['state']['terminated']
+        terminated.update(exitCode=7, message='{"exit_code":7,"reason":"corrupt","checkpoint_gen":1,"checkpoint_step":750}')
+        signal = self.collect(pod)
+        self.assertEqual(signal['checkpoint'], {'generation': 1, 'step': 750})
+        self.assertEqual(signal['init_reason'], 'corrupt')
+
+    def test_bad_report_never_uses_legacy_checkpoint(self):
+        pod = self.pod()
+        terminated = pod['status']['initContainerStatuses'][0]['state']['terminated']
+        for message in ('{', '{"exit_code":4,"reason":"corrupt","checkpoint_gen":1,"checkpoint_step":750}'):
+            terminated.update(exitCode=7, message=message)
+            signal = collect(pod, cluster='eks-a', job_id='j1', generation=1, jobset_uid='uid',
+                             checkpoint={'generation': 1, 'step': 1000})
+            self.assertEqual(signal['exit_code'], 7)
+            self.assertEqual(decision(signal)['action'], 'HOLD')
