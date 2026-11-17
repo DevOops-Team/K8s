@@ -47,6 +47,7 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "job.lifecycle")
 EVENT_SOURCE = "submitter@onprem"
 LABEL_JOB_ID = "devoops/job-id"       # controllers/keys.py와 같음 (백엔드가 최초 제출 때 붙임)
 TRAINING_NS = "training"
+IMAGE = os.getenv("SUBMITTER_IMAGE", "")   # Job으로 띄울 때 launch.py가 넣음: 어떤 코드로 돌렸는지 결과에 남기려고
 
 
 def now():
@@ -257,19 +258,33 @@ def main(argv=None):
     g.add_argument("--no-kafka", action="store_true", help="Kafka에 안 올림 (로컬 kind 등)")
     g.add_argument("--no-wait", action="store_true", help="잡이 끝나길 안 기다림 -> experiment.ended도 안 보냄")
     g.add_argument("--wait-timeout", type=float, default=6 * 3600, help="잡이 끝나길 기다리는 최대 초")
+    g.add_argument("--scenario-name", default=None,
+                   help="기록할 시나리오 이름 (기본 시나리오 경로). Job에서는 ConfigMap 경로 대신 원래 파일 이름을 남기려고")
+    ap.add_argument("--print-results", action="store_true", help="끝날 때 결과 파일 내용을 출력 (Job 로그로 남기려고)")
     a = ap.parse_args(argv)
 
     rows = read_scenario(a.scenario)
     exp_id = a.exp_id or f"exp-{a.prefix}"
-    conditions = {"name": a.name or Path(a.scenario).stem, "scenario": a.scenario, "policy": a.policy,
+    scenario = a.scenario_name or a.scenario
+    conditions = {"name": a.name or Path(scenario).stem, "scenario": scenario, "policy": a.policy,
                   "fault_type": a.fault_type, "spare_enabled": a.spare_enabled,
                   "checkpoint_every_steps": a.checkpoint_every_steps}
     events = None if a.no_kafka else KafkaEvents()
     submit = KindSubmitter(a.context) if a.kind else submit_backend
     list_jobsets = None if a.no_wait else jobset_lister(a.context)   # 제출 전에 접속 설정부터 확인
     out_path = a.out or f"results-{datetime.now():%m%d-%H%M%S}.csv"
+    try:
+        return run(a, rows, exp_id, conditions, events, submit, list_jobsets, out_path)
+    finally:
+        if a.print_results and os.path.exists(out_path):
+            print(f"----- {out_path}")
+            print(Path(out_path).read_text(encoding="utf-8"), end="", flush=True)
+
+
+def run(a, rows, exp_id, conditions, events, submit, list_jobsets, out_path):
     job_ids = []
     with open(out_path, "w", newline="", encoding="utf-8") as f:
+        f.write(f"# submitter image={IMAGE or '-'} exp_id={exp_id} scenario={conditions['scenario']}\n")
         record_experiment(events, f, "experiment.started", exp_id, conditions)
         print(f"experiment.started {exp_id}", flush=True)
         t0 = time.monotonic()

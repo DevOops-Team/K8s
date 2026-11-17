@@ -101,6 +101,27 @@ class SubmissionTest(unittest.TestCase):
                                  ["experiment.started", "experiment.ended"])
                 self.assertEqual([event["payload"]["exp_id"] for event in events], [expected, expected])
 
+    def test_job_mode_records_image_and_scenario_name(self):
+        """launch.py가 넘기는 인자: 결과에 이미지, experiment.started에 원래 시나리오 이름, 로그에 결과 파일"""
+        with tempfile.TemporaryDirectory() as tmp:
+            scenario, results = Path(tmp) / "scenario.csv", Path(tmp) / "results.csv"
+            scenario.write_text("0, 1, 100, fsdp\n", encoding="utf-8")
+            producer, out = FakeProducer(), io.StringIO()
+            response = io.StringIO(json.dumps({"id": "j1"}))
+            response.status = 201
+            with patch.object(submit.urllib.request, "urlopen", return_value=response), \
+                 patch.object(submit, "KafkaEvents", return_value=submit.KafkaEvents(producer=producer)), \
+                 patch.object(submit, "jobset_lister", return_value=lambda: [js("j1", 1, "Completed")]), \
+                 patch.object(submit, "IMAGE", "ghcr.io/x/submitter:1.0.0"), redirect_stdout(out):
+                code = submit.main([str(scenario), "--exp-id", "exp-9", "--scenario-name", "fault-xid79.csv",
+                                    "--out", str(results), "--print-results"])
+            self.assertEqual(code, 0)
+            text = results.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# submitter image=ghcr.io/x/submitter:1.0.0 exp_id=exp-9 "))
+        started = producer.sent[0][2]["payload"]
+        self.assertEqual((started["scenario"], started["name"]), ("fault-xid79.csv", "fault-xid79"))
+        self.assertIn(text, out.getvalue())
+
     def test_kind_preserves_exp_id_in_jobset_and_recovery_source(self):
         kind = submit.KindSubmitter.__new__(submit.KindSubmitter)
         kind.client = Mock()

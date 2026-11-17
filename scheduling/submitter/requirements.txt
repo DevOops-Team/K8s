@@ -1,0 +1,2 @@
+confluent-kafka==2.6.1
+kubernetes==31.0.0
