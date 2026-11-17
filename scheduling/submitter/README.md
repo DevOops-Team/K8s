@@ -11,9 +11,37 @@ python submit.py example.csv --kind          # kind: 백엔드 없이 같은 규
 python submit.py example.csv --kind --speed 10
 ```
 
-클러스터 안에서 돌릴 때는 `job.yaml` (platform 네임스페이스, 실험 때만 도는 Job + training JobSet 읽기 권한).
+결과 `results-<시각>.csv`: 첫 줄에 이미지·exp_id·시나리오, 작업ID · JobSet 이름 · 큐 · 제출 시각 · 응답, 앞뒤 줄에 실험 시작·종료 사건.
 
-결과 `results-<시각>.csv`: 작업ID · JobSet 이름 · 큐 · 제출 시각 · 응답, 앞뒤 줄에 실험 시작·종료 사건.
+## 실험마다 Job으로 띄우기 (`launch.py`)
+
+투입기는 상시 Pod가 아니라 실험 하나당 관리 클러스터 `platform`의 Job 하나로 돈다. `launch.py`가 한 번에 띄운다.
+
+```bash
+python launch.py scenario.csv --exp-id exp-0001 --image <투입기 이미지> --context <관리 클러스터> \
+  -- --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
+kubectl -n platform logs -f job/submitter-exp-0001   # 진행 상황, 끝나면 결과 CSV 전체가 로그에 찍힘
+```
+
+- 시나리오 CSV → ConfigMap `submitter-<exp_id>`, Job `submitter-<exp_id>`. ConfigMap은 Job에 딸려 Job이 지워질 때(끝나고 24시간) 같이 지워진다.
+- 같은 exp_id의 ConfigMap·Job이 이미 있으면 띄우지 않고 종료 코드 1 (같은 실험이 두 번 돌면 측정이 섞임). 다시 돌리려면 새 exp_id를 쓴다.
+- Job은 한 번만 돈다(`backoffLimit: 0`). 실패하면 그 실험은 버리고 새 exp_id로 다시 띄운다.
+- `--dry-run`: 만들 ConfigMap·Job만 출력.
+
+**실행 인터페이스 (실험 자동화 스크립트가 넘길 값)**
+
+| 인자 | 필수 | 뜻 |
+| --- | --- | --- |
+| 시나리오 CSV 경로 | O | 위 형식 |
+| `--exp-id` | O | 실험 ID. `experiment.started`·`ended`와 모든 `POST /api/jobs`에 같은 값이 들어간다. 소문자·숫자·`-`, 53자 이하 |
+| `--image` | O | 투입기 이미지(태그 또는 digest). 결과 첫 줄에 남는다. `SUBMITTER_IMAGE`로도 줌 |
+| `--context` | | 관리 클러스터 kubeconfig context (기본 현재 context) |
+| `--backend-url` `--kafka-bootstrap` `--kafka-topic` `--model` `--dataset-id` `--dataset-version` | | 투입기 환경 변수. 안 주면 같은 이름의 환경 변수, 그것도 없으면 `submit.py` 기본값 |
+| `--` 뒤 | | `submit.py`에 그대로: `--policy` `--fault-type` `--spare`/`--no-spare` `--checkpoint-every-steps` `--wait-timeout` `--speed` `--name` `--prefix` |
+
+종료 코드: 0 = 띄움, 1 = 같은 exp_id가 이미 있음. 실험이 끝났는지는 Job 상태(`Complete`/`Failed`)로 본다. 투입기는 모든 잡이 끝나 `experiment.ended`를 보낸 뒤에 성공 종료하고, 시간 초과 땐 ended 없이 실패 종료한다.
+
+**클러스터에 있어야 하는 것 (Gitops)**: ServiceAccount `submitter`(platform), `training`의 JobSet `get`·`list` Role·RoleBinding. 실행하는 사람에게는 `platform`의 Job·ConfigMap 생성·삭제·patch 권한. 이미지 빌드는 `Dockerfile`(이 폴더 기준).
 
 ## 실험 시작·종료 기록 (김현수 11/09 합의)
 
@@ -30,7 +58,7 @@ DB에 직접 쓰지 않고 Kafka `job.lifecycle`(기본 `172.30.0.40:9092`, `KAF
 python submit.py scenario.csv --exp-id exp-0001 --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
 ```
 
-필요 패키지: `confluent-kafka`(Kafka), `kubernetes`(JobSet 조회·`--kind`). `job.yaml`은 시작할 때 /tmp에 설치함.
+필요 패키지: `requirements.txt` (`confluent-kafka` Kafka, `kubernetes` JobSet 조회·`--kind`·`launch.py`). 이미지에는 미리 들어 있다.
 
 ## 실험과 작업 연결 (GPU-150)
 
@@ -40,7 +68,7 @@ python submit.py scenario.csv --exp-id exp-0001 --policy ours --fault-type xid79
 - Backend는 `exp_id`를 받아 `job.submitted` payload와 JobSet 주석 `devoops/exp-id`에 전달해야 한다 (노찬경 연계). 수집기는 `job.submitted.payload.exp_id`로 `job_runs.exp_id`를 채운다. Backend가 필드를 받지 않거나 버리면 투입기 수정만으로 실험별 결과를 연결할 수 없다.
 - `--kind` 직접 제출도 JobSet과 복구 원본의 `devoops/exp-id` 주석에 같은 값을 넣는다. 이 경로는 Backend를 거치지 않아 `job.submitted`를 발행하지 않으므로 DB 연결을 검증하는 용도로 쓰지 않는다.
 
-로컬 검증: 저장소 루트에서 `python -B -m unittest discover -s scheduling/submitter -p 'test_*.py'`.
+로컬 검증: 저장소 루트에서 `python -B -m unittest discover -s scheduling/submitter -p 'test_*.py'` (`launch.py` 포함).
 실제 연계 검증은 Backend 반영 뒤 작은 시나리오로 `job.submitted.payload.exp_id`, JobSet 주석, `job_runs.exp_id`가 같은지 확인한다.
 
 ## 아직 정할 것
