@@ -127,6 +127,8 @@ class Workflow:
             own_replay = e['exit_code'] in (4, 7) and fence.get('recovery_id') == rid
             if fence and not own_replay and int(fence.get('generation', 0)) != e['generation']:
                 return self.store.save(rid, state='STALE', action='NONE', reason='stale init generation')
+            if e['exit_code'] == 7 and init['action'] == 'HOLD':
+                return self.store.save(rid, state='HOLD', action='HOLD', reason=init['reason'])
             if e['exit_code'] in (4, 7) and not own_replay:
                 placement = self.store.placement(e['job_id'])
                 expected_uid = fence.get('new_jobset_uid') if fence.get('recovery_id') else placement.get('jobset_uid')
