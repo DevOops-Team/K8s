@@ -40,3 +40,29 @@ class InboxTests(unittest.TestCase):
                 seen.append('committed')
         accept_message(Consumer(), Workflow(), Message())
         self.assertEqual(seen, [{'event_id':'e1','rule_version':'abc1234'}, 'committed'])
+
+    def test_lifecycle_only_accepts_init_failures(self):
+        import json
+        from unittest.mock import Mock
+        from recovery.init_failure import decision
+
+        consumer, workflow, message = Mock(), Mock(), Mock()
+        message.topic.return_value = 'job.lifecycle'
+        message.headers.return_value = []
+        envelope = dict(type='job.progress', event_id='init-1', job_id='j1',
+                        generation=2, cluster='eks-a')
+        message.value.return_value = json.dumps(envelope).encode()
+        self.assertFalse(accept_message(consumer, workflow, message))
+        workflow.accept.assert_not_called()
+        consumer.commit.assert_called_once_with(message=message, asynchronous=False)
+
+        envelope.update(type='job.init_failed', payload=dict(
+            exit_code=7, reason='corrupt', pod_uid='pod', jobset_uid='js',
+            checkpoint_gen=1, checkpoint_step=750))
+        message.value.return_value = json.dumps(envelope).encode()
+        self.assertFalse(accept_message(consumer, workflow, message))
+        event = workflow.accept.call_args.args[0]
+        self.assertEqual(event['event_id'], 'init-1')
+        self.assertEqual(event['checkpoint'], {'generation': 1, 'step': 750})
+        self.assertEqual(decision(event)['action'], 'RETRY_GROUP')
+        self.assertEqual(consumer.commit.call_count, 2)
