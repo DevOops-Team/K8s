@@ -27,7 +27,7 @@ Backend `POST /api/jobs`(Backend `api/openapi.yaml`)는 multipart다. 투입기�
 - 모든 잡에 같은 파일을 붙인다. Backend가 잡마다 따로 저장하므로 잡 수만큼 모델 폴더를 올린다. 파일은 1MiB씩 읽어 보내 메모리에 한꺼번에 올리지 않는다.
 - 요청 제한 시간은 `BACKEND_TIMEOUT`(기본 600초).
 - 거절(400 검증 실패 · 409 같은 이름 · 413 업로드 상한 등)은 결과 파일 `result` 칸에 상태 코드와 응답 본문 앞부분으로 남고, 그 잡은 종료 대기에서 빠진다.
-- `max_steps`는 Backend가 학습 설정 `config.json`의 `max_steps`로 넘긴다(정수 1~10,000,000).
+- `max_steps`는 Backend가 학습 설정 `config.json`의 `max_steps`로 넘긴다(정수 1~10,000,000). 잡 전체의 최대 step 수라서, 중간에 끊겼다가 복구돼도 처음 정한 값(예: 400)에서 끝난다.
 
 ## 실험마다 Job으로 띄우기 (`launch.py`)
 
@@ -91,6 +91,5 @@ python submit.py scenario.csv --model-dir gpt2/ --data train.jsonl --train-py tr
 
 ## 아직 정할 것
 
-- `max_steps`가 복구 뒤에도 총 목표 step인지, 실험용 train.py가 그 값에서 멈추는지 (노찬경 확인)
 - 같은 모델·데이터를 잡마다 올리지 않고 재사용할 방법, 클러스터 안 투입기 Job이 그 파일을 어디서 읽을지 (노찬경 확인)
 - 장애 주입 시점은 이 파일에 넣지 않고 따로 (복구·모니터링과 정함)
