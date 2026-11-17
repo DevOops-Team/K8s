@@ -26,7 +26,7 @@ EXP_ID = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 MAX_EXP_ID = 63 - len("submitter-")   # Job 이름·Pod job-name 라벨 63자
 RESERVED = ("--exp-id", "--out", "--scenario-name", "--print-results", "--kind")
 ENV_DEFAULTS = {"BACKEND_URL": "http://backend.platform.svc:8000", "KAFKA_BOOTSTRAP": "172.30.0.40:9092",
-                "KAFKA_TOPIC": "job.lifecycle", "MODEL": "gpt2", "DATASET_ID": "ds-demo", "DATASET_VERSION": "1"}
+                "KAFKA_TOPIC": "job.lifecycle", "BACKEND_TIMEOUT": "600"}
 
 
 def check_exp_id(exp_id):

@@ -1,5 +1,7 @@
 """잡 투입기: 실험 ID 전달, 실험 사건, Kafka 전달 확인, 잡 종료 판단 (외부 접속 없이)"""
 from contextlib import redirect_stdout
+from email import policy
+from email.parser import BytesParser
 import io
 import json
 from pathlib import Path
@@ -23,6 +25,29 @@ class FakeProducer:
             self._cb(self.err, None)
             return 0
         return 1
+
+
+def make_inputs(tmp):
+    """작은 모델 폴더(하위 폴더·숨김 폴더 포함) · 데이터 · 학습 코드. main()에 넘길 인자를 돌려준다"""
+    tmp = Path(tmp)
+    (tmp / "gpt2" / "sub").mkdir(parents=True)
+    (tmp / "gpt2" / ".cache").mkdir()
+    (tmp / "gpt2" / "config.json").write_text('{"model_type": "gpt2"}', encoding="utf-8")
+    (tmp / "gpt2" / "sub" / "weights.bin").write_bytes(b"\x00\x01" * 1000)
+    (tmp / "gpt2" / ".cache" / "lock").write_text("x", encoding="utf-8")
+    (tmp / "train.jsonl").write_text('{"text": "hi"}\n', encoding="utf-8")
+    (tmp / "train.py").write_text("print('train')\n", encoding="utf-8")
+    return ["--model-dir", str(tmp / "gpt2"), "--data", str(tmp / "train.jsonl"), "--train-py", str(tmp / "train.py")]
+
+
+def parse_multipart(request):
+    """보낸 요청 본문을 다시 읽어 [(파트 이름, 내용 bytes)]"""
+    body = b"".join(request.data)
+    assert len(body) == int(request.get_header("Content-length")), "Content-Length가 본문 길이와 다름"
+    msg = BytesParser(policy=policy.HTTP).parsebytes(
+        b"Content-Type: " + request.get_header("Content-type").encode() + b"\r\n\r\n" + body)
+    return [(part.get_param("name", header="content-disposition"), part.get_payload(decode=True))
+            for part in msg.iter_parts()]
 
 
 def js(job_id, gen, state=None, cond=None):
@@ -74,11 +99,12 @@ class SubmissionTest(unittest.TestCase):
             with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
                 scenario, results = Path(tmp) / "scenario.csv", Path(tmp) / "results.csv"
                 scenario.write_text("0, 2, 600, fsdp\n0, 1, 300, fsdp\n", encoding="utf-8")
+                files = make_inputs(tmp)
                 requests = []
                 producer = FakeProducer()
 
                 def respond(request, timeout):
-                    requests.append(request)
+                    requests.append((request, parse_multipart(request)))
                     response = io.StringIO(json.dumps({"id": f"j{len(requests)}"}))
                     response.status = 201
                     return response
@@ -88,14 +114,20 @@ class SubmissionTest(unittest.TestCase):
                      patch.object(submit, "jobset_lister", return_value=lambda: [
                          js("j1", 1, "Completed"), js("j2", 1, "Completed")]), \
                      redirect_stdout(io.StringIO()):
-                    code = submit.main([str(scenario), "--prefix", "test-run", "--out", str(results), *options])
+                    code = submit.main([str(scenario), "--prefix", "test-run", "--out", str(results), *files,
+                                        *options])
 
                 self.assertEqual(code, 0)
                 self.assertEqual(len(requests), 2)
-                for request in requests:
+                for (request, parts), steps in zip(requests, (600, 300)):
                     self.assertEqual(request.full_url, f"{submit.BACKEND_URL}/api/jobs")
                     self.assertEqual(request.get_method(), "POST")
-                    self.assertEqual(json.loads(request.data)["exp_id"], expected)
+                    self.assertEqual(parts[0][0], "spec")
+                    spec = json.loads(parts[0][1])
+                    self.assertEqual(spec["exp_id"], expected)
+                    self.assertEqual(spec["hyperparameters"], {"max_steps": steps})   # 행마다 CSV step 수
+                    self.assertNotIn("model", spec)   # 백엔드 spec은 모르는 키를 거부
+                    self.assertNotIn("dataset", spec)
                 events = [value for _, _, value in producer.sent]
                 self.assertEqual([event["type"] for event in events],
                                  ["experiment.started", "experiment.ended"])
@@ -106,6 +138,7 @@ class SubmissionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             scenario, results = Path(tmp) / "scenario.csv", Path(tmp) / "results.csv"
             scenario.write_text("0, 1, 100, fsdp\n", encoding="utf-8")
+            files = make_inputs(tmp)
             producer, out = FakeProducer(), io.StringIO()
             response = io.StringIO(json.dumps({"id": "j1"}))
             response.status = 201
@@ -114,13 +147,60 @@ class SubmissionTest(unittest.TestCase):
                  patch.object(submit, "jobset_lister", return_value=lambda: [js("j1", 1, "Completed")]), \
                  patch.object(submit, "IMAGE", "ghcr.io/x/submitter:1.0.0"), redirect_stdout(out):
                 code = submit.main([str(scenario), "--exp-id", "exp-9", "--scenario-name", "fault-xid79.csv",
-                                    "--out", str(results), "--print-results"])
+                                    "--out", str(results), "--print-results", *files])
             self.assertEqual(code, 0)
             text = results.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# submitter image=ghcr.io/x/submitter:1.0.0 exp_id=exp-9 "))
         started = producer.sent[0][2]["payload"]
         self.assertEqual((started["scenario"], started["name"]), ("fault-xid79.csv", "fault-xid79"))
         self.assertIn(text, out.getvalue())
+
+    def test_multipart_parts(self):
+        """파트 순서·이름이 백엔드 형식대로: spec 먼저, model/<폴더>/<경로> (숨김 파일 뺌), data/, train/"""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            inputs = submit.Inputs(args[1], [args[3]], args[5])
+            sent = []
+
+            def respond(request, timeout):
+                sent.append(parse_multipart(request))
+                r = io.StringIO(json.dumps({"id": "j1", "jobsetName": "job-j1-g0001", "queue": "queue-light"}))
+                r.status = 201
+                return r
+            with patch.object(submit.urllib.request, "urlopen", side_effect=respond):
+                row = {"gpus": 1, "steps": 200, "strategy": "fsdp"}
+                result = submit.BackendSubmitter(inputs)(3, row, "x1117", "exp-1")
+        self.assertEqual(result, ("j1", "job-j1-g0001", "queue-light", "201"))
+        names = [n for n, _ in sent[0]]
+        self.assertEqual(names, ["spec", "model/gpt2/config.json", "model/gpt2/sub/weights.bin",
+                                 "data/train.jsonl", "train/train.py"])
+        self.assertEqual(dict(sent[0])["model/gpt2/sub/weights.bin"], b"\x00\x01" * 1000)
+        self.assertEqual(json.loads(sent[0][0][1]), {"name": "x1117-0003", "strategy": "fsdp", "gpus": 1,
+                                                    "hyperparameters": {"max_steps": 200}, "exp_id": "exp-1"})
+
+    def test_rejection_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            inputs = submit.Inputs(args[1], [args[3]], args[5])
+            err = submit.urllib.error.HTTPError("u", 413, "too large", {},
+                                                io.BytesIO(b'{"error":"model upload is over the limit"}'))
+            with patch.object(submit.urllib.request, "urlopen", side_effect=err):
+                result = submit.BackendSubmitter(inputs)(1, {"gpus": 1, "steps": 1, "strategy": "fsdp"}, "p", "e")
+        self.assertEqual(result[:3], ("", "", ""))
+        self.assertTrue(result[3].startswith("413 ") and "over the limit" in result[3])
+
+    def test_inputs_validation_and_required_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            (Path(tmp) / "gpt2" / "config.json").unlink()
+            with self.assertRaises(ValueError):
+                submit.Inputs(args[1], [args[3]], args[5])
+            scenario = Path(tmp) / "scenario.csv"
+            scenario.write_text("0, 1, 100, fsdp\n", encoding="utf-8")
+            for extra in ([], args):   # 파일 인자 없이 백엔드 모드 / config.json 없는 모델 폴더
+                with self.subTest(extra=extra), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
+                     patch("sys.stderr", io.StringIO()):
+                    submit.main([str(scenario), "--no-kafka", "--no-wait", *extra])
 
     def test_kind_preserves_exp_id_in_jobset_and_recovery_source(self):
         kind = submit.KindSubmitter.__new__(submit.KindSubmitter)
