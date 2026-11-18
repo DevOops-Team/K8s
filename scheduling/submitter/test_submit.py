@@ -178,39 +178,54 @@ class SubmissionTest(unittest.TestCase):
         self.assertEqual(json.loads(sent[0][0][1]), {"name": "x1117-0003", "strategy": "fsdp", "gpus": 1,
                                                     "hyperparameters": {"max_steps": 200}, "exp_id": "exp-1"})
 
-    def test_reuse_dataset_uploads_once(self):
-        """--reuse-dataset: 첫 성공 제출만 파일을 올리고, 실패하면 다음 잡이 다시 올리고, 이후는 spec.dataset만"""
+    def test_fixed_dataset_cli_sends_spec_only(self):
+        """--dataset: 파일 인자 없이 시나리오 전체를 spec.dataset만으로 제출하고 experiment.ended까지 (Backend GPU-200)"""
         with tempfile.TemporaryDirectory() as tmp:
-            args = make_inputs(tmp)
-            inputs = submit.Inputs(args[1], [args[3]], args[5])
-            sent, replies = [], [
-                submit.urllib.error.HTTPError("u", 502, "bad gateway", {}, io.BytesIO(b"upstream")),
-                {"id": "j2", "dataset": {"id": "j2", "version": 1}},
-                {"id": "j3"}, {"id": "j4"}]
+            scenario, results = Path(tmp) / "scenario.csv", Path(tmp) / "results.csv"
+            scenario.write_text("0, 4, 600, fsdp\n0, 1, 300, ddp\n", encoding="utf-8")
+            sent, producer = [], FakeProducer()
 
             def respond(request, timeout):
                 sent.append(parse_multipart(request))
-                reply = replies[len(sent) - 1]
-                if isinstance(reply, Exception):
-                    raise reply
-                r = io.StringIO(json.dumps(reply))
+                r = io.StringIO(json.dumps({"id": f"j{len(sent)}"}))
                 r.status = 201
                 return r
-            with patch.object(submit.urllib.request, "urlopen", side_effect=respond):
-                s = submit.BackendSubmitter(inputs, reuse=True)
-                for i, steps in enumerate((100, 200, 300, 400), 1):
-                    s(i, {"gpus": 1, "steps": steps, "strategy": "fsdp"}, "p", "exp-1")
+            with patch.object(submit.urllib.request, "urlopen", side_effect=respond), \
+                 patch.object(submit, "KafkaEvents", return_value=submit.KafkaEvents(producer=producer)), \
+                 patch.object(submit, "jobset_lister", return_value=lambda: [
+                     js("j1", 1, "Completed"), js("j2", 1, "Completed")]), \
+                 redirect_stdout(io.StringIO()):
+                code = submit.main([str(scenario), "--exp-id", "exp-ds-1", "--out", str(results),
+                                    "--dataset", "smollm2-wikitext2:1"])
+        self.assertEqual(code, 0)
+        self.assertEqual([[n for n, _ in parts] for parts in sent], [["spec"], ["spec"]])   # 첫 잡부터 파일 파트 없음
         specs = [json.loads(parts[0][1]) for parts in sent]
-        self.assertEqual([len(parts) for parts in sent], [5, 5, 1, 1])   # 실패한 첫 잡 · 성공한 둘째 잡만 파일
-        self.assertEqual([sp.get("dataset") for sp in specs], [None, None, {"id": "j2", "version": 1}, {"id": "j2", "version": 1}])
-        self.assertEqual([sp["hyperparameters"]["max_steps"] for sp in specs], [100, 200, 300, 400])
+        self.assertEqual([sp["dataset"] for sp in specs], [{"id": "smollm2-wikitext2", "version": 1}] * 2)
+        self.assertEqual([sp["hyperparameters"]["max_steps"] for sp in specs], [600, 300])
+        self.assertEqual({sp["exp_id"] for sp in specs}, {"exp-ds-1"})
+        self.assertEqual([v["type"] for _, _, v in producer.sent], ["experiment.started", "experiment.ended"])
 
-    def test_reuse_dataset_falls_back_to_job_id(self):
-        """응답에 dataset이 없으면 Backend 저장 자리 datasets/<잡 ID>/v1"""
-        self.assertEqual(submit.uploaded_dataset({"id": "j1"}), {"id": "j1", "version": 1})
-        self.assertEqual(submit.uploaded_dataset({"id": "j1", "dataset": {"id": "d9", "version": 3}}),
-                         {"id": "d9", "version": 3})
-        self.assertIsNone(submit.uploaded_dataset({}))
+    def test_parse_dataset(self):
+        self.assertEqual(submit.parse_dataset("smollm2-wikitext2:1"), {"id": "smollm2-wikitext2", "version": 1})
+        self.assertEqual(submit.parse_dataset("a-b:12"), {"id": "a-b", "version": 12})
+        # Backend가 거절하는 것: '-' 없음(학습 ID 모양) · 대문자 · 끝이 '-' · version 0·문자·빠짐 · ':' 없음
+        for bad in ("smollm2:1", "Smol-lm:1", "smol-:1", "smol-lm:0", "smol-lm:v1", "smol-lm:", "smol-lm"):
+            with self.subTest(bad=bad), self.assertRaises(submit.argparse.ArgumentTypeError):
+                submit.parse_dataset(bad)
+
+    def test_fixed_dataset_excludes_file_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            scenario = Path(tmp) / "scenario.csv"
+            scenario.write_text("0, 1, 100, fsdp\n", encoding="utf-8")
+            for extra in (["--dataset", "smollm2-wikitext2:1", *args],              # 파일과 같이 줌
+                          ["--dataset", "smollm2-wikitext2:1", "--data", args[3]],  # 파일 하나만 같이 줘도
+                          ["--dataset", "smollm2:1"]):                               # 형식 틀림
+                with self.subTest(extra=extra), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
+                     patch("sys.stderr", io.StringIO()):
+                    submit.main([str(scenario), "--no-kafka", "--no-wait", *extra])
+        with self.assertRaises(ValueError):
+            submit.BackendSubmitter()
 
     def test_upload_every_job_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
