@@ -30,7 +30,8 @@
     "resume_timeout_seconds": 1800,
     "kafka_backoff_seconds": 5,
     "kafka_max_backoff_seconds": 300,
-    "max_recovery_attempts": 3
+    "max_recovery_attempts": 3,
+    "job_failed_wait_seconds": 300
   },
   "evidence_policy": {
     "max_age_seconds": 300,

@@ -186,7 +186,7 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 ### Kafka job.init_failed 입력
 
-복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`만 inbox에 저장한다. 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
+복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`와 안전망용 `job.failed`를 inbox에 저장한다. 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
 
 ### Pod 상태 수집 어댑터
 
@@ -326,7 +326,7 @@ DynamoDB Decimal 정수 변환, 중복 수신 시각 보존, 지연/옛 세대/�
 
 ## GPU-120: Data #33 연동 및 사용자 취소
 
-- `gpu.fault`와 `job.lifecycle`을 함께 구독한다. lifecycle 중 `job.init_failed`만
+- `gpu.fault`와 `job.lifecycle`을 함께 구독한다. lifecycle 중 `job.init_failed` 및 `job.failed`를
   영속 inbox에 저장한 다음 offset을 커밋한다. 이 사건으로 모니터링 Watchdog를 갱신하지 않는다.
 - Data #33의 v1 봉투(event_id/job_id/generation/cluster/node)와 payload의
   exit_code/reason/rank/checkpoint_gen/checkpoint_step을 읽는다. checkpoint 값은
@@ -335,7 +335,8 @@ DynamoDB Decimal 정수 변환, 중복 수신 시각 보존, 지연/옛 세대/�
   Data develop 6a79baa의 failure_info에는 아직 없으므로 그 형식은 저장 후
   INIT_IDENTITY_MISSING/HOLD한다. UID를 추측하거나 현재 배치 값으로 채우지 않는다.
   누락 사건도 저장 후 커밋하여 같은 파티션의 다음 사건을 막지 않는다.
-- `job.cancelled`, `job.stopped`, `job.failed`는 offset만 커밋하고 복구를 시작하지 않는다.
+- `job.cancelled`, `job.stopped`는 offset만 커밋하고 복구를 시작하지 않는다.
+  `job.failed`는 아래 안전망으로 영속 저장하되 자동 복구를 시작하지 않는다.
   사용자 취소 주석/사건 생성은 Backend·감시기 소관이다. job.failed 요약만으로
   하드웨어 장애를 추정하지 않으며 자동 복구에는 분류된 gpu.fault가 필요하다.
 - STOP 75를 종료 증거나 복구 트리거로 사용하지 않는다. 옛 실행 종료 확인과
@@ -357,3 +358,32 @@ recovery_training_evidence Map에 조건부 기록하는 기존 제안을 사용
 사이드카에 recovery_table 직접 쓰기 권한을 주지 않는다. 생산자 구현·제한된 IAM 검증 전에는
 fencing_progress_input.enabled 및 producer_contract_confirmed를 켜지 않는다.
 배치 증거 입력도 별도로 필요하며 이 PR은 실제 EKS/Kafka 종단 간 배포 완료를 뜻하지 않는다.
+
+
+## GPU-120: 원인 미분류 job.failed 안전망
+
+`job.lifecycle`의 v1 `job.failed`를 관리 감시기의 봉투 필드
+(event_id/job_id/generation/cluster)로 검증하여 inbox에 저장한 뒤 offset을 커밋한다.
+Kafka source 문자열을 인증으로 간주하지 않는다. 이 입력은 학습 성공 증거가 아니며
+세대/승인 포인터/노드/JobSet을 변경하지 않는다. 취소·정상 종료 사건은 여전히 제외한다.
+
+- 최초 inbox 수신 created_at + retry_policy.job_failed_wait_seconds(기본 300초)를
+  job_failed_deadline에 고정한다. 사건 발생 시각이 오래됐어도 수신부터 기다린다.
+  중복 수신·재시작·폴링·설정 변경으로 이미 고정된 deadline을 연장하지 않는다.
+- 같은 job_id·generation·cluster의 다른 장애/init 사건을 inbox에서 확인하면
+  IGNORED로 닫고 related_event_id를 기록한다. fencing의 세대가 이미 증가했으면
+  STALE, 해당 세대 복구가 시작됐으면 IGNORED로 닫는다. 다른 job.failed는 증거가 아니다.
+- 상관관계 조회는 기존 foundation 규모의 ConsistentRead 전체 페이지 scan을 사용한다.
+  조회 실패는 '관련 사건 없음'으로 취급하지 않고 다음 reconcile에서 다시 확인한다.
+  규모가 커지면 job/세대 상관관계용 인덱스가 필요하다.
+- 300초 후에도 근거가 없으면 HOLD, reason=unclassified_job_failure,
+  stage/stopped_stage=WAITING_FOR_FAULT로 기록한다. 모니터링 Watchdog HOLD 중에도
+  이 읽기 전용 안전망은 동작한다. observe 모드에서는 OBSERVED만 기록한다.
+- 기존 recovery_hold_total{job_id,reason="unclassified_job_failure"} 및 구조화 로그,
+  recovery.action의 recovery.held outbox를 사용한다. 직접 Slack 전송은 추가하지 않는다.
+  Alertmanager 기존 HOLD 룰이 이 reason을 포함하는지는 모니터링 담당과 배포 시 확인한다.
+- 이미 HOLD를 남긴 뒤 뒤늦게 장애 사건이 도착해도 이 HOLD를 자동 해제하지 않는다.
+  별도 gpu.fault의 기존 복구 판단을 차단하는 job lock은 만들지 않는다.
+
+이 안전망은 실패 사건이 도착한 경우에만 동작한다. EKS 상태 전달까지 끊겨
+job.failed 자체가 오지 않는 모든 네트워크 장애를 감지한다고 가정하지 않는다.

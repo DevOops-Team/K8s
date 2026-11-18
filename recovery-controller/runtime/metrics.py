@@ -39,6 +39,7 @@ _REASON_PREFIXES = {
 }
 
 _REASON_CODES = {
+    'unclassified_job_failure': 'unclassified_job_failure',
     'HOLD': 'classifier_hold',
     'verified current init JobSet identity required': 'init_jobset_unverified',
     'failed checkpoint does not match verified restore baseline': 'restore_baseline_mismatch',
