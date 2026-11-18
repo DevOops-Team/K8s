@@ -94,7 +94,7 @@ class InboxTests(unittest.TestCase):
     def test_cancelled_and_failed_do_not_initiate_recovery(self):
         import json
         from unittest.mock import Mock
-        for kind in ('job.cancelled', 'job.stopped', 'job.failed', 'checkpoint.approved'):
+        for kind in ('job.cancelled', 'job.stopped', 'checkpoint.approved'):
             with self.subTest(kind=kind):
                 workflow, consumer, message = Mock(), Mock(), Mock()
                 message.topic.return_value = 'job.lifecycle'

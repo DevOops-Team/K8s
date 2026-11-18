@@ -40,10 +40,20 @@ def accept_message(consumer, workflow, msg):
     envelope=json.loads(msg.value())
     lifecycle = msg.topic() == JOB_LIFECYCLE_TOPIC if hasattr(msg, 'topic') else False
     if lifecycle:
-        if envelope.get('type') != 'job.init_failed':
+        if envelope.get('type') not in ('job.init_failed', 'job.failed'):
             consumer.commit(message=msg, asynchronous=False)
             return False
-        event = lifecycle_failure(envelope)
+        if envelope['type'] == 'job.failed':
+            if type(envelope.get('schema_version')) is not int or envelope['schema_version'] != 1:
+                raise ValueError('job.failed requires schema_version 1')
+            event = {key: envelope.get(key) for key in
+                     ('event_id', 'job_id', 'generation', 'cluster', 'node')}
+            if not event['job_id'] or type(event['generation']) is not int or event['generation'] < 1:
+                raise ValueError('job.failed requires job_id and generation')
+            event.update(component='job-watcher', lifecycle_type='job.failed',
+                         suggested_action='hold', category='app')
+        else:
+            event = lifecycle_failure(envelope)
     else:
         event = envelope.get('payload', envelope)
     headers = dict(msg.headers() or []) if hasattr(msg, 'headers') else {}
