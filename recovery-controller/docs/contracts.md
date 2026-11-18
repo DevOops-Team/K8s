@@ -171,7 +171,7 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 }
 ```
 
-`checkpoint`는 실제 다운로드에 사용한 승인본의 세대/step이며 코드 7에서 필수다. `generation`(실행 세대)과 다를 수 있다. exit_code만 있는 메시지나 로그 문자열로 실행 권한을 바꾸지 않는다. bool·미지원 종료 코드·손상 승인본 식별 누락은 수신 검증에서 거부하고 offset을 커밋하지 않는다. 잘못된 사건의 별도 DLQ는 후속 작업이다.
+`checkpoint`는 실제 다운로드에 사용한 승인본의 세대/step이며 코드 7에서 필수다. `generation`(실행 세대)과 다를 수 있다. exit_code만 있는 메시지나 로그 문자열로 실행 권한을 바꾸지 않는다. bool·미지원 종료 코드는 수신 검증에서 거부한다. 코드 7의 실패 복원점이 누락되거나 현재 복원 기준과 다르면 승인본을 격리하지 않고 HOLD한다. 잘못된 사건의 별도 DLQ는 후속 작업이다.
 
 | 종료 코드 | failure_class | 기본 판단 |
 |---|---|---|
@@ -184,9 +184,13 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 코드 4·7은 fencing의 현재 세대와 실행 클러스터, 현재 JobSet UID를 확인한다. 복구 중이면 fencing.new_jobset_uid, 정상 첫 실행이면 recovery_table의 job 메타데이터 `jobset_uid`·`placement_generation`·`cluster`를 사용한다. 증거가 없거나 일치하지 않으면 HOLD한다. 코드 4는 다른 recovery_id의 잠금을 빼앗지 않는다. 코드 7은 현재 새 JobSet UID와 복원 기준이 확인되고 단계가 NEW_RUN_SUBMITTED/RESUMING일 때에 한해 기존 잠금을 조건부 인계하고 다음 세대로 복구한다.
 
+### Kafka job.init_failed 입력
+
+복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`만 inbox에 저장한다. 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
+
 ### Pod 상태 수집 어댑터
 
-`init_failure.collect(pod, cluster=..., job_id=..., generation=..., jobset_uid=..., checkpoint=...)`는 신뢰된 탐지기에서 호출할 순수 변환 함수다. `training` Pod의 job/generation 레이블을 검증하고 `status.initContainerStatuses[name=ckpt-init].state.terminated.exitCode`를 읽는다. 성공·실행 중·lastState의 과거 실패는 사건으로 만들지 않는다. Pod UID·컨테이너 종료 정보로 안정된 event_id를 만든다.
+`init_failure.collect(pod, cluster=..., job_id=..., generation=..., jobset_uid=..., checkpoint=...)`는 신뢰된 탐지기에서 호출할 순수 변환 함수다. `training` Pod의 job/generation 레이블을 검증하고 `status.initContainerStatuses[name=ckpt-init].state.terminated.exitCode`를 읽는다. 성공·실행 중·lastState의 과거 실패는 사건으로 만들지 않는다. Pod UID·컨테이너 종료 정보로 안정된 event_id를 만든다. GPU-120의 termination-log JSON은 현재 terminated.message에서 읽는다. 종료 코드는 Kubernetes의 exitCode를 기준으로 하고, 코드와 일치하는 reason을 init_reason에 남긴다. checkpoint_gen과 checkpoint_step은 실제 복원을 시도한 승인본의 값이며 유효한 쌍만 checkpoint로 전달한다. detail은 복구 판단에 사용하지 않는다. 메시지가 없는 이전 이미지에 한해 신뢰된 생산자가 전달한 checkpoint 인자를 사용할 수 있다.
 
 **생산자가 Pod → Job → JobSet의 ownerReference/UID를 검증해야 한다.** 함수의 jobset_uid 인자만으로 소유 관계를 검증했다고 볼 수 없다. 생산자는 실제 복원 기준도 확인해야 하며 컨트롤러는 클라이언트 로그가 주장하는 승인본을 임의로 신뢰하지 않는다. Kafka 생산 ACL·생산자 인증·탐지기 배포는 담당 파트에서 연결한다. 이 함수가 EKS Watch를 시작하거나 자동 발행하지 않는다.
 
@@ -319,3 +323,37 @@ DynamoDB Decimal 정수 변환, 중복 수신 시각 보존, 지연/옛 세대/�
 사이드카 실제 증거 쓰기·IAM, relocator 공통 deadline 소비, AWS/EKS 운영 장애 시험은
 다른 담당자와의 실제 연동이 남아 있다. 직접 EC2 호출·종료 권한을 추가하지 않았다.
 로컬 컨트롤러 테스트 145개 통과. push·이미지 게시·클러스터 적용·AWS 통합 검증 전이다.
+
+## GPU-120: Data #33 연동 및 사용자 취소
+
+- `gpu.fault`와 `job.lifecycle`을 함께 구독한다. lifecycle 중 `job.init_failed`만
+  영속 inbox에 저장한 다음 offset을 커밋한다. 이 사건으로 모니터링 Watchdog를 갱신하지 않는다.
+- Data #33의 v1 봉투(event_id/job_id/generation/cluster/node)와 payload의
+  exit_code/reason/rank/checkpoint_gen/checkpoint_step을 읽는다. checkpoint 값은
+  최신 포인터 추측이 아닌 실제 실패 복원점이어야 한다.
+- **생산자 추가 필요:** payload에 실제 `pod_uid`, `jobset_uid`를 넣어야 한다.
+  Data develop 6a79baa의 failure_info에는 아직 없으므로 그 형식은 저장 후
+  INIT_IDENTITY_MISSING/HOLD한다. UID를 추측하거나 현재 배치 값으로 채우지 않는다.
+  누락 사건도 저장 후 커밋하여 같은 파티션의 다음 사건을 막지 않는다.
+- `job.cancelled`, `job.stopped`, `job.failed`는 offset만 커밋하고 복구를 시작하지 않는다.
+  사용자 취소 주석/사건 생성은 Backend·감시기 소관이다. job.failed 요약만으로
+  하드웨어 장애를 추정하지 않으며 자동 복구에는 분류된 gpu.fault가 필요하다.
+- STOP 75를 종료 증거나 복구 트리거로 사용하지 않는다. 옛 실행 종료 확인과
+  OLD_RUN_STOPPED는 relocator의 기존 계약을 유지한다.
+
+### POD-002 복원 및 진행 증거
+
+기존 Store.claim은 손상 체크포인트를 차단하고 이전 승인본을 선택한다. fallback일 때
+승인 포인터 snapshot 및 실행 권한 조건으로 approved_gen/approved_step을 이전 승인본으로
+전환하고, 이전 승인본도 없거나 차단됐으면 제거한다. 따라서 approved_*만 읽는 ckpt-init도
+선택된 복원점을 받는다. recovery_resume_*는 컨트롤러의 검증 기준으로 함께 고정한다.
+추가 세대 실행마다 retry_count +1이며 단순 포인터 선택은 별도 시도를 소비하지 않는다.
+
+진행 사실은 trainer가 생성하고 rank 0 사이드카(데이터)가 fencing의
+recovery_training_evidence Map에 조건부 기록하는 기존 제안을 사용한다.
+조건에는 generation·owner·recovery_id·new_jobset_uid 일치를 포함해야 한다.
+컨트롤러 FencingProgressInput이 읽어 EvidenceWriter(producer=training)로 recovery_table에
+투영한다. 형식은 evidence-contract.md의 progress 예시를 따른다.
+사이드카에 recovery_table 직접 쓰기 권한을 주지 않는다. 생산자 구현·제한된 IAM 검증 전에는
+fencing_progress_input.enabled 및 producer_contract_confirmed를 켜지 않는다.
+배치 증거 입력도 별도로 필요하며 이 PR은 실제 EKS/Kafka 종단 간 배포 완료를 뜻하지 않는다.

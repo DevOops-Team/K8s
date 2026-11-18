@@ -3,7 +3,7 @@ import json
 import threading
 import time
 from integrations.dynamodb import Store
-from integrations.kafka import accept_message, create_clients
+from integrations.kafka import JOB_LIFECYCLE_TOPIC, accept_message, create_clients
 from integrations.relocation import DispatcherCapacity, RelocationClient
 from recovery.workflow import Workflow
 from runtime.watchdog import Watchdog
@@ -63,16 +63,16 @@ def run(config, stop, health):
     thread.start()
     consumer.list_topics(topic=config['fault_topic'],timeout=10)
     health['kafka_connected']=True
-    consumer.subscribe([config['fault_topic']])
+    consumer.subscribe([config['fault_topic'], JOB_LIFECYCLE_TOPIC])
     try:
         while not stop.is_set():
             msg=consumer.poll(1)
             if msg is None: continue
             if msg.error(): raise RuntimeError('Kafka poll failed')
             # Invalid input is not committed: fail closed until schema/source is corrected.
-            accept_message(consumer,workflow,msg)  # Durable inbox before offset commit.
+            received_fault = accept_message(consumer, workflow, msg)
             with guard_lock:
-                if guard:
+                if guard and received_fault:
                     guard.fault_received(int(time.time()))
             health['kafka_connected']=True
     finally:

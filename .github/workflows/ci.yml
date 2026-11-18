@@ -22,7 +22,7 @@
 #   K8s 레포 Variable DEPLOY_IMAGES에 이름을 쉼표로 추가한다. 예) dispatcher,recovery-controller
 # 새 이미지 추가: 아래 matrix.include와 changes job의 paths에 한 줄씩.
 #
-# 액션은 커밋 SHA로 고정 (packages: write 토큰을 쓰므로). dependabot이 주 1회 갱신 PR을 올린다.
+# 액션은 커밋 SHA로 고정 (packages: write 토큰을 쓰므로). 갱신은 필요할 때 손으로 SHA를 바꾼다 (GPU-206).
 name: CI
 
 on:
