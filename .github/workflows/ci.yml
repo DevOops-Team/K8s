@@ -7,7 +7,7 @@
 #   ghcr.io/devoops-team/aws-signing-helper    aws-signing-helper/              (빌드 단계에서 helper 버전 확인)
 #                                              Roles Anywhere 인증 sidecar. 배포는 각 앱 overlay가 참조 (GPU-173)
 #
-#   PR(→ develop, → main), develop push : 모든 이미지 테스트 + 이미지 빌드 (push 안 함)
+#   PR(→ develop, → main)              : 모든 이미지 테스트 + 이미지 빌드 (push 안 함)
 #   main push(머지)                     : 같은 검사 → 릴리스 버전 계산 → 바뀐 이미지만 push {X.Y.Z, X.Y, main, sha-<7자리>}
 #                                         → 버전 봇이 태그 vX.Y.Z · Release 생성
 #                                         → Variable DEPLOY_IMAGES에 든 이미지만 Gitops overlay에 X.Y.Z@digest 반영 (배포 봇)
@@ -29,7 +29,7 @@ on:
   pull_request:
     branches: [develop, main]
   push:
-    branches: [develop, main]
+    branches: [main]   # develop 커밋은 PR에서 점검 — push까지 걸면 같은 커밋이 두 번 돈다 (GPU-214)
   workflow_dispatch:
 
 permissions:
