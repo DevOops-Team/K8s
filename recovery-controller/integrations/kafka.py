@@ -7,6 +7,8 @@ JOB_LIFECYCLE_TOPIC = 'job.lifecycle'
 
 
 def lifecycle_failure(envelope):
+    if envelope.get('schema_version') != 1:
+        raise ValueError('job.init_failed requires schema_version 1')
     payload = envelope.get('payload')
     if not isinstance(payload, dict):
         raise ValueError('job.init_failed requires a payload')
@@ -20,6 +22,11 @@ def lifecycle_failure(envelope):
     event.update(component='ckpt-init', category='app',
                  exit_code=payload.get('exit_code'), pod_uid=payload.get('pod_uid'),
                  jobset_uid=payload.get('jobset_uid'))
+    rank = payload.get('rank')
+    if rank is not None:
+        if type(rank) is not int or rank < 0:
+            raise ValueError('job.init_failed rank must be a nonnegative integer')
+        event['rank'] = rank
     reason = payload.get('reason')
     if isinstance(reason, str):
         event['init_reason'] = reason

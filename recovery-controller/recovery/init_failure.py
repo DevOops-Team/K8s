@@ -26,10 +26,14 @@ def decision(event):
     if not _integer(code) or code not in POLICY:
         raise ValueError('ckpt-init exit_code must be one of 2,3,4,5,6,7')
     if not all(isinstance(event.get(key), str) and event[key].strip()
-               for key in ('job_id', 'jobset_uid', 'pod_uid')):
-        raise ValueError('ckpt-init requires job_id, jobset_uid and pod_uid')
+               for key in ('job_id',)):
+        raise ValueError('ckpt-init requires job_id')
     if not _integer(event.get('generation')) or event['generation'] < 1:
         raise ValueError('ckpt-init requires a positive integer generation')
+    if not all(isinstance(event.get(key), str) and event[key].strip()
+               for key in ('jobset_uid', 'pod_uid')):
+        return dict(action='HOLD', failure_class='INIT_IDENTITY_MISSING',
+                    reason='ckpt-init requires pod_uid and jobset_uid from the producer')
     if code == 7:
         checkpoint = event.get('checkpoint')
         if (not isinstance(checkpoint, dict)
