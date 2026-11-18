@@ -30,7 +30,7 @@ class Store:
         key = 'event#' + event['event_id']
         try:
             self.table.put_item(Item=dict(pk=key, kind='event', event=event, digest=digest,
-                                          state='RECEIVED', created_at=int(time.time()), published=False),
+                                          state='RECEIVED', created_at=int(self.clock()), published=False),
                                 ConditionExpression='attribute_not_exists(pk)')
         except Exception as exc:
             if getattr(exc, 'response', {}).get('Error', {}).get('Code') != 'ConditionalCheckFailedException':

@@ -7,7 +7,7 @@ from urllib.error import HTTPError
 DEFAULTS = dict(max_recovery_attempts=3, api_attempts=3, claim_timeout_seconds=300,
                 stop_timeout_seconds=900, submit_timeout_seconds=900,
                 resume_timeout_seconds=1800, kafka_backoff_seconds=5,
-                kafka_max_backoff_seconds=300)
+                kafka_max_backoff_seconds=300, job_failed_wait_seconds=300)
 
 
 class Runner:
@@ -63,6 +63,9 @@ class Runner:
     def operation(self, record, now, monitoring_hold):
         from recovery.workflow import TERMINAL
         rid = record['event']['event_id']
+        if record['event'].get('lifecycle_type') == 'job.failed':
+            from recovery.job_failed import reconcile
+            return reconcile(self, record, now)
         if record['state'] == 'HOLD':
             record = self.poll_held(record, now, monitoring_hold)
         finish = record['state'] == 'RECOVERED'
