@@ -22,10 +22,12 @@
 같은 job-id의 JobSet이 하나 이상 있고 전부 Completed·Failed면 끝. 재배치 중 잠깐 0개일 때는 계속 기다린다.
 기다리다 시간이 다 되면 experiment.ended를 보내지 않는다 (끝 시각이 틀리면 지표가 틀려서).
 
-백엔드 제출 (Backend api/openapi.yaml POST /api/jobs): multipart. 첫 파트 spec(JSON) 뒤에 잡마다 같은 파일을 붙인다.
+백엔드 제출 (Backend api/openapi.yaml POST /api/jobs): multipart. 첫 파트 spec(JSON) 뒤에 파일을 붙인다.
   - spec: name · strategy · gpus · hyperparameters.max_steps(= CSV step 수) · exp_id
   - model/<폴더>/<경로>: 모델 폴더 전부 (config.json 필수) · data/<파일>.jsonl: 1개 이상 · train/<파일>.py: 1개
-  - max_steps 의미(복구 뒤 총 목표 step인지)와 반복 업로드 대신 재사용할 방법은 노찬경 확인 중 (GPU-166)
+  - max_steps는 잡 전체의 목표 step 수다. 복구 뒤에도 처음부터 센 총 step으로 끝난다.
+  - 기본은 잡마다 같은 파일을 올린다. --reuse-dataset이면 첫 잡만 올리고 나머지 잡은 spec.dataset {id, version}으로
+    그 데이터셋을 가리켜 파일 없이 제출한다 (Backend GPU-200 요청 형식, Backend 반영 전이라 기본 꺼짐).
 """
 import argparse
 import csv
@@ -80,7 +82,7 @@ def queue_for(gpus):
 # ---------- 제출 방법 두 가지
 
 class Inputs:
-    """잡마다 붙여 보내는 파일 (백엔드가 잡마다 S3에 따로 저장): [(파트 이름, 로컬 경로)]"""
+    """제출에 붙여 보내는 파일 (백엔드가 제출마다 S3에 따로 저장): [(파트 이름, 로컬 경로)]"""
 
     def __init__(self, model_dir, data, train_py):
         model_dir, self.files = Path(model_dir), []
@@ -141,20 +143,34 @@ def backend_spec(i, row, prefix, exp_id):
             "hyperparameters": {"max_steps": row["steps"]}, "exp_id": exp_id}
 
 
-class BackendSubmitter:
-    """백엔드 POST /api/jobs (multipart): spec + 모델·데이터·학습 코드"""
+def uploaded_dataset(out):
+    """제출 응답에서 방금 올린 데이터셋. 응답에 dataset이 없으면 Backend 저장 자리 datasets/<잡 ID>/v1"""
+    ds = out.get("dataset") or {}
+    if ds.get("id") and ds.get("version"):
+        return {"id": ds["id"], "version": int(ds["version"])}
+    return {"id": out["id"], "version": 1} if out.get("id") else None
 
-    def __init__(self, inputs, url=None, timeout=None):
-        self.inputs, self.url = inputs, f"{url or BACKEND_URL}/api/jobs"
+
+class BackendSubmitter:
+    """백엔드 POST /api/jobs (multipart): spec + 모델·데이터·학습 코드.
+    reuse면 첫 성공 제출만 파일을 올리고 다음 잡은 그 데이터셋을 가리킨다 (Backend GPU-200 반영 뒤 켤 것)"""
+
+    def __init__(self, inputs, url=None, timeout=None, reuse=False):
+        self.inputs, self.url, self.reuse, self.dataset = inputs, f"{url or BACKEND_URL}/api/jobs", reuse, None
         self.timeout = BACKEND_TIMEOUT if timeout is None else timeout
 
     def __call__(self, i, row, prefix, exp_id):
-        ctype, length, body = multipart(backend_spec(i, row, prefix, exp_id), self.inputs.files)
+        spec, files = backend_spec(i, row, prefix, exp_id), self.inputs.files
+        if self.dataset:   # 이미 올린 데이터셋 재사용: 파일 파트 없이 spec만
+            spec, files = {**spec, "dataset": self.dataset}, []
+        ctype, length, body = multipart(spec, files)
         req = urllib.request.Request(self.url, data=body, method="POST",
                                      headers={"Content-Type": ctype, "Content-Length": str(length)})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 out = json.load(r)
+                if self.reuse and files and r.status // 100 == 2:   # 올리기에 성공한 첫 잡의 데이터셋을 이후 잡이 씀
+                    self.dataset = uploaded_dataset(out)
                 return out.get("id", ""), out.get("jobsetName", ""), out.get("queue", ""), str(r.status)
         except urllib.error.HTTPError as e:   # 400 검증 실패 · 409 같은 이름 · 413 업로드 상한 등: 본문을 결과에 남김
             return "", "", "", f"{e.code} {e.read().decode(errors='replace')[:300]}"
@@ -322,6 +338,8 @@ def main(argv=None):
     b.add_argument("--model-dir", help="Hugging Face 모델 폴더 (config.json 포함)")
     b.add_argument("--data", nargs="+", help="학습 데이터 .jsonl (1개 이상)")
     b.add_argument("--train-py", help="학습 코드 .py")
+    b.add_argument("--reuse-dataset", action="store_true",
+                   help="첫 잡만 파일을 올리고 나머지는 그 데이터셋을 가리켜 제출 (Backend GPU-200 반영 뒤 사용)")
     g = ap.add_argument_group("실험 기록 (experiment.started payload = experiments 테이블 열)")
     g.add_argument("--exp-id", default=None, help="기본 exp-<prefix>")
     g.add_argument("--name", default=None, help="기본 시나리오 파일 이름")
@@ -350,7 +368,7 @@ def main(argv=None):
         if not (a.model_dir and a.data and a.train_py):
             ap.error("백엔드 제출에는 --model-dir · --data · --train-py가 필요함 (--kind면 필요 없음)")
         try:
-            submit = BackendSubmitter(Inputs(a.model_dir, a.data, a.train_py))
+            submit = BackendSubmitter(Inputs(a.model_dir, a.data, a.train_py), reuse=a.reuse_dataset)
         except ValueError as e:
             ap.error(str(e))
     list_jobsets = None if a.no_wait else jobset_lister(a.context)   # 제출 전에 접속 설정부터 확인

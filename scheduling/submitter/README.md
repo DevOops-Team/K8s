@@ -24,7 +24,8 @@ Backend `POST /api/jobs`(Backend `api/openapi.yaml`)는 multipart다. 투입기�
 | `data/<파일 이름>` | `--data`의 `.jsonl` 파일 (1개 이상, 파일 이름이 겹치면 안 됨) |
 | `train/<파일 이름>` | `--train-py`의 `.py` 파일 1개 |
 
-- 모든 잡에 같은 파일을 붙인다. Backend가 잡마다 따로 저장하므로 잡 수만큼 모델 폴더를 올린다. 파일은 1MiB씩 읽어 보내 메모리에 한꺼번에 올리지 않는다.
+- 기본은 모든 잡에 같은 파일을 붙인다. Backend가 제출마다 따로 저장하므로 잡 수만큼 모델 폴더를 올린다. 파일은 1MiB씩 읽어 보내 메모리에 한꺼번에 올리지 않는다.
+- `--reuse-dataset`: 첫 잡만 파일을 올리고, 나머지 잡은 `spec.dataset` `{id, version}`으로 그 데이터셋을 가리켜 파일 파트 없이 제출한다. 데이터셋은 제출 응답의 `dataset`에서 읽고, 없으면 Backend 저장 자리(`datasets/<잡 ID>/v1`)로 본다. 첫 잡이 실패하면 다음 잡이 다시 올린다. Backend 재사용 제출(GPU-200)이 들어오기 전에는 모르는 칸이라 거절되므로 기본은 꺼 둔다.
 - 요청 제한 시간은 `BACKEND_TIMEOUT`(기본 600초).
 - 거절(400 검증 실패 · 409 같은 이름 · 413 업로드 상한 등)은 결과 파일 `result` 칸에 상태 코드와 응답 본문 앞부분으로 남고, 그 잡은 종료 대기에서 빠진다.
 - `max_steps`는 Backend가 학습 설정 `config.json`의 `max_steps`로 넘긴다(정수 1~10,000,000). 잡 전체의 최대 step 수라서, 중간에 끊겼다가 복구돼도 처음 정한 값(예: 400)에서 끝난다.
@@ -54,7 +55,7 @@ kubectl -n platform logs -f job/submitter-exp-0001   # 진행 상황, 끝나면 
 | `--image` | O | 투입기 이미지(태그 또는 digest). 결과 첫 줄에 남는다. `SUBMITTER_IMAGE`로도 줌 |
 | `--context` | | 관리 클러스터 kubeconfig context (기본 현재 context) |
 | `--backend-url` `--kafka-bootstrap` `--kafka-topic` `--backend-timeout` | | 투입기 환경 변수. 안 주면 같은 이름의 환경 변수, 그것도 없으면 `submit.py` 기본값 |
-| `--` 뒤 | | `submit.py`에 그대로: `--model-dir` `--data` `--train-py` `--policy` `--fault-type` `--spare`/`--no-spare` `--checkpoint-every-steps` `--wait-timeout` `--speed` `--name` `--prefix` |
+| `--` 뒤 | | `submit.py`에 그대로: `--model-dir` `--data` `--train-py` `--reuse-dataset` `--policy` `--fault-type` `--spare`/`--no-spare` `--checkpoint-every-steps` `--wait-timeout` `--speed` `--name` `--prefix` |
 
 종료 코드: 0 = 띄움, 1 = 같은 exp_id가 이미 있음. 실험이 끝났는지는 Job 상태(`Complete`/`Failed`)로 본다. 투입기는 모든 잡이 끝나 `experiment.ended`를 보낸 뒤에 성공 종료하고, 시간 초과 땐 ended 없이 실패 종료한다.
 
@@ -91,5 +92,6 @@ python submit.py scenario.csv --model-dir gpt2/ --data train.jsonl --train-py tr
 
 ## 아직 정할 것
 
-- 같은 모델·데이터를 잡마다 올리지 않고 재사용할 방법, 클러스터 안 투입기 Job이 그 파일을 어디서 읽을지 (노찬경 확인)
+- Backend 재사용 제출의 실제 형식(GPU-200): 정해지면 `--reuse-dataset`의 칸 이름·응답 읽는 법을 맞추고 기본으로 켠다
+- 클러스터 안 투입기 Job이 모델·데이터 파일을 어디서 읽을지 (GPU-170)
 - 장애 주입 시점은 이 파일에 넣지 않고 따로 (복구·모니터링과 정함)

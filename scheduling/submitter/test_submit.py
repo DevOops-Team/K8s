@@ -178,6 +178,57 @@ class SubmissionTest(unittest.TestCase):
         self.assertEqual(json.loads(sent[0][0][1]), {"name": "x1117-0003", "strategy": "fsdp", "gpus": 1,
                                                     "hyperparameters": {"max_steps": 200}, "exp_id": "exp-1"})
 
+    def test_reuse_dataset_uploads_once(self):
+        """--reuse-dataset: 첫 성공 제출만 파일을 올리고, 실패하면 다음 잡이 다시 올리고, 이후는 spec.dataset만"""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            inputs = submit.Inputs(args[1], [args[3]], args[5])
+            sent, replies = [], [
+                submit.urllib.error.HTTPError("u", 502, "bad gateway", {}, io.BytesIO(b"upstream")),
+                {"id": "j2", "dataset": {"id": "j2", "version": 1}},
+                {"id": "j3"}, {"id": "j4"}]
+
+            def respond(request, timeout):
+                sent.append(parse_multipart(request))
+                reply = replies[len(sent) - 1]
+                if isinstance(reply, Exception):
+                    raise reply
+                r = io.StringIO(json.dumps(reply))
+                r.status = 201
+                return r
+            with patch.object(submit.urllib.request, "urlopen", side_effect=respond):
+                s = submit.BackendSubmitter(inputs, reuse=True)
+                for i, steps in enumerate((100, 200, 300, 400), 1):
+                    s(i, {"gpus": 1, "steps": steps, "strategy": "fsdp"}, "p", "exp-1")
+        specs = [json.loads(parts[0][1]) for parts in sent]
+        self.assertEqual([len(parts) for parts in sent], [5, 5, 1, 1])   # 실패한 첫 잡 · 성공한 둘째 잡만 파일
+        self.assertEqual([sp.get("dataset") for sp in specs], [None, None, {"id": "j2", "version": 1}, {"id": "j2", "version": 1}])
+        self.assertEqual([sp["hyperparameters"]["max_steps"] for sp in specs], [100, 200, 300, 400])
+
+    def test_reuse_dataset_falls_back_to_job_id(self):
+        """응답에 dataset이 없으면 Backend 저장 자리 datasets/<잡 ID>/v1"""
+        self.assertEqual(submit.uploaded_dataset({"id": "j1"}), {"id": "j1", "version": 1})
+        self.assertEqual(submit.uploaded_dataset({"id": "j1", "dataset": {"id": "d9", "version": 3}}),
+                         {"id": "d9", "version": 3})
+        self.assertIsNone(submit.uploaded_dataset({}))
+
+    def test_upload_every_job_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = make_inputs(tmp)
+            inputs, sent = submit.Inputs(args[1], [args[3]], args[5]), []
+
+            def respond(request, timeout):
+                sent.append(parse_multipart(request))
+                r = io.StringIO(json.dumps({"id": f"j{len(sent)}"}))
+                r.status = 201
+                return r
+            with patch.object(submit.urllib.request, "urlopen", side_effect=respond):
+                s = submit.BackendSubmitter(inputs)
+                for i in (1, 2):
+                    s(i, {"gpus": 1, "steps": 10, "strategy": "fsdp"}, "p", "e")
+        self.assertEqual([len(parts) for parts in sent], [5, 5])
+        self.assertNotIn("dataset", json.loads(sent[1][0][1]))
+
     def test_rejection_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = make_inputs(tmp)
