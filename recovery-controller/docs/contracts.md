@@ -184,6 +184,10 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 코드 4·7은 fencing의 현재 세대와 실행 클러스터, 현재 JobSet UID를 확인한다. 복구 중이면 fencing.new_jobset_uid, 정상 첫 실행이면 recovery_table의 job 메타데이터 `jobset_uid`·`placement_generation`·`cluster`를 사용한다. 증거가 없거나 일치하지 않으면 HOLD한다. 코드 4는 다른 recovery_id의 잠금을 빼앗지 않는다. 코드 7은 현재 새 JobSet UID와 복원 기준이 확인되고 단계가 NEW_RUN_SUBMITTED/RESUMING일 때에 한해 기존 잠금을 조건부 인계하고 다음 세대로 복구한다.
 
+### Kafka job.init_failed 입력
+
+복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`만 inbox에 저장한다. 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
+
 ### Pod 상태 수집 어댑터
 
 `init_failure.collect(pod, cluster=..., job_id=..., generation=..., jobset_uid=..., checkpoint=...)`는 신뢰된 탐지기에서 호출할 순수 변환 함수다. `training` Pod의 job/generation 레이블을 검증하고 `status.initContainerStatuses[name=ckpt-init].state.terminated.exitCode`를 읽는다. 성공·실행 중·lastState의 과거 실패는 사건으로 만들지 않는다. Pod UID·컨테이너 종료 정보로 안정된 event_id를 만든다. GPU-120의 termination-log JSON은 현재 terminated.message에서 읽는다. 종료 코드는 Kubernetes의 exitCode를 기준으로 하고, 코드와 일치하는 reason을 init_reason에 남긴다. checkpoint_gen과 checkpoint_step은 실제 복원을 시도한 승인본의 값이며 유효한 쌍만 checkpoint로 전달한다. detail은 복구 판단에 사용하지 않는다. 메시지가 없는 이전 이미지에 한해 신뢰된 생산자가 전달한 checkpoint 인자를 사용할 수 있다.

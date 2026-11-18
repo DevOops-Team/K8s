@@ -34,7 +34,8 @@ def validate_config(config):
                 raise ValueError('configure '+key)
         if config['recovery_table']==config['fencing_table']:
             raise ValueError('recovery inbox and job_id fencing table must be separate')
-        if config['fault_topic']==config['result_topic']:
+        from integrations.kafka import JOB_LIFECYCLE_TOPIC
+        if len({config['fault_topic'], config['result_topic'], JOB_LIFECYCLE_TOPIC}) != 3:
             raise ValueError('input and output topics must differ')
         if type(config.get('reconcile_seconds',5)) is not int or not 1 <= config.get('reconcile_seconds',5) <= 60:
             raise ValueError('reconcile_seconds must be 1..60')
