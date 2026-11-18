@@ -7,7 +7,8 @@
     30, 1, 200, fsdp, 180
 실행 시간은 선택 칸: kind(KWOK 가짜 GPU)에서는 step을 못 돌리므로 이 시간 뒤 Pod를 끝내 흉내 낸다.
 
-    python submit.py scenario.csv --policy ours         # 백엔드 POST /api/jobs (BACKEND_URL)
+    python submit.py scenario.csv --model-dir gpt2/ --data train.jsonl --train-py train.py --policy ours
+                                                        # 백엔드 POST /api/jobs (BACKEND_URL)
     python submit.py scenario.csv --kind --no-kafka     # kind: 백엔드 없이 같은 규칙으로 직접 제출, Kafka 없이
     python submit.py scenario.csv --speed 10            # 시각을 1/10로 줄여서
 결과: results-<시각>.csv (작업ID · JobSet 이름 · 큐 · 제출 시각 · 응답). 실험 시작·종료 사건도 같이 찍는다.
@@ -21,14 +22,18 @@
 같은 job-id의 JobSet이 하나 이상 있고 전부 Completed·Failed면 끝. 재배치 중 잠깐 0개일 때는 계속 기다린다.
 기다리다 시간이 다 되면 experiment.ended를 보내지 않는다 (끝 시각이 틀리면 지표가 틀려서).
 
-아직 안 정해진 것:
-  - step 수·실행 시간을 백엔드에 넘길 칸이 API에 없음 (max_steps는 사용자에게 안 엶, 서비스 API 명세 3절) -> 노찬경과 정할 것.
-    지금은 hyperparameters에 넣지 않고 결과 파일에만 남긴다.
+백엔드 제출 (Backend api/openapi.yaml POST /api/jobs): multipart. 첫 파트 spec(JSON) 뒤에 파일을 붙인다.
+  - spec: name · strategy · gpus · hyperparameters.max_steps(= CSV step 수) · exp_id
+  - model/<폴더>/<경로>: 모델 폴더 전부 (config.json 필수) · data/<파일>.jsonl: 1개 이상 · train/<파일>.py: 1개
+  - max_steps는 잡 전체의 목표 step 수다. 복구 뒤에도 처음부터 센 총 step으로 끝난다.
+  - 기본은 잡마다 같은 파일을 올린다. --reuse-dataset이면 첫 잡만 올리고 나머지 잡은 spec.dataset {id, version}으로
+    그 데이터셋을 가리켜 파일 없이 제출한다 (Backend GPU-200 요청 형식, Backend 반영 전이라 기본 꺼짐).
 """
 import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -38,8 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend.platform.svc:8000")
-MODEL = os.getenv("MODEL", "gpt2")
-DATASET = {"id": os.getenv("DATASET_ID", "ds-demo"), "version": int(os.getenv("DATASET_VERSION", "1"))}
+BACKEND_TIMEOUT = float(os.getenv("BACKEND_TIMEOUT", "600"))   # 잡마다 모델 폴더까지 올리므로 넉넉히
 STORE_NS = "scheduling-local-store"   # kind: 복구 원본·펜싱 기록 ConfigMap 자리 (controllers/recovery_store.py)
 HEAVY_MIN_GPUS, MAX_JOB_GPUS = 3, 4   # 백엔드 공용 함수와 같은 규칙 (스케줄링 문서): 3장↑ heavy, 5장↑ 거부
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "172.30.0.40:9092")   # 온프레미스 Kafka VM, 인증 없음
@@ -77,19 +81,101 @@ def queue_for(gpus):
 
 # ---------- 제출 방법 두 가지
 
-def submit_backend(i, row, prefix, exp_id):
-    body = {"name": f"{prefix}-{i:04d}", "model": MODEL, "strategy": row["strategy"], "gpus": row["gpus"],
-            "dataset": DATASET, "exp_id": exp_id}
-    req = urllib.request.Request(f"{BACKEND_URL}/api/jobs", data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            out = json.load(r)
-            return out.get("id", ""), out.get("jobsetName", ""), out.get("queue", ""), str(r.status)
-    except urllib.error.HTTPError as e:
-        return "", "", "", f"{e.code} {e.read().decode(errors='replace')[:200]}"
-    except (urllib.error.URLError, OSError) as e:
-        return "", "", "", f"ERR {e}"
+class Inputs:
+    """제출에 붙여 보내는 파일 (백엔드가 제출마다 S3에 따로 저장): [(파트 이름, 로컬 경로)]"""
+
+    def __init__(self, model_dir, data, train_py):
+        model_dir, self.files = Path(model_dir), []
+        if not (model_dir / "config.json").is_file():
+            raise ValueError(f"{model_dir}: 모델 폴더에 config.json이 없음 (Hugging Face 모델 폴더여야 함)")
+        for p in sorted(model_dir.rglob("*")):
+            rel = p.relative_to(model_dir)
+            if p.is_file() and not any(part.startswith(".") for part in rel.parts):   # .cache·.git 등은 뺌
+                self.files.append((f"model/{model_dir.name}/{rel.as_posix()}", p))
+        names = set()
+        for d in data:
+            d = Path(d)
+            if d.suffix != ".jsonl" or not d.is_file():
+                raise ValueError(f"{d}: 학습 데이터는 있는 .jsonl 파일이어야 함")
+            if d.name in names:
+                raise ValueError(f"{d}: 학습 데이터 파일 이름이 겹침 (백엔드는 파일 이름으로 저장)")
+            names.add(d.name)
+            self.files.append((f"data/{d.name}", d))
+        train_py = Path(train_py)
+        if train_py.suffix != ".py" or not train_py.is_file():
+            raise ValueError(f"{train_py}: 학습 코드는 있는 .py 파일이어야 함")
+        self.files.append((f"train/{train_py.name}", train_py))
+        if not names:
+            raise ValueError("학습 데이터(.jsonl)가 1개 이상 필요함")
+
+
+def multipart(spec, files, boundary=None):
+    """(Content-Type, 길이, 본문 조각을 내는 generator). 파일은 1MiB씩 읽어 보낸다 (모델이 수백 MB라 메모리에 안 올림)"""
+    b = boundary or uuid.uuid4().hex
+    crlf = "\r\n"
+
+    def head(disposition, ctype):
+        return f"--{b}{crlf}Content-Disposition: form-data; {disposition}{crlf}Content-Type: {ctype}{crlf}{crlf}".encode()
+
+    def quote(v):   # 따옴표·줄바꿈이 파트 머리를 깨지 않게
+        return re.sub(r'["\\\r\n]', "_", v)
+
+    pieces = [head('name="spec"', "application/json"), json.dumps(spec).encode(), crlf.encode()]
+    for name, path in files:
+        pieces += [head(f'name="{quote(name)}"; filename="{quote(path.name)}"', "application/octet-stream"),
+                   path, crlf.encode()]
+    pieces.append(f"--{b}--{crlf}".encode())
+    length = sum(len(x) if isinstance(x, bytes) else x.stat().st_size for x in pieces)
+
+    def body():
+        for x in pieces:
+            if isinstance(x, bytes):
+                yield x
+                continue
+            with open(x, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    yield chunk
+    return f"multipart/form-data; boundary={b}", length, body()
+
+
+def backend_spec(i, row, prefix, exp_id):
+    return {"name": f"{prefix}-{i:04d}", "strategy": row["strategy"], "gpus": row["gpus"],
+            "hyperparameters": {"max_steps": row["steps"]}, "exp_id": exp_id}
+
+
+def uploaded_dataset(out):
+    """제출 응답에서 방금 올린 데이터셋. 응답에 dataset이 없으면 Backend 저장 자리 datasets/<잡 ID>/v1"""
+    ds = out.get("dataset") or {}
+    if ds.get("id") and ds.get("version"):
+        return {"id": ds["id"], "version": int(ds["version"])}
+    return {"id": out["id"], "version": 1} if out.get("id") else None
+
+
+class BackendSubmitter:
+    """백엔드 POST /api/jobs (multipart): spec + 모델·데이터·학습 코드.
+    reuse면 첫 성공 제출만 파일을 올리고 다음 잡은 그 데이터셋을 가리킨다 (Backend GPU-200 반영 뒤 켤 것)"""
+
+    def __init__(self, inputs, url=None, timeout=None, reuse=False):
+        self.inputs, self.url, self.reuse, self.dataset = inputs, f"{url or BACKEND_URL}/api/jobs", reuse, None
+        self.timeout = BACKEND_TIMEOUT if timeout is None else timeout
+
+    def __call__(self, i, row, prefix, exp_id):
+        spec, files = backend_spec(i, row, prefix, exp_id), self.inputs.files
+        if self.dataset:   # 이미 올린 데이터셋 재사용: 파일 파트 없이 spec만
+            spec, files = {**spec, "dataset": self.dataset}, []
+        ctype, length, body = multipart(spec, files)
+        req = urllib.request.Request(self.url, data=body, method="POST",
+                                     headers={"Content-Type": ctype, "Content-Length": str(length)})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                out = json.load(r)
+                if self.reuse and files and r.status // 100 == 2:   # 올리기에 성공한 첫 잡의 데이터셋을 이후 잡이 씀
+                    self.dataset = uploaded_dataset(out)
+                return out.get("id", ""), out.get("jobsetName", ""), out.get("queue", ""), str(r.status)
+        except urllib.error.HTTPError as e:   # 400 검증 실패 · 409 같은 이름 · 413 업로드 상한 등: 본문을 결과에 남김
+            return "", "", "", f"{e.code} {e.read().decode(errors='replace')[:300]}"
+        except (urllib.error.URLError, OSError) as e:
+            return "", "", "", f"ERR {e}"
 
 
 class KindSubmitter:
@@ -248,6 +334,12 @@ def main(argv=None):
     ap.add_argument("--speed", type=float, default=1.0, help="시각을 이 배수만큼 빨리")
     ap.add_argument("--prefix", default=datetime.now().strftime("x%m%d%H%M"), help="작업 이름 앞부분")
     ap.add_argument("--out", default=None)
+    b = ap.add_argument_group("백엔드 제출 파일 (--kind가 아니면 필수, 모든 잡에 같은 파일)")
+    b.add_argument("--model-dir", help="Hugging Face 모델 폴더 (config.json 포함)")
+    b.add_argument("--data", nargs="+", help="학습 데이터 .jsonl (1개 이상)")
+    b.add_argument("--train-py", help="학습 코드 .py")
+    b.add_argument("--reuse-dataset", action="store_true",
+                   help="첫 잡만 파일을 올리고 나머지는 그 데이터셋을 가리켜 제출 (Backend GPU-200 반영 뒤 사용)")
     g = ap.add_argument_group("실험 기록 (experiment.started payload = experiments 테이블 열)")
     g.add_argument("--exp-id", default=None, help="기본 exp-<prefix>")
     g.add_argument("--name", default=None, help="기본 시나리오 파일 이름")
@@ -270,7 +362,15 @@ def main(argv=None):
                   "fault_type": a.fault_type, "spare_enabled": a.spare_enabled,
                   "checkpoint_every_steps": a.checkpoint_every_steps}
     events = None if a.no_kafka else KafkaEvents()
-    submit = KindSubmitter(a.context) if a.kind else submit_backend
+    if a.kind:
+        submit = KindSubmitter(a.context)
+    else:
+        if not (a.model_dir and a.data and a.train_py):
+            ap.error("백엔드 제출에는 --model-dir · --data · --train-py가 필요함 (--kind면 필요 없음)")
+        try:
+            submit = BackendSubmitter(Inputs(a.model_dir, a.data, a.train_py), reuse=a.reuse_dataset)
+        except ValueError as e:
+            ap.error(str(e))
     list_jobsets = None if a.no_wait else jobset_lister(a.context)   # 제출 전에 접속 설정부터 확인
     out_path = a.out or f"results-{datetime.now():%m%d-%H%M%S}.csv"
     try:
