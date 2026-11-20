@@ -27,6 +27,7 @@ class GateTests(unittest.TestCase):
         self.core.read_namespaced_config_map.return_value = Obj(data={"CLUSTER_NAME": "worker3"})
         self.core.list_namespaced_pod.return_value = Obj(items=[
             Obj(spec=Obj(priority_class_name=G.K.PLACEHOLDER_PRIORITY_CLASS), status=Obj(phase="Running"))])
+        self.core.list_node.return_value = Obj(items=[])
         self.gate = G.Gate(self.manager, (self.co, self.core, self.apps))
 
     def workload(self, **status):
@@ -146,21 +147,22 @@ class GateTests(unittest.TestCase):
         self.manager.patch_cluster_custom_object.assert_not_called()
 
     def test_on_each_missing_resource(self):
-        resources = [(self.apps.read_namespaced_deployment, name) for _, name in G.DEPLOYMENTS]
-        resources += [(self.co.get_cluster_custom_object, name) for name in G.CLUSTER_QUEUES]
-        resources += [(self.co.get_namespaced_custom_object, name) for name in G.LOCAL_QUEUES]
-        resources += [(self.core.read_namespaced_config_map, G.CLUSTER_INFO),
-                      (self.core.read_namespaced_service_account, G.RELOCATOR[1]),
-                      (self.manager.get_cluster_custom_object, "worker3")]
+        # 후보가 여럿인 것(Deployment 이름 · relocator SA)은 후보가 전부 없을 때만 없음
+        resources = [(self.apps.read_namespaced_deployment, set(names)) for _, names in G.DEPLOYMENTS]
+        resources += [(self.co.get_cluster_custom_object, {name}) for name in G.CLUSTER_QUEUES]
+        resources += [(self.co.get_namespaced_custom_object, {name}) for name in G.LOCAL_QUEUES]
+        resources += [(self.core.read_namespaced_config_map, {G.CLUSTER_INFO}),
+                      (self.core.read_namespaced_service_account, {name for _, name in G.RELOCATORS}),
+                      (self.manager.get_cluster_custom_object, {"worker3"})]
         for method, missing in resources:
-            with self.subTest(missing=missing):
+            with self.subTest(missing=sorted(missing)):
                 original = method.return_value
 
                 def read(*args, **kwargs):
                     name = args[3] if method in (self.co.get_cluster_custom_object,
                                                  self.manager.get_cluster_custom_object) else (
                         args[4] if method == self.co.get_namespaced_custom_object else args[0])
-                    if name == missing:
+                    if name in missing:
                         raise client.ApiException(status=404)
                     return original
 
@@ -196,6 +198,59 @@ class GateTests(unittest.TestCase):
         self.core.list_namespaced_pod.reset_mock()
         self.assertEqual(self.gate.on_check("worker3", no_spare=True), 0)
         self.core.list_namespaced_pod.assert_not_called()
+
+    def test_on_deployment_alternative_names(self):
+        # EKS Helm 차트는 jobset-controller, kind upstream manifest는 jobset-controller-manager (GPU-236)
+        for present in ("jobset-controller", "jobset-controller-manager"):
+            with self.subTest(present=present):
+                def read(name, ns, **kwargs):
+                    if ns == "jobset-system" and name != present:
+                        raise client.ApiException(status=404)
+                    return Obj(status=Obj(available_replicas=1))
+                self.apps.read_namespaced_deployment.side_effect = read
+                self.assertEqual(self.gate.on_check("worker3"), 0)
+
+    def test_on_unready_alternative_deployment(self):
+        def read(name, ns, **kwargs):
+            if name == "jobset-controller-manager":
+                raise client.ApiException(status=404)
+            return Obj(status=Obj(available_replicas=0 if name == "jobset-controller" else 1))
+        self.apps.read_namespaced_deployment.side_effect = read
+        self.assertEqual(self.gate.on_check("worker3", unfence=True), 1)
+        self.assertIn("준비 안 됨: Deployment jobset-system/jobset-controller", self.output.getvalue())
+        self.manager.patch_cluster_custom_object.assert_not_called()
+
+    def test_on_relocator_namespace_candidates(self):
+        # EKS는 IaC가 kueue-system/relocator를 만든다 (GPU-236)
+        for present in ("kueue-system", "platform"):
+            with self.subTest(present=present):
+                def read(name, ns, **kwargs):
+                    if ns != present:
+                        raise client.ApiException(status=404)
+                    return Obj()
+                self.core.read_namespaced_service_account.side_effect = read
+                self.assertEqual(self.gate.on_check("worker3"), 0)
+
+    def node(self, ready="True", unschedulable=None, taints=("spare",)):
+        keys = {"spare": G.K.TAINT_SPARE, "faulty": G.K.TAINT_FAULTY, "gpu": "nvidia.com/gpu"}
+        return Obj(spec=Obj(unschedulable=unschedulable, taints=[Obj(key=keys[t]) for t in taints]),
+                   status=Obj(conditions=[Obj(type="Ready", status=ready)]))
+
+    def test_on_spare_node_without_placeholder(self):
+        # EKS: 자리 표시 Pod 없이 예비 taint 노드그룹 (ADR-25)
+        self.core.list_namespaced_pod.return_value = Obj(items=[])
+        self.core.list_node.return_value = Obj(items=[self.node(taints=("gpu",)), self.node(taints=("gpu", "spare"))])
+        self.assertEqual(self.gate.on_check("worker3", unfence=True), 0)
+        self.assertEqual(self.core.list_node.call_args.kwargs["label_selector"], G.K.GPU_NODE_SELECTOR)
+
+    def test_on_spare_node_not_usable(self):
+        self.core.list_namespaced_pod.return_value = Obj(items=[])
+        for case, node in (("not ready", self.node(ready="False")), ("cordoned", self.node(unschedulable=True)),
+                           ("faulty", self.node(taints=("spare", "faulty"))), ("no spare taint", self.node(taints=("gpu",)))):
+            with self.subTest(case=case):
+                self.core.list_node.return_value = Obj(items=[node])
+                self.assertEqual(self.gate.on_check("worker3", unfence=True), 1)
+                self.manager.patch_cluster_custom_object.assert_not_called()
 
     def test_main_connection_and_missing_mkc(self):
         for error in (G.config.ConfigException("bad context"), client.ApiException(status=404),

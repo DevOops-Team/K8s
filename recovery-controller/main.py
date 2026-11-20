@@ -125,6 +125,14 @@ def main():
     server=HTTPServer(('0.0.0.0',8080),Health)
     thread=threading.Thread(target=server.serve_forever,daemon=True)
     thread.start()
+    heartbeat_thread = None
+    if config['event_source'] == 'kafka':
+        from prometheus_client import REGISTRY
+        from runtime.heartbeat_metrics import HeartbeatMetrics
+        heartbeat = HeartbeatMetrics()
+        REGISTRY.register(heartbeat)
+        heartbeat_thread = threading.Thread(target=heartbeat.run, args=(config, stop), daemon=True)
+        heartbeat_thread.start()
     def terminate(*_):
         stop.set()
     signal.signal(signal.SIGTERM,terminate)
@@ -144,6 +152,8 @@ def main():
         stop.set()
         server.shutdown()
         server.server_close()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=15)
 
 
 
