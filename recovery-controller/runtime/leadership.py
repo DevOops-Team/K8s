@@ -9,6 +9,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+LEASE_NAME = 'recovery-controller'
 LEASE_SECONDS = 30
 RENEW_SECONDS = 12
 RETRY_SECONDS = 2
@@ -18,14 +19,32 @@ SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
 class LeaseClient:
     def __init__(self):
         namespace = (SERVICE_ACCOUNT / 'namespace').read_text().strip()
-        self.url = (f'https://kubernetes.default.svc/apis/coordination.k8s.io/v1'
-                    f'/namespaces/{namespace}/leases/recovery-controller')
+        self.collection = (f'https://kubernetes.default.svc/apis/coordination.k8s.io/v1'
+                           f'/namespaces/{namespace}/leases')
+        self.url = f'{self.collection}/{LEASE_NAME}'
         self.tls = ssl.create_default_context(cafile=str(SERVICE_ACCOUNT / 'ca.crt'))
 
     def request(self, method, document=None):
+        try:
+            return self._send(self.url, method, document)
+        except urllib.error.HTTPError as exc:
+            if method != 'GET' or exc.code != 404:
+                raise
+        # Argo CD excludes Lease by default, so the manifest copy is never applied (GPU-248).
+        # Create an empty Lease; a 409 means another replica created it first.
+        try:
+            return self._send(self.collection, 'POST', {
+                'apiVersion': 'coordination.k8s.io/v1', 'kind': 'Lease',
+                'metadata': {'name': LEASE_NAME}, 'spec': {}})
+        except urllib.error.HTTPError as exc:
+            if exc.code != 409:
+                raise
+        return self._send(self.url, 'GET')
+
+    def _send(self, url, method, document=None):
         token = (SERVICE_ACCOUNT / 'token').read_text().strip()
         body = None if document is None else json.dumps(document).encode()
-        request = urllib.request.Request(self.url, data=body, method=method,
+        request = urllib.request.Request(url, data=body, method=method,
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, context=self.tls, timeout=3) as response:
             return json.load(response)

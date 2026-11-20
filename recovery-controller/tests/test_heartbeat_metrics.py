@@ -70,3 +70,26 @@ class HeartbeatMetricsTests(unittest.TestCase):
         self.assertIn('recovery_fencing_heartbeat_scrape_success 0.0', output())
         self.metrics.failed()
         self.assertIn('recovery_fencing_heartbeat_read_errors_total 1.0', output())
+
+
+class HeartbeatRunRecoveryTests(unittest.TestCase):
+    """GPU-248: a failed scan must rebuild the client instead of reusing it until restart."""
+
+    def test_failed_refresh_rebuilds_table_client(self):
+        import threading
+        metrics = HeartbeatMetrics()
+        metrics.interval_seconds = 0
+        stop = threading.Event()
+        broken, healthy = Mock(), Mock()
+        broken.scan.side_effect = OSError('no credentials')
+
+        def healthy_scan(**_):
+            stop.set()
+            return dict(Items=[])
+        healthy.scan.side_effect = healthy_scan
+        tables = iter([broken, healthy])
+        metrics.run(dict(aws_region='us-east-2', fencing_table='t'), stop,
+                    table_factory=lambda config: next(tables))
+        self.assertEqual(metrics.errors, 1)
+        self.assertEqual(metrics.success, 1)
+        self.assertEqual(broken.scan.call_count, 1)

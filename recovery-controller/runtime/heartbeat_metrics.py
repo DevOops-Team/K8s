@@ -49,10 +49,11 @@ class HeartbeatMetrics:
                 args['ExclusiveStartKey'] = key
         except Exception:
             self.failed()
-            return
+            return False
         with self.lock:
             self.rows, self.invalid, self.success = rows, invalid, 1
             self.last_success = self.clock()
+        return True
 
     def failed(self):
         with self.lock:
@@ -84,18 +85,27 @@ class HeartbeatMetrics:
         yield GaugeMetricFamily('recovery_fencing_heartbeat_last_success_timestamp_seconds',
                                 'Unix time of last complete successful fencing refresh', value=last)
 
-    def run(self, config, stop):
+    @staticmethod
+    def open_table(config):
+        import boto3
+        from botocore.config import Config
+        db = boto3.resource('dynamodb', region_name=config['aws_region'],
+                            config=Config(retries={'total_max_attempts': 1},
+                                          connect_timeout=5, read_timeout=10))
+        return db.Table(config['fencing_table'])
+
+    def run(self, config, stop, table_factory=None):
+        # A failed scan rebuilds the client: credentials or permissions missing at start
+        # must not keep success=0 until the Pod restarts (GPU-248).
+        table_factory = table_factory or self.open_table
         while not stop.is_set():
             try:
-                import boto3
-                from botocore.config import Config
-                db = boto3.resource('dynamodb', region_name=config['aws_region'],
-                                    config=Config(retries={'total_max_attempts': 1},
-                                                  connect_timeout=5, read_timeout=10))
-                table = db.Table(config['fencing_table'])
+                table = table_factory(config)
                 while not stop.is_set():
-                    self.refresh(table)
+                    ok = self.refresh(table)
                     stop.wait(self.interval_seconds)
+                    if not ok:
+                        break
             except Exception:
                 self.failed()
                 stop.wait(self.interval_seconds)
