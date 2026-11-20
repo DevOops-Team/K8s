@@ -1,10 +1,28 @@
 """DynamoDB durable inbox/job CAS and fencing progress records."""
 import json
+import math
 import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from recovery.evidence import whole
+
+
+def dynamo_value(value):
+    """Return a copy boto3 can store: floats become Decimal, nested maps/lists included (GPU-248).
+
+    Kafka JSON (e.g. classifier confidence) parses to float, which boto3 rejects with TypeError.
+    NaN/Infinity cannot be stored and stay invalid input (ValueError, fail closed).
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError('non-finite number in event')
+        return Decimal(repr(value))
+    if isinstance(value, dict):
+        return {k: dynamo_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [dynamo_value(v) for v in value]
+    return value
 
 
 class RecoveryBlocked(ValueError):
@@ -29,7 +47,7 @@ class Store:
     def accept(self, event, digest):
         key = 'event#' + event['event_id']
         try:
-            self.table.put_item(Item=dict(pk=key, kind='event', event=event, digest=digest,
+            self.table.put_item(Item=dict(pk=key, kind='event', event=dynamo_value(event), digest=digest,
                                           state='RECEIVED', created_at=int(self.clock()), published=False),
                                 ConditionExpression='attribute_not_exists(pk)')
         except Exception as exc:
