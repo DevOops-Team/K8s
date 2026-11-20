@@ -44,11 +44,14 @@ RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
 # 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지키는 최대 시간 (격리 시각, 옛 실행 종료 뒤엔 그 시각부터).
 # 넘으면 푼다: 옛 실행이 안 멈추거나 복구 잡이 관리 쿼터를 못 받는 동안 클러스터 하나를 계속 막지 않게
 RELOCATION_HOLD_SECONDS = int(os.getenv("RELOCATION_HOLD_SECONDS", "300"))
+# 지명도 찜도 못 하는 잡의 경고를 같은 이유로 다시 남기는 간격 (매 루프 반복 방지, GPU-237)
+UNPLACED_LOG_SECONDS = int(os.getenv("UNPLACED_LOG_SECONDS", "300"))
 IN_PLACE = {"restartInPlace", "moveToSpare"}   # 재제출 잡이 원래 클러스터로 돌아오는 action
 RR_FINAL = {"Done", "Failed", "Duplicate"}
 
 kube.setup_logging("dispatcher")
 log = kube.logging.getLogger("dispatcher")
+_unplaced = {}   # Workload 이름 -> (이유, 마지막으로 남긴 시각). 갈 곳 없는 잡 경고의 반복 방지
 
 
 def cluster_state(mgr, workers) -> list:
@@ -230,6 +233,8 @@ def reconcile(mgr, workers):
     by_name = {c.name: c for c in clusters}
     all_wls = kube.list_workloads(mgr)
     wls = [w for w in all_wls if waiting(w)]
+    for gone in set(_unplaced) - {w["metadata"]["name"] for w in wls}:   # 더 안 기다리는 잡은 잊는다
+        del _unplaced[gone]
 
     # 이미 지명했지만 아직 워커 쿼터에 안 잡힌 것 = 곧 들어갈 몫. 미리 빼 둔다
     for wl in wls:
@@ -343,8 +348,13 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved, training_reservations=Non
                          f" [전에 찜: {pinned}]" if pinned else "")
             else:
                 log.warning("%s (GPU %d): 찜할 워커도 없음 (펜싱·끊김·exclude·다른 잡의 찜), 대기", name, gpus)
+        if hold is None and pinned is None:   # 찜이 막 풀린 루프는 위 경고가 이미 남김
+            warn_unplaced(wl, gpus, unplaced_reason(clusters, gpus, rec, exclude, opts["target"]))
+        elif hold is not None:
+            _unplaced.pop(name, None)
         return
     patch_nomination(mgr, wl, pick, tried)
+    _unplaced.pop(name, None)
     for cluster, (_, holder) in list(reserved.items()):
         if holder == owner:
             del reserved[cluster]
@@ -359,6 +369,41 @@ def dispatch_one(mgr, wl, clusters, by_name, reserved, training_reservations=Non
     c.place(gpus, rec)
     log.info("%s (GPU %d%s) -> %s  [남은 쿼터 학습 %d / 복구 %d, 쿼터 뒤 %ds]", name, gpus, ", 복구" if rec else "",
              pick, c.quota_free, c.recovery_free, quota_wait(wl))
+
+
+def unplaced_reason(clusters, gpus, rec, exclude, target):
+    """잡이 갈 수 있는 워커가 하나도 없는 이유를 워커마다 적는다 (예: "eks-a 펜싱, eks-b 펜싱")"""
+    parts = []
+    for c in sorted(clusters, key=lambda c: c.name):
+        if target and c.name != target:
+            continue
+        if not c.active:
+            why = "끊김"
+        elif c.fenced:
+            why = "펜싱"
+        elif c.name in exclude:
+            why = "exclude·다른 잡의 찜"
+        elif not c.can_ever_fit(gpus, rec):
+            why = "GPU 부족"
+        else:
+            why = f"빈 GPU {max(c.free_for(rec), 0)}"
+        parts.append(f"{c.name} {why}")
+    if target and not parts:
+        parts.append(f"target {target} 없음")
+    return ", ".join(parts) or "워커 없음"
+
+
+def warn_unplaced(wl, gpus, reason):
+    """지명도 찜도 못 한 잡 경고. 이유가 바뀌었거나 UNPLACED_LOG_SECONDS가 지났을 때만 남긴다.
+    예전에는 이 경우 로그가 없어서 펜싱이 남은 워커 때문에 잡이 68분 멈춘 걸 알 수 없었다 (2026-11-20)"""
+    name = wl["metadata"]["name"]
+    last = _unplaced.get(name)
+    now = time.time()
+    if last and last[0] == reason and now - last[1] < UNPLACED_LOG_SECONDS:
+        return
+    _unplaced[name] = (reason, now)
+    log.warning("%s (GPU %d, 쿼터 뒤 %ds): 보낼 워커도 찜할 워커도 없음 -> 대기 [%s]",
+                name, gpus, quota_wait(wl), reason)
 
 
 def recovery_capacity(mgr, workers, payload):

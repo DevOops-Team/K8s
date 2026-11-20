@@ -398,5 +398,61 @@ class RecoveryCapacity(unittest.TestCase):
             self.ask({"w1": (4, 1)}, mkcs=[self.mkc("w1", fenced=True)])
 
 
+
+class UnplacedWarning(unittest.TestCase):
+    """갈 곳 없는 잡 경고 (GPU-237): 2026-11-20 워커 둘 다 펜싱인데 로그가 없어 68분 동안 원인을 못 봤다"""
+
+    def setUp(self):
+        D._unplaced.clear()
+        self.addCleanup(D._unplaced.clear)
+
+    def run_loop(self, clusters, wls):
+        with mock.patch.object(D, "cluster_state", return_value=clusters), \
+             mock.patch.object(D, "relocation_holds", return_value={}), \
+             mock.patch.object(D.kube, "list_workloads", return_value=wls), \
+             mock.patch.object(D.kube, "owner_annotations", return_value={}), \
+             mock.patch.object(D, "patch_nomination"), mock.patch.object(D, "set_reserved"), \
+             mock.patch.object(D, "touch_nomination"), \
+             self.assertNoLogs(D.log, "ERROR"):
+            with mock.patch.object(D.log, "warning") as warning:
+                D.reconcile(None, None)
+        return [c for c in warning.call_args_list if "찜할 워커도 없음 -> 대기" in c.args[0]]
+
+    def fenced_all(self):
+        return [cl("eks-a", 4, fenced=True), cl("eks-b", 4, fenced=True)]
+
+    def test_all_fenced_warns_once_per_job_with_reason(self):
+        calls = self.run_loop(self.fenced_all(), [wl("j1", 2, "T1"), wl("j2", 4, "T2")])
+        self.assertEqual([c.args[1] for c in calls], ["j1", "j2"])
+        self.assertEqual(calls[0].args[-1], "eks-a 펜싱, eks-b 펜싱")
+
+    def test_same_reason_not_repeated_every_loop(self):
+        self.run_loop(self.fenced_all(), [wl("j1", 2, "T1")])
+        self.assertEqual(self.run_loop(self.fenced_all(), [wl("j1", 2, "T1")]), [])
+
+    def test_repeats_after_interval_or_when_reason_changes(self):
+        self.run_loop(self.fenced_all(), [wl("j1", 2, "T1")])
+        D._unplaced["j1"] = (D._unplaced["j1"][0], 0)   # 간격이 지난 것처럼
+        self.assertEqual(len(self.run_loop(self.fenced_all(), [wl("j1", 2, "T1")])), 1)
+        changed = [cl("eks-a", 4, active=False), cl("eks-b", 4, fenced=True)]
+        calls = self.run_loop(changed, [wl("j1", 2, "T1")])
+        self.assertEqual(calls[0].args[-1], "eks-a 끊김, eks-b 펜싱")
+
+    def test_no_warning_when_nominated_or_reserved(self):
+        # 들어갈 곳이 있으면 지명, 자리만 없으면 찜 -> 둘 다 이 경고 대상이 아님
+        self.assertEqual(self.run_loop([cl("eks-a", 4), cl("eks-b", 0)], [wl("j1", 2, "T1"), wl("big", 4, "T2")]), [])
+        self.assertEqual(D._unplaced, {})
+
+    def test_forgets_jobs_that_stop_waiting(self):
+        self.run_loop(self.fenced_all(), [wl("j1", 2, "T1")])
+        self.run_loop(self.fenced_all(), [])
+        self.assertEqual(D._unplaced, {})
+
+    def test_reason_lists_capacity_and_exclusion(self):
+        cs = [cl("w1", 0, total=1), cl("w2", 4, fenced=True), cl("w3", 2)]
+        self.assertEqual(D.unplaced_reason(cs, 4, False, {"w3"}, None), "w1 GPU 부족, w2 펜싱, w3 exclude·다른 잡의 찜")
+        self.assertEqual(D.unplaced_reason(cs, 4, False, set(), "w9"), "target w9 없음")
+
+
 if __name__ == "__main__":
     unittest.main()
