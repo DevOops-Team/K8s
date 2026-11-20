@@ -12,12 +12,14 @@ from urllib3.exceptions import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
 import keys as K
 
-DEPLOYMENTS = (("kueue-system", "kueue-controller-manager"),
-               ("jobset-system", "jobset-controller-manager"))
+# (네임스페이스, 이름 후보). 하나라도 있으면 된다: kind는 upstream manifest, EKS는 Helm 차트 이름을 쓴다 (GPU-236)
+DEPLOYMENTS = (("kueue-system", ("kueue-controller-manager",)),
+               ("jobset-system", ("jobset-controller", "jobset-controller-manager")))
 CLUSTER_QUEUES = ("train-cq", "recovery-cq")
 LOCAL_QUEUES = ("queue-heavy", "queue-light", "queue-recovery")
 CLUSTER_INFO = "devoops-cluster-info"
-RELOCATOR = ("platform", "relocator")
+# relocator ServiceAccount 후보: EKS는 IaC eks-hub-registration이 kueue-system에 만든다, kind는 platform
+RELOCATORS = (("kueue-system", "relocator"), ("platform", "relocator"))
 MKC = "multikueueclusters"
 REQUEST_TIMEOUT = 10
 FINAL = ("Done", "Failed", "Duplicate")
@@ -121,10 +123,24 @@ class Gate:
             if not valid(obj):
                 failures.append(f"준비 안 됨: {desc}")
 
-        for ns, name in DEPLOYMENTS:
-            exists(f"Deployment {ns}/{name}",
-                   lambda: apps.read_namespaced_deployment(name, ns, _request_timeout=REQUEST_TIMEOUT),
-                   lambda d: (d.status.available_replicas or 0) >= 1)
+        def first(desc, candidates, read, valid=lambda obj: True):
+            """후보 중 처음 있는 것으로 확인한다. 다 없으면 없음"""
+            for args in candidates:
+                try:
+                    obj = read(*args)
+                except client.ApiException as e:
+                    if e.status != 404:
+                        raise
+                    continue
+                if not valid(obj):
+                    failures.append(f"준비 안 됨: {desc} ({'/'.join(args[::-1])})")
+                return
+            failures.append(f"없음: {desc}")
+
+        for ns, names in DEPLOYMENTS:
+            first(f"Deployment {ns}/{'|'.join(names)}", [(name, ns) for name in names],
+                  lambda name, ns: apps.read_namespaced_deployment(name, ns, _request_timeout=REQUEST_TIMEOUT),
+                  lambda d: (d.status.available_replicas or 0) >= 1)
         for name in CLUSTER_QUEUES:
             exists(f"ClusterQueue {name}", lambda: co.get_cluster_custom_object(
                 K.KUEUE_GROUP, K.KUEUE_VERSION, "clusterqueues", name, _request_timeout=REQUEST_TIMEOUT))
@@ -134,14 +150,10 @@ class Gate:
         exists(f"ConfigMap {CLUSTER_INFO} CLUSTER_NAME={cluster}",
                lambda: core.read_namespaced_config_map(CLUSTER_INFO, K.NAMESPACE, _request_timeout=REQUEST_TIMEOUT),
                lambda cm: (cm.data or {}).get("CLUSTER_NAME") == cluster)
-        if not no_spare:
-            ps = core.list_namespaced_pod(K.NAMESPACE, _request_timeout=REQUEST_TIMEOUT).items
-            if not any(p.spec.priority_class_name == K.PLACEHOLDER_PRIORITY_CLASS and p.status.phase == "Running"
-                       for p in ps):
-                failures.append("준비 안 됨: Running 예비 Pod")
-        ns, name = RELOCATOR
-        exists(f"ServiceAccount {ns}/{name}",
-               lambda: core.read_namespaced_service_account(name, ns, _request_timeout=REQUEST_TIMEOUT))
+        if not no_spare and not spare_ready(core):
+            failures.append("준비 안 됨: 예비 (Running 예비 Pod 또는 Ready 예비 taint GPU 노드)")
+        first("ServiceAccount relocator", [(name, ns) for ns, name in RELOCATORS],
+              lambda name, ns: core.read_namespaced_service_account(name, ns, _request_timeout=REQUEST_TIMEOUT))
         exists(f"MultiKueueCluster {cluster} Active", lambda: self.mkc(cluster),
                lambda m: condition(m.get("status") or {}, "Active"))
         if failures:
@@ -150,6 +162,21 @@ class Gate:
             self.label(cluster, None)
         print(f"ON 가능: {cluster}")
         return 0
+
+
+def spare_ready(core):
+    """예비 자리가 있나. kind는 자리 표시 Pod, EKS는 예비 노드그룹(devoops/spare taint, ADR-25)이라 둘 중 하나면 된다.
+    디스패처도 예비 taint 노드를 자리 표시 Pod와 관계없이 복구 몫으로 센다 (fill_node_capacity)"""
+    ps = core.list_namespaced_pod(K.NAMESPACE, _request_timeout=REQUEST_TIMEOUT).items
+    if any(p.spec.priority_class_name == K.PLACEHOLDER_PRIORITY_CLASS and p.status.phase == "Running" for p in ps):
+        return True
+    for n in core.list_node(label_selector=K.GPU_NODE_SELECTOR, _request_timeout=REQUEST_TIMEOUT).items:
+        taints = n.spec.taints or []
+        ready = any(c.type == "Ready" and c.status == "True" for c in n.status.conditions or [])
+        if (ready and not n.spec.unschedulable and any(t.key == K.TAINT_SPARE for t in taints)
+                and not any(t.key == K.TAINT_FAULTY for t in taints)):
+            return True
+    return False
 
 
 def condition(status, name):

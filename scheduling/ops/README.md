@@ -31,8 +31,33 @@ python scheduling/ops/eks_spare.py eks-a on --worker-context <워커-context>
 python scheduling/ops/eks_gate.py on-check eks-a --manager-context <관리-context> --worker-context <워커-context> --unfence
 ```
 
-컨트롤러·큐·클러스터 이름·예비 Pod·relocator ServiceAccount·Active 연결을 모두 확인한 뒤 라벨을 지운다.
-ACK 어노테이션은 남긴다. 예비 Pod 확인을 생략하려면 `--no-spare`를 쓴다.
+컨트롤러·큐·클러스터 이름·예비·relocator ServiceAccount·Active 연결을 모두 확인한 뒤 라벨을 지운다.
+ACK 어노테이션은 남긴다. 예비 확인을 생략하려면 `--no-spare`를 쓴다.
+
+**라벨을 지우기 전까지 디스패처는 그 클러스터로 새 잡을 보내지 않는다.** EKS를 다시 만들고 허브에 등록해도
+OFF 때 붙인 `devoops/fenced=true`는 남는다. 이 단계를 빠뜨리면 잡이 쿼터만 받고 지명되지 않는다 (2026-11-20, 68분 대기).
+
+### EKS (GPU-236)
+
+EKS에는 예비 Pod가 없다. 예비는 `devoops/spare` taint가 붙은 관리형 예비 노드그룹이다 (ADR-2 · ADR-25).
+그래서 `eks_spare.py on`은 건너뛰고, `on-check`는 다음 중 하나가 있으면 예비가 준비됐다고 본다.
+
+- Running 예비 Pod (kind)
+- cordon 안 된 Ready GPU 노드 중 `devoops/spare` taint가 있고 `devoops/faulty` taint가 없는 노드 (EKS)
+
+이름이 kind와 다른 구성요소는 후보 중 하나만 있으면 된다.
+
+| 확인 | kind | EKS |
+|---|---|---|
+| JobSet Deployment | `jobset-system/jobset-controller-manager` | `jobset-system/jobset-controller` (Helm) |
+| relocator ServiceAccount | `platform/relocator` | `kueue-system/relocator` (IaC eks-hub-registration) |
+
+EKS API는 온프레 VPN 안에서만 닿는다. 온프레에서 실행하거나 HTTP CONNECT 프록시를 거친다
+(Python kubernetes 클라이언트는 kubeconfig `proxy-url`의 SOCKS를 쓰지 않는다).
+
+```sh
+python scheduling/ops/eks_gate.py --manager-context <관리-context> on-check eks-a --worker-context <eks-a-context> --unfence
+```
 context 기본값은 관리 `kind-manager`, 워커 `kind-<cluster>`다.
 큐와 구성요소 이름이 EKS에서 달라지면 `eks_gate.py` 맨 위 상수를 바꾼다.
 
@@ -56,13 +81,13 @@ Git revision 반영 여부와 Argo Synced·Healthy는 Argo 담당자가 확인�
 | 워커 리소스 | 확인 기준 |
 |---|---|
 | Kueue v0.20.4 | `kueue-system/kueue-controller-manager` Deployment availableReplicas ≥ 1 |
-| JobSet v0.13.0 | `jobset-system/jobset-controller-manager` Deployment availableReplicas ≥ 1 |
+| JobSet v0.13.0 | `jobset-system/jobset-controller-manager`(kind) 또는 `jobset-controller`(EKS) Deployment availableReplicas ≥ 1 |
 | ClusterQueue | `train-cq`, `recovery-cq` |
 | LocalQueue | `training/queue-heavy`, `queue-light`, `queue-recovery` |
 | 클러스터 이름 | `training/devoops-cluster-info` ConfigMap의 `CLUSTER_NAME=eks-a/b/c` |
-| 예비 Pod | `training/spare-placeholder` Deployment, priorityClassName `spare-placeholder`, 라벨 `app=spare-placeholder` |
+| 예비 Pod (kind) | `training/spare-placeholder` Deployment, priorityClassName `spare-placeholder`, 라벨 `app=spare-placeholder`. EKS는 예비 노드그룹으로 대신 |
 | 예비 용량 | 학습 노드와 분리한 예비 GPU 노드, `devoops/spare=true:NoSchedule` taint와 해당 toleration |
-| relocator | `platform/relocator` ServiceAccount, nodes get/list/patch, training의 jobsets get·workloads list·pods list |
+| relocator | `platform/relocator`(kind) · `kueue-system/relocator`(EKS) ServiceAccount, nodes get/list/patch, training의 jobsets get·workloads list·pods list |
 
 MultiKueue가 JobSet을 복사할 수 있는 워커 접속 권한과 학습/복구 GPU 용량에 맞는 큐 quota도 구성한다.
 예비 Pod는 GPU를 요청하고 낮은 우선순위로 복구 잡에 선점돼야 한다. 실제 EKS에는 KWOK 설정을 넣지 않는다.
