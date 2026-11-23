@@ -28,6 +28,10 @@ ANN_RESERVED = "devoops/reserved-cluster"    # 들어갈 워커가 없어서 찜
 # 실제 배치 기록 (JSON). 학습 Pod가 전부 Running일 때만 쓰고 지우지 않는다 -> 장애 직전 배치가 남음.
 # Backend 복구 조회 API가 읽는다 (GPU-268, scheduling/dispatcher/PLACEMENT.md)
 ANN_PLACEMENT = "devoops/placement"
+ANN_HELD_FOR = "devoops/held-for"            # 쿼터 차례를 지키는 Workload의 namespace/name (ADR-41)
+ANN_HELD_AT = "devoops/held-at"
+ANN_HELD_UID = "devoops/held-for-uid"        # 같은 이름으로 재생성된 잡과 구별
+ANN_QUOTA_BYPASSES = "devoops/quota-bypasses"  # 대기 시작 시각·새치기 UID 목록 (기준 N개에서 멈춤)
 
 # --- 잡 라벨 (백엔드가 최초 제출 때 붙임. 세대 = 같은 학습의 몇 번째 실행인지, 원본은 DynamoDB)
 LABEL_JOB_ID = "devoops/job-id"

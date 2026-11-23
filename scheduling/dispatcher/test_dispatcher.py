@@ -219,7 +219,8 @@ class FencedAck(unittest.TestCase):
 
     def test_reconcile_returns_what_it_saw_even_when_all_disconnected(self):
         cs = [cl("eks-a", 0, fenced=True, active=False)]
-        with mock.patch.object(D, "cluster_state", return_value=cs):
+        with mock.patch.object(D, "cluster_state", return_value=cs), \
+                mock.patch.object(D.kube, "list_workloads", return_value=[]):
             self.assertIs(D.reconcile(None, None), cs)
 
     def test_failed_loop_leaves_no_ack(self):

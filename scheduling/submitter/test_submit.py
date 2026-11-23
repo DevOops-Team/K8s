@@ -283,6 +283,13 @@ class SubmissionTest(unittest.TestCase):
 
 
 class DoneTest(unittest.TestCase):
+    def test_quota_hold_remains_pending(self):
+        # spec.active=false belongs to the Workload; the associated suspended
+        # JobSet remains nonterminal while the dispatcher protects another job.
+        waiting = js("held", 1)
+        waiting["spec"] = {"suspend": True}
+        self.assertEqual(submit.pending_jobs([waiting], ["held"]), ["held"])
+
     def test_pending(self):
         jobsets = [js("a", 1, "Completed"),
                    js("b", 1, "Failed"), js("b", 2),          # 재배치된 새 세대가 아직 돎
