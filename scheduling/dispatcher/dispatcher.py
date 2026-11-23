@@ -113,8 +113,12 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None):
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
     #    예비 노드(devoops/spare taint)는 자리 표시 Pod가 있든 없든 전부 복구 잡 몫 (학습 잡 Pod는 taint로 못 감)
     #    일반 노드의 자리 표시 Pod 자리도 복구 잡 몫 (예비 taint 도입 전 구성 호환)
+    #    노드를 아직 못 잡은 GPU Pod(입장했지만 nodeName 없음)도 곧 노드 하나를 쓰므로 미리 뺀다 (GPU-260).
+    #    blockAdmission을 끄면 워커가 앞 잡 Pod Ready 전에 다음 잡을 받으므로, 빼지 않으면 같은 자리를 두 번 내줄 수 있다.
+    #    예비 taint를 견디는 Pod(복구 잡)는 예비 자리부터, 나머지는 일반 노드 자리에서 뺀다. 자리 표시 Pod는 세지 않는다.
     core = client.CoreV1Api(api)
     used, held = {}, {}
+    pending_normal, pending_spare = 0, 0
     pods = core.list_pod_for_all_namespaces(
         field_selector="status.phase!=Succeeded,status.phase!=Failed", _request_timeout=kube.TIMEOUT).items
     for p in pods:
@@ -123,9 +127,14 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None):
             if (p.metadata.namespace == namespace
                     and (p.metadata.labels or {}).get('jobset.sigs.k8s.io/jobset-name') == jobset):
                 continue
-        if not p.spec.node_name:
-            continue
         g = sum(int(((ct.resources.requests or {}) if ct.resources else {}).get(K.GPU, 0)) for ct in p.spec.containers)
+        if not p.spec.node_name:
+            if g and p.spec.priority_class_name != K.PLACEHOLDER_PRIORITY_CLASS:
+                if any(getattr(t, "key", None) == K.TAINT_SPARE for t in getattr(p.spec, "tolerations", None) or []):
+                    pending_spare += g
+                else:
+                    pending_normal += g
+            continue
         if p.spec.priority_class_name == K.PLACEHOLDER_PRIORITY_CLASS:
             held[p.spec.node_name] = held.get(p.spec.node_name, 0) + g
         else:
@@ -144,6 +153,9 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None):
         c.node_total = (c.node_total or 0) + max(alloc - held.get(n.metadata.name, 0), 0)
         c.node_free += max(free, 0)
         c.spare_free += held.get(n.metadata.name, 0)
+    spare = min(pending_spare, max(c.spare_free, 0))
+    c.spare_free -= spare
+    c.node_free = max(c.node_free - pending_normal - (pending_spare - spare), 0)
 
 
 def waiting(wl) -> bool:
