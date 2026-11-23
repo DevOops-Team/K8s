@@ -6,11 +6,56 @@
 
 | 정보 | 사실 생성·협의 담당 | 신뢰된 기록 경로에 전달할 내용 |
 |---|---|---|
-| placement | 김성모 스케줄링 | 새 JobSet UID, 실제 EKS, 참여 노드 전체, 실행 세대·복구 ID |
+| placement | 김성모 스케줄링 | 새 관리 클러스터 JobSet UID, 실제 EKS, 참여 노드 전체, 실행 세대·복구 ID |
 | progress | 김현수·노찬경 데이터/학습 | trainer의 실제 상태 복원 결과와 첫 업데이트 완료. ckpt-init 다운로드 성공만으로 checkpoint_loaded를 선언하지 않음 |
 | 완료 판단 | 한송이 복구 컨트롤러 | 증거를 fencing 원본과 대조하고 COMPLETED 또는 대기/HOLD 처리 |
 
 기록 대상은 recovery_table의 `job#{job_id}`다. generation·owner·recovery_id·new_jobset_uid·recovery_resume_*의 원본은 fencing 테이블이다. 처음 작업을 등록하는 경로는 별도이며 EvidenceWriter는 없는 job 항목을 생성하지 않는다.
+
+## GPU-254: 관리 JobSet UID와 생산자 연결
+
+`fencing.new_jobset_uid`는 **relocator가 관리 클러스터 API로 생성한 JobSet의
+metadata.uid**다. EKS의 MultiKueue 복사본 UID나 Pod UID를 넣지 않는다.
+컨트롤러는 이 값을 기록하지 않고 배치·학습 증거와 대조한다.
+
+rank 0 사이드카는 실제 실행 설정의 JOB_ID·GENERATION·CLUSTER를 기준으로
+현재 fencing generation·owner·recovery_id·phase를 확인한다. `new_jobset_name`이
+`job-{JOB_ID}-g{GENERATION:04d}`와 같고 `new_jobset_uid`가 비어 있지 않을 때,
+그 관리 UID를 progress.jobset_uid에 사용한다. 이 경로에는 JOBSET_UID 환경변수나
+EKS API 조회를 추가할 필요가 없다. 불일치·누락이면 기록하지 않고 다음 관측에서 재확인한다.
+
+쓰기 순간 DynamoDB 조건은 다음을 모두 검사한다. 사전 읽기 후 Python 비교만으로
+조건부 쓰기를 대신할 수 없다.
+
+```text
+generation = :my_generation AND #owner = :my_cluster
+AND recovery_id = :recovery_id AND new_jobset_uid = :manager_jobset_uid
+AND recovery_phase IN (:submitted, :resuming)
+# :submitted = NEW_RUN_SUBMITTED, :resuming = RESUMING
+```
+
+펜싱에서 읽은 UID를 그대로 쓰는 것은 복구 식별자 대조이며 **보고 Pod의 실제 JobSet
+소속을 독립 검증하는 인증 수단은 아니다.** 배포된 신뢰된 사이드카·IAM 쓰기 경계와
+실제 trainer의 복원/완료 신호를 전제로 한다. 위 조건만으로 같은 세대·클러스터의
+임의 쓰기 주체까지 구분한다고 가정하지 않는다. 배치 생산자는 별도로 실제 EKS의
+Pod/Job/JobSet 소속을 확인해 참여 노드 정보를 수집하고 관리 UID와 연결해야 한다.
+
+컨트롤러의 fencing 입력은 위 이름·관리 UID 및 기존 세대·owner·복구 ID를 검사한 뒤
+EvidenceWriter에 전달한다. Writer가 현재 fencing·복원점·시각을 재검사하므로,
+첫 읽기 이후 권한이 바뀌어도 과거 증거로 복구를 완료하지 않는다.
+
+### 60초 관측 갱신과 event_id
+
+새 관측에서 observed_at·completed_step·outcome이 바뀌면 **새 event_id**를 발급한다.
+예: `j1-g0002-r1-progress-2000000000-1`, 다음 관측은
+`j1-g0002-r1-progress-2000000060-2`. timestamp만으로 충돌하지 않도록 관측 번호나
+UUID를 함께 사용한다. 동일 관측의 재전송은 ID와 본문 전체를 그대로 유지한다.
+
+같은 event_id에 시각/step만 바꿔 60초마다 덮어쓰면 컨트롤러는 내용 충돌로 거부한다.
+이는 실제 중복 전송이 수신 시각을 계속 새로 만들어 만료를 회피하지 못하게 하는 기존 규칙이다.
+새 관측 ID로 갱신하면 낮은 step·오래된 관측·현재 실행의 실패 latch 검사를 그대로 적용한다.
+새 ID여도 failure를 후속 success로 덮지 않는다. 관측 시각은 실제 trainer 상태를 확인한
+시각이며 재전송 시각으로 바꾸지 않는다.
 
 ## 입력 형식
 
@@ -23,7 +68,7 @@
   "recovery_id": "fault-1",
   "generation": 2,
   "cluster": "eks-a",
-  "jobset_uid": "actual-new-jobset-uid",
+  "jobset_uid": "manager-jobset-uid",
   "observed_at": 2000000000,
   "active_nodes": ["gpu-node-1", "gpu-node-2"]
 }
@@ -38,7 +83,7 @@
   "recovery_id": "fault-1",
   "generation": 2,
   "cluster": "eks-a",
-  "jobset_uid": "actual-new-jobset-uid",
+  "jobset_uid": "manager-jobset-uid",
   "observed_at": 2000000000,
   "outcome": "succeeded",
   "checkpoint_loaded": true,
@@ -89,3 +134,9 @@ Workflow.tick은 두 증거의 v1 메타데이터, 허용 생산자 역할, 기�
 기본 비활성이다. ../examples/config.kafka.example.json의 fencing_progress_input 설정을 참조한다.
 기존 placement 입력·작업 등록을 대체하지 않고, 복원·학습 사실을 생성하지 않는다.
 어댑터와 중복·옛 세대·owner·UID·시각·복원 기준 거부 테스트만 로컬 구현했다.
+
+활성화 전에는 Data 수정 이미지 배포, 조건부 쓰기와 전용 속성의 IAM 범위,
+첫 증거 및 새 ID의 60초 갱신·같은 관측 재전송·옛 실행 거부를 실제 환경에서 확인한다.
+그 뒤 `enabled=true`, `producer_contract_confirmed=true`를 배포 담당과 반영한다.
+이 변경은 Gitops의 기본 비활성/observe 설정을 변경하지 않는다. 초기 job 등록과
+새 placement 증거가 없으면 progress를 수신해도 COMPLETED로 처리하지 않는다.

@@ -49,6 +49,14 @@ class FencingProgressInput:
         if not isinstance(message, dict):
             raise ValueError('fencing training evidence must be a Map')
         message = normalise(message)
+        generation = message.get('generation')
+        # Relocator creates the manager JobSet and records its name/UID in fencing.
+        # MultiKueue's worker copy has a different UID: this is recovery correlation,
+        # not independent proof of the reporting Pod's ownerReferences.
+        if (not whole(generation) or generation < 1
+                or fence.get('new_jobset_name') != f"job-{event['job_id']}-g{int(generation):04d}"
+                or not isinstance(fence.get('new_jobset_uid'), str) or not fence['new_jobset_uid']):
+            raise ValueError('manager JobSet name and UID required for current training evidence')
         if (message.get('kind') != 'progress' or message.get('job_id') != event['job_id']
                 or message.get('recovery_id') != event['event_id']
                 or message.get('generation') != record.get('generation')
@@ -58,7 +66,9 @@ class FencingProgressInput:
                 or message.get('jobset_uid') != fence.get('new_jobset_uid')):
             raise ValueError('training evidence must match current owner, recovery, generation and JobSet')
         # Producer identity is a configured IAM/attribute-writer contract, never a body field.
-        # The sidecar must conditionally write the entire Map for generation/owner/recovery_id.
+        # The sidecar must check its job/generation/cluster and the manager JobSet name,
+        # then conditionally write the Map for generation/owner/recovery_id/manager UID
+        # in NEW_RUN_SUBMITTED or RESUMING. Matching an echoed UID is not authentication.
         # EvidenceWriter rereads fencing before projecting and rejects stale timestamps/baselines.
         return self.writer.write(message, authenticated_producer='training')
 
