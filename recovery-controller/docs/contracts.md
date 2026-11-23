@@ -305,7 +305,11 @@ IAM 권한을 생성하거나 임의 Kafka 본문을 신뢰하는 변경은 하�
 
 제안 속성 `recovery_training_evidence`는 fencing 항목 안의 Map이며 아직 외부 확정 스키마가 아니다.
 Map에는 evidence-contract.md의 progress 메시지를 넣고 producer·received_at은 넣지 않는다.
-사이드카는 generation·owner·recovery_id를 조건으로 전체 Map을 쓰고 실제 학습 복원·첫 업데이트
+GPU-254의 `jobset_uid`는 relocator가 기록한 **관리 클러스터 JobSet UID**다.
+사이드카는 자기 작업·세대로 계산한 이름과 fencing.new_jobset_name을 확인하고 관리 UID를 사용한다.
+이 비교는 보고 Pod 소속의 독립 검증이 아니다. 상세 신뢰 경계와 관측 ID 규칙은
+[evidence-contract.md](evidence-contract.md#gpu-254-관리-jobset-uid와-생산자-연결)를 따른다.
+사이드카는 generation·owner·recovery_id·new_jobset_uid 및 허용 phase를 조건으로 전체 Map을 쓰고 실제 학습 복원·첫 업데이트
 완료를 보고해야 한다. 컨트롤러가 만든 성공 값이나 init 다운로드 성공으로 대체하지 않는다.
 
 어댑터는 강한 일관성 읽기로 현재 job_id·복구 ID·세대·owner·JobSet UID를 대조한 뒤

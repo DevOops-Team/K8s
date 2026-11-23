@@ -85,6 +85,7 @@ class SharedDeadlineTests(unittest.TestCase):
 class EvidenceInputTests(unittest.TestCase):
     def setUp(self):
         self.table,self.fence=Table(),Fence()
+        self.fence.item['new_jobset_name']='job-j1-g0002'
         self.store=Store(self.table,self.fence)
         self.writer=EvidenceWriter(self.store,clock=lambda:NOW)
         placement=dict(schema_version=1,kind='placement',event_id='p1',job_id='j1',recovery_id='r1',
@@ -121,6 +122,39 @@ class EvidenceInputTests(unittest.TestCase):
     def test_owner_must_be_confirmed(self):
         self.fence.item.pop('owner')
         with self.assertRaises(ValueError):self.input.ingest(self.record)
+    def test_manager_jobset_name_and_uid_must_be_recorded(self):
+        original=copy.deepcopy(self.fence.item)
+        for changes in (dict(new_jobset_name=None),dict(new_jobset_name='job-other-g0002'),
+                        dict(new_jobset_name='job-j1-g0001'),dict(new_jobset_uid=None),
+                        dict(new_jobset_uid='')):
+            self.fence.item=dict(original,**changes)
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                self.input.ingest(self.record)
+        self.assertNotIn('progress',self.table.item)
+    def test_worker_copy_uid_is_not_the_manager_correlation_uid(self):
+        self.fence.item['recovery_training_evidence']=dict(self.message,jobset_uid='worker-copy-uid')
+        with self.assertRaises(ValueError):self.input.ingest(self.record)
+        self.assertNotIn('progress',self.table.item)
+        self.fence.item['recovery_training_evidence']=self.message
+        self.assertTrue(self.input.ingest(self.record))
+    def test_refresh_with_new_observation_id_updates_step_and_receipt(self):
+        self.assertTrue(self.input.ingest(self.record))
+        self.writer.clock=lambda:NOW+60
+        self.fence.item['recovery_training_evidence']=dict(self.message,event_id='step-2',
+                                                         observed_at=NOW+60,completed_step=12)
+        self.assertTrue(self.input.ingest(self.record))
+        progress=self.table.item['progress']
+        self.assertEqual((progress['event_id'],progress['completed_step'],progress['received_at']),
+                         ('step-2',12,NOW+60))
+        self.assertFalse(self.input.ingest(self.record))
+    def test_refresh_reusing_event_id_with_changed_content_is_rejected(self):
+        self.input.ingest(self.record)
+        before=copy.deepcopy(self.table.item)
+        self.writer.clock=lambda:NOW+60
+        self.fence.item['recovery_training_evidence']=dict(self.message,observed_at=NOW+60,completed_step=12)
+        with self.assertRaisesRegex(ValueError,'event_id reused'):
+            self.input.ingest(self.record)
+        self.assertEqual(self.table.item,before)
     def test_duplicate_does_not_refresh_receipt(self):
         self.input.ingest(self.record)
         self.writer.clock=lambda:NOW+20
