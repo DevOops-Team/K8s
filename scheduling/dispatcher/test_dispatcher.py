@@ -335,6 +335,33 @@ class FillCapacity(unittest.TestCase):
         c = self.fill([self.node("s", spare=True, cordon=True)], [])
         self.assertEqual(c.spare_free, 0)
 
+    @staticmethod
+    def pending(gpus=1, *, spare_toleration=False, placeholder=False):
+        from types import SimpleNamespace as N
+        p = FillCapacity.pod(None, gpus, placeholder)
+        p.spec.tolerations = [N(key=K.TAINT_SPARE)] if spare_toleration else None
+        return p
+
+    def test_unscheduled_gpu_pods_take_normal_nodes(self):
+        """GPU-260: 입장했지만 노드를 아직 못 잡은 Pod도 자리를 쓴다 (blockAdmission 끈 뒤 이중 배정 방지)"""
+        nodes = [self.node(f"g{i}") for i in range(4)] + [self.node("s", spare=True)]
+        c = self.fill(nodes, [self.pod("g0"), self.pending(), self.pending()])
+        self.assertEqual((c.node_free, c.spare_free, c.node_total), (1, 1, 4))
+
+    def test_unscheduled_recovery_pods_use_spare_first(self):
+        nodes = [self.node(f"g{i}") for i in range(4)] + [self.node("s", spare=True)]
+        c = self.fill(nodes, [self.pending(spare_toleration=True), self.pending(spare_toleration=True)])
+        self.assertEqual((c.node_free, c.spare_free), (3, 0))
+
+    def test_unscheduled_ignores_cpu_and_placeholder_pods(self):
+        nodes = [self.node(f"g{i}") for i in range(2)]
+        c = self.fill(nodes, [self.pending(0), self.pending(placeholder=True)])
+        self.assertEqual(c.node_free, 2)
+
+    def test_unscheduled_never_below_zero(self):
+        c = self.fill([self.node("g0")], [self.pending(), self.pending()])
+        self.assertEqual(c.node_free, 0)
+
 
 class RecoveryCapacity(unittest.TestCase):
     """복구 자리 조회 API (ADR-37 조건 4): 원래 클러스터 우선, 없으면 다른 워커"""
