@@ -117,6 +117,16 @@ class Workflow:
             init = init_decision(e)
             details = dict(stage='CKPT_INIT', exit_code=e['exit_code'], failure_class=init['failure_class']) if init else {}
             return self.store.save(rid, state='OBSERVED', action=action, **details)
+        # Bootstrap only for real, actionable recovery events; never pre-register
+        # normal jobs, observation-only inputs, or job.failed-only safety-net events.
+        register = getattr(self.store, 'ensure_job', None)
+        if (state == 'RECEIVED' and action in RELOCATION_ACTIONS and not monitoring_hold
+                and e.get('job_id') and e.get('generation') is not None and register):
+            try:
+                if not register(e):
+                    return self.store.save(rid, state='STALE', action='NONE', reason='stale metadata generation')
+            except RecoveryBlocked as exc:
+                return self.store.save(rid, state='HOLD', action='HOLD', reason=str(exc))
         init = init_decision(e)
         if init and state == 'RECEIVED':
             fence = self.store.fencing_record(e['job_id'])
