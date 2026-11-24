@@ -11,12 +11,14 @@ def plan(event):
         raise ValueError('event_id and cluster must be nonempty strings')
     if event.get('job_id') is not None and not isinstance(event['job_id'], str):
         raise ValueError('job_id must be a string or null')
+    if event['cluster'] not in ('eks-a', 'eks-b', 'eks-c'):
+        return {'event_id': event['event_id'], 'job_id': event.get('job_id'),
+                'cluster': event['cluster'], 'suggested_action': 'HOLD',
+                'reason': 'unknown_cluster', 'mode': 'observe', 'executed': False}
     from recovery.init_failure import decision
     init = decision(event)
     if not init and not event.get('suggested_action') and not event.get('fault_type'):
         raise ValueError('suggested_action or legacy fault_type required')
-    if event['cluster'] not in ('eks-a', 'eks-b', 'eks-c'):
-        raise ValueError('unknown cluster')
     actions = {
         'restart_in_place': 'RETRY_GROUP',
         'isolate_migrate': 'QUARANTINE_AND_RETRY',

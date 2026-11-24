@@ -73,7 +73,8 @@ def run(config, stop, health):
             msg=consumer.poll(1)
             if msg is None: continue
             if msg.error(): raise RuntimeError('Kafka poll failed')
-            # Invalid input is not committed: fail closed until schema/source is corrected.
+            # Unknown clusters are durable HOLD inputs. Other malformed inputs
+            # and failed inbox writes still fail closed without committing.
             received_fault = accept_message(consumer, workflow, msg)
             with guard_lock:
                 if guard and received_fault:
