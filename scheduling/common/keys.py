@@ -25,6 +25,9 @@ ANN_MANUAL = "devoops/manual-dispatch"       # "true"면 디스패처가 손대�
 ANN_NOMINATED_AT = "devoops/nominated-at"    # 지명 시각 (epoch 초)
 ANN_TRIED = "devoops/tried-clusters"         # 지명했지만 못 들어간 클러스터
 ANN_RESERVED = "devoops/reserved-cluster"    # 들어갈 워커가 없어서 찜해 둔 클러스터 (지명하면 지움)
+# 실제 배치 기록 (JSON). 학습 Pod가 전부 Running일 때만 쓰고 지우지 않는다 -> 장애 직전 배치가 남음.
+# Backend 복구 조회 API가 읽는다 (GPU-268, scheduling/dispatcher/PLACEMENT.md)
+ANN_PLACEMENT = "devoops/placement"
 
 # --- 잡 라벨 (백엔드가 최초 제출 때 붙임. 세대 = 같은 학습의 몇 번째 실행인지, 원본은 DynamoDB)
 LABEL_JOB_ID = "devoops/job-id"
