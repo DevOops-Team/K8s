@@ -363,6 +363,143 @@ class FillCapacity(unittest.TestCase):
         self.assertEqual(c.node_free, 0)
 
 
+class PlacementRecord(unittest.TestCase):
+    """실제 배치 기록 devoops/placement (GPU-268): 전원 Running일 때만 쓰고, 지우지 않는다"""
+
+    JS = "job-j1-g0002"
+
+    @staticmethod
+    def pod(node, *, jobset="job-j1-g0002", ns="training", phase="Running", gpus=1, placeholder=False, deleting=False):
+        from types import SimpleNamespace as N
+        ct = N(resources=N(requests={K.GPU: str(gpus)}))
+        return N(metadata=N(namespace=ns, labels={"jobset.sigs.k8s.io/jobset-name": jobset},
+                            deletion_timestamp="x" if deleting else None),
+                 status=N(phase=phase),
+                 spec=N(node_name=node, containers=[ct],
+                        priority_class_name=K.PLACEHOLDER_PRIORITY_CLASS if placeholder else None))
+
+    def workload(self, gpus=2, cluster="eks-a", old=None, finished=False, name=None):
+        w = wl("wl-1", gpus, "2026-11-24T00:00:00Z")
+        w["metadata"]["ownerReferences"] = [{"kind": "JobSet", "name": name or self.JS}]
+        w["status"]["clusterName"] = cluster
+        if finished:
+            w["status"]["conditions"].append({"type": "Finished", "status": "True"})
+        if old is not None:
+            w["metadata"]["annotations"][K.ANN_PLACEMENT] = old if isinstance(old, str) else D.json.dumps(old)
+        return w
+
+    def cluster(self, pods, name="eks-a", at=1000, active=True):
+        c = Cluster(name=name, active=active)
+        c.observed_at = at
+        D.collect_running(pods, c.running)
+        return c
+
+    def record(self, wls, clusters, fail=False):
+        written = []
+
+        def fake(_m, w, rec):
+            if fail:
+                raise RuntimeError("patch 실패")
+            written.append((w["metadata"]["name"], rec))
+        with mock.patch.object(D, "set_placement", side_effect=fake):
+            D.record_placements(None, wls, clusters)
+        return written
+
+    def test_all_running_is_recorded(self):
+        out = self.record([self.workload()], [self.cluster([self.pod("n2"), self.pod("n1")])])
+        self.assertEqual(out, [("wl-1", {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a",
+                                          "nodes": ["n1", "n2"], "observed_at": 1000})])
+
+    def test_partial_pods_do_not_overwrite_last_snapshot(self):
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n2"],
+               "observed_at": 900}
+        pods = [self.pod("n1"), self.pod("n2", phase="Pending")]
+        self.assertEqual(self.record([self.workload(old=old)], [self.cluster(pods)]), [])
+
+    def test_not_scheduled_deleting_placeholder_and_cpu_pods_are_ignored(self):
+        pods = [self.pod("n1"), self.pod(None), self.pod("n3", deleting=True),
+                self.pod("n4", placeholder=True), self.pod("n5", gpus=0)]
+        self.assertEqual(self.record([self.workload()], [self.cluster(pods)]), [])
+
+    def test_same_content_refreshed_only_after_interval(self):
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n2"],
+               "observed_at": 1000 - D.PLACEMENT_REFRESH_SECONDS + 1}
+        pods = [self.pod("n1"), self.pod("n2")]
+        self.assertEqual(self.record([self.workload(old=old)], [self.cluster(pods)]), [])
+        old["observed_at"] = 1000 - D.PLACEMENT_REFRESH_SECONDS
+        self.assertEqual(len(self.record([self.workload(old=old)], [self.cluster(pods)])), 1)
+
+    def test_changed_nodes_written_immediately(self):
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n9"],
+               "observed_at": 999}
+        out = self.record([self.workload(old=old)], [self.cluster([self.pod("n1"), self.pod("n2")])])
+        self.assertEqual(out[0][1]["nodes"], ["n1", "n2"])
+
+    def test_older_observation_never_replaces_newer(self):
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n9"],
+               "observed_at": 2000}
+        self.assertEqual(self.record([self.workload(old=old)], [self.cluster([self.pod("n1"), self.pod("n2")])]), [])
+
+    def test_broken_old_annotation_is_replaced(self):
+        out = self.record([self.workload(old="{not json")], [self.cluster([self.pod("n1"), self.pod("n2")])])
+        self.assertEqual(len(out), 1)
+
+    def test_inactive_or_unread_worker_is_skipped(self):
+        pods = [self.pod("n1"), self.pod("n2")]
+        self.assertEqual(self.record([self.workload()], [self.cluster(pods, active=False)]), [])
+        self.assertEqual(self.record([self.workload()], [self.cluster(pods, at=None)]), [])
+
+    def test_pods_of_other_cluster_namespace_or_jobset_do_not_count(self):
+        pods = [self.pod("n1"), self.pod("n2", jobset="job-j1-g0001"), self.pod("n3", ns="other")]
+        self.assertEqual(self.record([self.workload()], [self.cluster(pods)]), [])
+        self.assertEqual(self.record([self.workload(cluster="eks-b")],
+                                     [self.cluster([self.pod("n1"), self.pod("n2")])]), [])
+
+    def test_duplicate_nodes_or_count_mismatch_skipped(self):
+        self.assertEqual(self.record([self.workload()], [self.cluster([self.pod("n1"), self.pod("n1")])]), [])
+        self.assertEqual(self.record([self.workload()],
+                                     [self.cluster([self.pod("n1"), self.pod("n2"), self.pod("n3")])]), [])
+
+    def test_finished_or_unnamed_generation_skipped(self):
+        pods = [self.pod("n1"), self.pod("n2")]
+        self.assertEqual(self.record([self.workload(finished=True)], [self.cluster(pods)]), [])
+        self.assertEqual(self.record([self.workload(name="free-name")],
+                                     [self.cluster([self.pod("n1", jobset="free-name"),
+                                                    self.pod("n2", jobset="free-name")])]), [])
+
+    def test_patch_failure_does_not_raise(self):
+        self.assertEqual(self.record([self.workload()], [self.cluster([self.pod("n1"), self.pod("n2")])],
+                                     fail=True), [])
+
+    def test_record_failure_does_not_stop_nomination(self):
+        nominated = {}
+        with mock.patch.object(D, "cluster_state", return_value=[cl("w1", 4)]), \
+             mock.patch.object(D, "relocation_holds", return_value={}), \
+             mock.patch.object(D.kube, "list_workloads", return_value=[wl("a", 2, "2026-11-10T00:00:00Z")]), \
+             mock.patch.object(D.kube, "owner_annotations", return_value={}), \
+             mock.patch.object(D, "record_placements", side_effect=RuntimeError("boom")), \
+             mock.patch.object(D, "patch_nomination",
+                               side_effect=lambda _m, w, c, _t: nominated.__setitem__(w["metadata"]["name"], c)):
+            D.reconcile(None, None)
+        self.assertEqual(nominated, {"a": "w1"})
+
+    def test_fill_capacity_collects_running_from_same_pod_list(self):
+        from types import SimpleNamespace as N
+        core = mock.Mock()
+        core.list_pod_for_all_namespaces.return_value = N(items=[self.pod("g0"), self.pod("g1")])
+        core.list_node.return_value = N(items=[])
+        kq = mock.Mock()
+        kq.list_cluster_custom_object.return_value = {"items": []}
+        c = Cluster(name="eks-a")
+        c.running[("old", "x")] = ["stale"]
+        with mock.patch.object(D.client, "CoreV1Api", return_value=core), \
+             mock.patch.object(D.kube, "kueue", return_value=kq), mock.patch.object(D.time, "time", return_value=1234.9):
+            D.fill_capacity(c, object())
+        self.assertEqual(c.running, {("training", self.JS): ["g0", "g1"]})
+        self.assertEqual(c.observed_at, 1234)
+        core.list_pod_for_all_namespaces.assert_called_once()
+
+
 class RecoveryCapacity(unittest.TestCase):
     """복구 자리 조회 API (ADR-37 조건 4): 원래 클러스터 우선, 없으면 다른 워커"""
 
