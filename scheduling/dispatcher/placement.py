@@ -7,7 +7,7 @@
 관리 Kueue는 워커 3개 합계로 쿼터를 주므로, 4장 잡이 쿼터를 받아도 4장이 한 워커에 비어 있다는 보장이 없다.
 찜이 없으면 작은 잡이 빈 칸을 계속 메워서 큰 잡이 쿼터만 쥔 채 끝없이 기다린다 (11/10 compare: 쿼터 뒤 142s).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -22,6 +22,9 @@ class Cluster:
     quota_total: int | None = None      # 워커 학습 CQ nominalQuota 합 (None = 모름 -> 들어갈 수 있다고 봄)
     recovery_total: int | None = None   # 워커 복구 CQ nominalQuota 합
     node_total: int | None = None       # 스케줄 가능한 일반 GPU 노드의 GPU 합 (다 비었을 때 학습 잡이 쓸 수 있는 양)
+    # 배치 기록용 (GPU-268): (namespace, JobSet 이름) -> Running GPU Pod가 올라간 노드 목록, 그 Pod 목록을 읽은 시각
+    running: dict = field(default_factory=dict, repr=False)
+    observed_at: int | None = None
 
     def nodes_for(self, recovery: bool) -> int:
         return self.node_free + (self.spare_free if recovery else 0)

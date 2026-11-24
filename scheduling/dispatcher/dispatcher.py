@@ -17,6 +17,8 @@
     재배치 실행기는 옛 잡을 먼저 내리고 새 잡을 넣는데, 그 사이 풀린 자리를 쿼터를 쥐고 기다리던 학습 잡이
     가져가면 복구 잡이 들어갈 곳이 없어진다. 새 잡이 지명되거나 RELOCATION_HOLD_SECONDS가 지나면 푼다.
   - 잡 하나의 실패(조회·patch 오류)는 그 잡만 건너뛴다. 뒤 잡은 계속 본다.
+  - 배치 기록: 실행 중인 잡의 Pod가 전부 Running이면 실제 EKS·노드를 Workload devoops/placement에 남긴다.
+    지우지 않으므로 장애 직전 배치가 남고, Backend 복구 조회 API가 읽는다 (GPU-268, PLACEMENT.md).
   - fenced ACK: 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에 devoops/fenced-ack=<루프 시작 시각>.
     라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
 """
@@ -46,6 +48,9 @@ RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
 RELOCATION_HOLD_SECONDS = int(os.getenv("RELOCATION_HOLD_SECONDS", "300"))
 # 지명도 찜도 못 하는 잡의 경고를 같은 이유로 다시 남기는 간격 (매 루프 반복 방지, GPU-237)
 UNPLACED_LOG_SECONDS = int(os.getenv("UNPLACED_LOG_SECONDS", "300"))
+# 배치 기록(devoops/placement)의 관측 시각을 내용이 같아도 다시 쓰는 간격 (GPU-268).
+# 복구 컨트롤러는 관측 시각이 max_age_seconds(기본 300)보다 오래되면 거절한다. PLACEMENT.md의 신선도 절 참고
+PLACEMENT_REFRESH_SECONDS = int(os.getenv("PLACEMENT_REFRESH_SECONDS", "60"))
 IN_PLACE = {"restartInPlace", "moveToSpare"}   # 재제출 잡이 원래 클러스터로 돌아오는 action
 RR_FINAL = {"Done", "Failed", "Duplicate"}
 
@@ -106,10 +111,10 @@ def fill_capacity(c: Cluster, api):
         else:
             c.quota_total += nominal
             c.quota_free += nominal - reserved
-    fill_node_capacity(c, api)
+    fill_node_capacity(c, api, running=c.running)
 
 
-def fill_node_capacity(c, api, excluded_node=None, released_job=None):
+def fill_node_capacity(c, api, excluded_node=None, released_job=None, running=None):
     # 2) 노드: cordon 안 된 Ready GPU 노드의 allocatable - 올라간 Pod 요청
     #    예비 노드(devoops/spare taint)는 자리 표시 Pod가 있든 없든 전부 복구 잡 몫 (학습 잡 Pod는 taint로 못 감)
     #    일반 노드의 자리 표시 Pod 자리도 복구 잡 몫 (예비 taint 도입 전 구성 호환)
@@ -121,6 +126,10 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None):
     pending_normal, pending_spare = 0, 0
     pods = core.list_pod_for_all_namespaces(
         field_selector="status.phase!=Succeeded,status.phase!=Failed", _request_timeout=kube.TIMEOUT).items
+    if running is not None:   # 배치 기록용: 이 Pod 목록을 읽은 시각과 JobSet별 Running 노드 (추가 조회 없음)
+        running.clear()
+        c.observed_at = int(time.time())
+        collect_running(pods, running)
     for p in pods:
         if released_job and getattr(p, 'metadata', None):
             namespace, jobset = released_job
@@ -156,6 +165,80 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None):
     spare = min(pending_spare, max(c.spare_free, 0))
     c.spare_free -= spare
     c.node_free = max(c.node_free - pending_normal - (pending_spare - spare), 0)
+
+
+def collect_running(pods, running):
+    """(namespace, JobSet 이름) -> Running GPU 학습 Pod가 올라간 노드 목록. 자리 표시·지워지는 Pod는 뺀다"""
+    for p in pods:
+        meta, status = getattr(p, "metadata", None), getattr(p, "status", None)
+        if (meta is None or getattr(status, "phase", None) != "Running" or not p.spec.node_name
+                or getattr(meta, "deletion_timestamp", None)
+                or p.spec.priority_class_name == K.PLACEHOLDER_PRIORITY_CLASS):
+            continue
+        jobset = (meta.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
+        g = sum(int(((ct.resources.requests or {}) if ct.resources else {}).get(K.GPU, 0)) for ct in p.spec.containers)
+        if jobset and g:
+            running.setdefault((meta.namespace, jobset), []).append(p.spec.node_name)
+
+
+def placement_of(wl, c):
+    """Workload의 지금 배치 기록. 학습 Pod가 전부 서로 다른 노드에서 Running일 때만, 아니면 None.
+    노드당 GPU 1장·Pod당 GPU 1장 구성이라 Running Pod 수 = 노드 수 = 요청 GPU 수여야 한다"""
+    st, meta = wl.get("status") or {}, wl["metadata"]
+    if st.get("clusterName") != c.name or meta.get("deletionTimestamp") or kube.is_true(wl, "Finished"):
+        return None
+    kind, jobset = kube.workload_owner(wl)
+    if kind != "JobSet":
+        return None
+    _, generation = R.parse_name(jobset)
+    gpus = sum(kube.workload_pods(wl))
+    nodes = c.running.get((meta["namespace"], jobset), [])
+    if generation is None or not gpus or len(nodes) != gpus or len(set(nodes)) != gpus:
+        return None
+    return {"version": 1, "jobset": jobset, "generation": generation, "cluster": c.name,
+            "nodes": sorted(nodes), "observed_at": c.observed_at}
+
+
+def old_placement(wl):
+    try:
+        old = json.loads((wl["metadata"].get("annotations") or {}).get(K.ANN_PLACEMENT) or "null")
+    except ValueError:
+        return None
+    return old if isinstance(old, dict) else None
+
+
+def record_placements(mgr, all_wls, clusters):
+    """실행 중인 잡의 실제 배치(EKS·노드)를 관리 클러스터 Workload에 남긴다 (GPU-268).
+    조건이 안 맞으면(Pod 일부 죽음·스케줄 전·워커 조회 실패) 쓰지 않고, 지우지도 않는다 -> 장애 직전 배치가 남는다.
+    같은 내용이면 PLACEMENT_REFRESH_SECONDS마다 관측 시각만 갱신. 실패는 그 잡만 건너뛴다 (지명에 영향 없음)"""
+    by_name = {c.name: c for c in clusters if c.active and c.observed_at}
+    for wl in all_wls:
+        c = by_name.get((wl.get("status") or {}).get("clusterName"))
+        if c is None:
+            continue
+        rec = placement_of(wl, c)
+        if rec is None:
+            continue
+        old = old_placement(wl)
+        if old is not None:
+            same = all(old.get(k) == rec[k] for k in rec if k != "observed_at")
+            age = rec["observed_at"] - (old.get("observed_at") if type(old.get("observed_at")) is int else 0)
+            if age <= 0 or (same and age < PLACEMENT_REFRESH_SECONDS):
+                continue
+        try:
+            set_placement(mgr, wl, rec)
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: 배치 기록 못 씀: %s", wl["metadata"]["name"], e)
+            continue
+        if old is None or not same:
+            log.info("%s: 배치 기록 %s %s (세대 %d)", wl["metadata"]["name"], rec["cluster"], rec["nodes"],
+                     rec["generation"])
+
+
+def set_placement(mgr, wl, rec):
+    kube.kueue(mgr).patch_namespaced_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, wl["metadata"]["namespace"], "workloads", wl["metadata"]["name"],
+        {"metadata": {"annotations": {K.ANN_PLACEMENT: json.dumps(rec, separators=(",", ":"))}}})
 
 
 def waiting(wl) -> bool:
@@ -244,6 +327,10 @@ def reconcile(mgr, workers):
         return clusters
     by_name = {c.name: c for c in clusters}
     all_wls = kube.list_workloads(mgr)
+    try:
+        record_placements(mgr, all_wls, clusters)
+    except Exception:  # noqa: BLE001  배치 기록 문제로 지명을 멈추지 않는다
+        log.exception("배치 기록 실패, 지명은 계속")
     wls = [w for w in all_wls if waiting(w)]
     for gone in set(_unplaced) - {w["metadata"]["name"] for w in wls}:   # 더 안 기다리는 잡은 잊는다
         del _unplaced[gone]
