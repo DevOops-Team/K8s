@@ -56,6 +56,11 @@ def accept_message(consumer, workflow, msg):
             event = lifecycle_failure(envelope)
     else:
         event = envelope.get('payload', envelope)
+        if isinstance(envelope.get('payload'), dict) and envelope.get('type') in (
+                'fault.detected', 'fault.held', 'fault.reclassified'):
+            # The classifier decision time is not payload.ts (original signal time).
+            event = dict(event, classification_type=envelope['type'],
+                         classification_occurred_at=envelope.get('occurred_at'))
     headers = dict(msg.headers() or []) if hasattr(msg, 'headers') else {}
     if headers.get('rule_version'):
         event = dict(event, rule_version=headers['rule_version'].decode('utf-8'))

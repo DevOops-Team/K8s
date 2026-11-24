@@ -17,8 +17,12 @@ class PolicyTests(unittest.TestCase):
     def test_permanent_error_rejected(self):
         self.assertEqual(plan(self.event('software_permanent'))['suggested_action'], 'NEEDS_CONFIG_FIX')
     def test_bad_event_rejected(self):
-        for event in ({}, self.event('unknown') | {'cluster':'onprem'}, self.event('unknown') | {'job_id':3}):
+        for event in ({}, self.event('unknown') | {'job_id':3}):
             with self.assertRaises(ValueError): plan(event)
+    def test_unknown_cluster_is_hold_not_actionable_alias(self):
+        event = dict(self.event('az_failure'), cluster='worker-a')
+        self.assertEqual(plan(event)['suggested_action'], 'HOLD')
+        self.assertEqual(plan(event)['reason'], 'unknown_cluster')
     def test_unknown_requires_review(self):
         self.assertEqual(plan(self.event('unknown'))['suggested_action'], 'HOLD')
 
