@@ -196,17 +196,17 @@ class SubmissionTest(unittest.TestCase):
                      js("j1", 1, "Completed"), js("j2", 1, "Completed")]), \
                  redirect_stdout(io.StringIO()):
                 code = submit.main([str(scenario), "--exp-id", "exp-ds-1", "--out", str(results),
-                                    "--dataset", "smollm2-wikitext2:1"])
+                                    "--dataset", "smollm2-wikitext2:2"])
         self.assertEqual(code, 0)
         self.assertEqual([[n for n, _ in parts] for parts in sent], [["spec"], ["spec"]])   # 첫 잡부터 파일 파트 없음
         specs = [json.loads(parts[0][1]) for parts in sent]
-        self.assertEqual([sp["dataset"] for sp in specs], [{"id": "smollm2-wikitext2", "version": 1}] * 2)
+        self.assertEqual([sp["dataset"] for sp in specs], [{"id": "smollm2-wikitext2", "version": 2}] * 2)
         self.assertEqual([sp["hyperparameters"]["max_steps"] for sp in specs], [600, 300])
         self.assertEqual({sp["exp_id"] for sp in specs}, {"exp-ds-1"})
         self.assertEqual([v["type"] for _, _, v in producer.sent], ["experiment.started", "experiment.ended"])
 
     def test_parse_dataset(self):
-        self.assertEqual(submit.parse_dataset("smollm2-wikitext2:1"), {"id": "smollm2-wikitext2", "version": 1})
+        self.assertEqual(submit.parse_dataset("smollm2-wikitext2:2"), {"id": "smollm2-wikitext2", "version": 2})
         self.assertEqual(submit.parse_dataset("a-b:12"), {"id": "a-b", "version": 12})
         # Backend가 거절하는 것: '-' 없음(학습 ID 모양) · 대문자 · 끝이 '-' · version 0·문자·빠짐 · ':' 없음
         for bad in ("smollm2:1", "Smol-lm:1", "smol-:1", "smol-lm:0", "smol-lm:v1", "smol-lm:", "smol-lm"):
@@ -218,8 +218,8 @@ class SubmissionTest(unittest.TestCase):
             args = make_inputs(tmp)
             scenario = Path(tmp) / "scenario.csv"
             scenario.write_text("0, 1, 100, fsdp\n", encoding="utf-8")
-            for extra in (["--dataset", "smollm2-wikitext2:1", *args],              # 파일과 같이 줌
-                          ["--dataset", "smollm2-wikitext2:1", "--data", args[3]],  # 파일 하나만 같이 줘도
+            for extra in (["--dataset", "smollm2-wikitext2:2", *args],              # 파일과 같이 줌
+                          ["--dataset", "smollm2-wikitext2:2", "--data", args[3]],  # 파일 하나만 같이 줘도
                           ["--dataset", "smollm2:1"]):                               # 형식 틀림
                 with self.subTest(extra=extra), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
                      patch("sys.stderr", io.StringIO()):
