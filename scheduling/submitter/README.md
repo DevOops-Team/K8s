@@ -6,7 +6,7 @@
 시나리오 파일 (`example.csv`): `제출 시각(초), GPU 수, step 수, 방식[, 실행 시간(초)]`
 
 ```bash
-python submit.py example.csv --dataset smollm2-wikitext2:1   # 백엔드 POST /api/jobs (BACKEND_URL), 고정 데이터셋
+python submit.py example.csv --dataset smollm2-wikitext2:2   # 백엔드 POST /api/jobs (BACKEND_URL), 고정 데이터셋
 python submit.py example.csv --model-dir gpt2/ --data train.jsonl --train-py train.py   # 백엔드, 잡마다 파일을 올림
 python submit.py example.csv --kind          # kind: 백엔드 없이 같은 규칙으로 직접 제출 (KWOK, 실행 시간 칸 사용)
 python submit.py example.csv --kind --speed 10
@@ -22,12 +22,13 @@ Backend `POST /api/jobs`(Backend `api/openapi.yaml`)는 multipart다. 투입기�
 
 ```json
 {"name": "<prefix>-0001", "strategy": "fsdp", "gpus": 4,
- "dataset": {"id": "smollm2-wikitext2", "version": 1},
+ "dataset": {"id": "smollm2-wikitext2", "version": 2},
  "hyperparameters": {"max_steps": 600}, "exp_id": "exp-0001"}
 ```
 
 - 체크포인트 버킷 `datasets/<id>/v<version>/`에 한 번 올려 둔 모델·데이터·train.py를 Backend가 그대로 가리킨다. 업로드·복사가 없어 제출 시각이 밀리지 않고, 투입기 Pod에 파일이나 S3 권한이 필요 없다.
-- 지금 있는 데이터셋: `smollm2-wikitext2:1` = SmolLM2-135M + wikitext-2 train jsonl + Data `trainer/train.py`.
+- 지금 쓰는 데이터셋: `smollm2-wikitext2:2` = SmolLM2-135M + wikitext-2 train jsonl + Data `trainer/train.py`(하네스 `devoops_ckpt.fit()`, GPU-209 이후).
+- `smollm2-wikitext2:1`은 쓰지 않는다: v1의 train.py는 하네스 이전 버전이라 config `schema_version` 2만 받는다. Backend 1.9.0부터 config가 schema 3(학습 방식 `finetune`, GPU-262)이라 학습 Pod가 `config schema_version must be 2`로 바로 끝난다.
 - id는 소문자·숫자·`-`이고 `-`를 1개 이상 포함한다(학습 ID 모양과 구별). version은 1 이상 정수. 형식이 틀리면 제출 전에 멈춘다.
 - `--model-dir`·`--data`·`--train-py`와 같이 줄 수 없다(Backend가 파일 파트를 거절). 없는 데이터셋이나 manifest와 다른 train.py는 Backend가 400으로 거절한다.
 
@@ -54,7 +55,7 @@ Backend `POST /api/jobs`(Backend `api/openapi.yaml`)는 multipart다. 투입기�
 
 ```bash
 python launch.py scenario.csv --exp-id exp-0001 --image <투입기 이미지> --context <관리 클러스터> \
-  -- --dataset smollm2-wikitext2:1 --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
+  -- --dataset smollm2-wikitext2:2 --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
 kubectl -n platform logs -f job/submitter-exp-0001   # 진행 상황, 끝나면 결과 CSV 전체가 로그에 찍힘
 ```
 
@@ -73,7 +74,7 @@ kubectl -n platform logs -f job/submitter-exp-0001   # 진행 상황, 끝나면 
 | `--image` | O | 투입기 이미지(태그 또는 digest). 결과 첫 줄에 남는다. `SUBMITTER_IMAGE`로도 줌 |
 | `--context` | | 관리 클러스터 kubeconfig context (기본 현재 context) |
 | `--backend-url` `--kafka-bootstrap` `--kafka-topic` `--backend-timeout` | | 투입기 환경 변수. 안 주면 같은 이름의 환경 변수, 그것도 없으면 `submit.py` 기본값 |
-| `--` 뒤 | O (`--dataset`) | `submit.py`에 그대로: `--dataset`(예: `smollm2-wikitext2:1`) `--policy` `--fault-type` `--spare`/`--no-spare` `--checkpoint-every-steps` `--wait-timeout` `--speed` `--name` `--prefix` |
+| `--` 뒤 | O (`--dataset`) | `submit.py`에 그대로: `--dataset`(예: `smollm2-wikitext2:2`) `--policy` `--fault-type` `--spare`/`--no-spare` `--checkpoint-every-steps` `--wait-timeout` `--speed` `--name` `--prefix` |
 
 종료 코드: 0 = 띄움, 1 = 같은 exp_id가 이미 있음. 실험이 끝났는지는 Job 상태(`Complete`/`Failed`)로 본다. 투입기는 모든 잡이 끝나 `experiment.ended`를 보낸 뒤에 성공 종료하고, 시간 초과 땐 ended 없이 실패 종료한다.
 
@@ -91,7 +92,7 @@ DB에 직접 쓰지 않고 Kafka `job.lifecycle`(기본 `172.30.0.40:9092`, `KAF
 - Kafka 전달 확인을 못 받으면 바로 멈춤 (기록 없이 실험이 도는 걸 막으려고). 로컬은 `--no-kafka`
 
 ```bash
-python submit.py scenario.csv --dataset smollm2-wikitext2:1 \
+python submit.py scenario.csv --dataset smollm2-wikitext2:2 \
   --exp-id exp-0001 --policy ours --fault-type xid79 --spare --checkpoint-every-steps 100
 ```
 

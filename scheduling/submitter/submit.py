@@ -7,7 +7,7 @@
     30, 1, 200, fsdp, 180
 실행 시간은 선택 칸: kind(KWOK 가짜 GPU)에서는 step을 못 돌리므로 이 시간 뒤 Pod를 끝내 흉내 낸다.
 
-    python submit.py scenario.csv --dataset smollm2-wikitext2:1 --policy ours
+    python submit.py scenario.csv --dataset smollm2-wikitext2:2 --policy ours
                                                         # 백엔드 POST /api/jobs (BACKEND_URL), 고정 데이터셋
     python submit.py scenario.csv --model-dir gpt2/ --data train.jsonl --train-py train.py
                                                         # 백엔드, 잡마다 파일을 올림
@@ -152,9 +152,9 @@ def parse_dataset(value):
     ds_id, sep, version = value.rpartition(":")
     if not sep or not FIXED_DATASET_ID.match(ds_id) or "-" not in ds_id:
         raise argparse.ArgumentTypeError(
-            f"{value!r}: <id>:<version> 형식, id는 소문자·숫자·'-'이고 '-'를 1개 이상 포함 (예: smollm2-wikitext2:1)")
+            f"{value!r}: <id>:<version> 형식, id는 소문자·숫자·'-'이고 '-'를 1개 이상 포함 (예: smollm2-wikitext2:2)")
     if not version.isdigit() or int(version) < 1:
-        raise argparse.ArgumentTypeError(f"{value!r}: version은 1 이상 정수 (예: smollm2-wikitext2:1)")
+        raise argparse.ArgumentTypeError(f"{value!r}: version은 1 이상 정수 (예: smollm2-wikitext2:2)")
     return {"id": ds_id, "version": int(version)}
 
 
@@ -344,7 +344,7 @@ def main(argv=None):
     ap.add_argument("--out", default=None)
     b = ap.add_argument_group("백엔드 제출 데이터 (--kind가 아니면 --dataset 또는 파일 세 개 중 하나, 모든 잡에 같은 것)")
     b.add_argument("--dataset", type=parse_dataset, metavar="ID:VERSION",
-                   help="버킷에 올려 둔 고정 데이터셋을 가리켜 파일 없이 제출 (예: smollm2-wikitext2:1)")
+                   help="버킷에 올려 둔 고정 데이터셋을 가리켜 파일 없이 제출 (예: smollm2-wikitext2:2)")
     b.add_argument("--model-dir", help="잡마다 올릴 Hugging Face 모델 폴더 (config.json 포함)")
     b.add_argument("--data", nargs="+", help="잡마다 올릴 학습 데이터 .jsonl (1개 이상)")
     b.add_argument("--train-py", help="잡마다 올릴 학습 코드 .py")
