@@ -47,5 +47,13 @@
     "enabled": false,
     "producer_contract_confirmed": false,
     "attribute": "recovery_training_evidence"
+  },
+  "backend_metadata": {
+    "enabled": false,
+    "base_url": "https://BACKEND-INTERNAL-HOST",
+    "token_env": "BACKEND_RECOVERY_API_TOKEN",
+    "timeout_seconds": 5,
+    "max_age_seconds": 300,
+    "future_skew_seconds": 30
   }
 }

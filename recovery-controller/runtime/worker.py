@@ -17,9 +17,13 @@ def run(config, stop, health):
                                 config=Config(
                                     retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))
     table = dynamodb.Table(config['recovery_table'])
+    from integrations.backend_metadata import BackendMetadata, metadata_config
+    metadata = metadata_config(config.get('backend_metadata'))
+    metadata_client = BackendMetadata(metadata) if metadata['enabled'] else None
     store = Store(table, dynamodb.Table(config['fencing_table']),
                   max_recovery_attempts=config.get('retry_policy', {}).get('max_recovery_attempts', 3),
-                  stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900))
+                  stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900),
+                  metadata_client=metadata_client)
     from integrations.fencing_input import FencingProgressInput
     from recovery.evidence import EvidenceWriter
     evidence_input = FencingProgressInput(store, EvidenceWriter(store, config.get('evidence_policy')),
