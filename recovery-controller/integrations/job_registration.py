@@ -76,8 +76,10 @@ def actual_placement(envelope):
         raise ValueError('jobset_name must match job_id and generation')
     if cluster not in CLUSTERS:
         raise ValueError('placement_cluster must be a known worker cluster')
-    if (not isinstance(nodes, list) or not nodes or len(set(nodes)) != len(nodes)
-            or any(not isinstance(n, str) or not n.strip() or len(n) > 253 for n in nodes)):
+    # Element types first: set() of an unhashable element would raise TypeError.
+    if (not isinstance(nodes, list) or not nodes
+            or any(not isinstance(n, str) or not n.strip() or len(n) > 253 for n in nodes)
+            or len(set(nodes)) != len(nodes)):
         raise ValueError('distinct active_nodes required')
     if not isinstance(uid, str) or not uid.strip() or len(uid) > 128:
         raise ValueError('manager jobset_uid required')
@@ -100,21 +102,30 @@ class JobRegistry:
     def ingest(self, envelope):
         """Return what happened. Never raises for bad content (logged, then committed)."""
         kind = envelope.get('type')
+        parse = {'job.submitted': submitted_original, 'job.placement': actual_placement}.get(kind)
+        if parse is None:
+            return 'ignored'
+        try:
+            fields = parse(envelope)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # Any malformed content is rejected here; it must never wedge the consumer.
+            return self.rejected(envelope, kind, exc)
+        if fields is None:
+            return 'ignored'
         try:
             if kind == 'job.submitted':
-                fields = submitted_original(envelope)
-                if fields is None:
-                    return 'ignored'
                 return 'registered' if self.store.register_original(**fields) else 'conflict'
-            if kind == 'job.placement':
-                fields = actual_placement(envelope)
-                if fields['recovery_id']:
-                    return self.recovery_placement(fields)
-                return 'registered' if self.store.register_placement(**fields) else 'stale'
+            if fields['recovery_id']:
+                return self.recovery_placement(fields)
+            return 'registered' if self.store.register_placement(**fields) else 'stale'
         except (ValueError, RecoveryBlocked) as exc:
-            _log(event_id=envelope.get('event_id'), type=kind, result='rejected', reason=str(exc)[:256])
-            return 'rejected'
-        return 'ignored'
+            return self.rejected(envelope, kind, exc)
+
+    @staticmethod
+    def rejected(envelope, kind, exc):
+        _log(event_id=envelope.get('event_id'), type=kind, result='rejected',
+             error_type=type(exc).__name__, reason=str(exc)[:256])
+        return 'rejected'
 
     def recovery_placement(self, fields):
         if self.writer is None or WATCHER not in self.policy['placement_producers']:

@@ -55,11 +55,39 @@ class Workflow:
                 or fence.get('generation') != event['generation'] + 1)
 
     def cancel_relocation(self, record, reason='recovery authority changed'):
-        """ADR-50: relocator withdraws the new-generation JobSet it made, then ends Cancelled."""
+        """ADR-50: HOLD, then ask relocator to withdraw the new-generation JobSet it made."""
+        held = self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason)
+        return self.request_cancel(held, reason)
+
+    def request_cancel(self, record, reason):
+        """Persist the cancel intent before the API call; a failed PATCH is retried by retry_cancel."""
+        if not record.get('relocation_request') or record.get('relocation_cancelled') is True:
+            return record
+        record = self.store.save(record['event']['event_id'], relocation_cancelled=False,
+                                 relocation_cancel_reason=reason)
+        return self.retry_cancel(record, now=int(self.clock()))
+
+    def retry_cancel(self, record, now):
+        """Retry a pending cancel annotation with backoff. Never releases HOLD."""
+        if record.get('relocation_cancelled') is not False or now < int(record.get('relocation_cancel_next_at', 0)):
+            return record
+        rid = record['event']['event_id']
         cancel = getattr(self.executor, 'cancel', None)
-        if cancel and record.get('relocation_request'):
-            cancel(record['event'], record['relocation_request'], reason)
-        return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason)
+        if cancel is None:
+            return record
+        try:
+            cancel(record['event'], record['relocation_request'], record.get('relocation_cancel_reason')
+                   or 'recovery authority changed')
+        except Exception as exc:
+            failures = int(record.get('relocation_cancel_errors', 0)) + 1
+            delay = min(300, 5 * 2 ** min(failures - 1, 6))
+            print(json.dumps(dict(component='recovery', event_id=rid, cancel='retry',
+                                  error_type=type(exc).__name__)), flush=True)
+            return self.store.save(rid, relocation_cancel_errors=failures,
+                                   relocation_cancel_error=type(exc).__name__,
+                                   relocation_cancel_next_at=now + delay)
+        return self.store.save(rid, relocation_cancelled=True, relocation_cancel_errors=0,
+                               relocation_cancel_error=None, relocation_cancel_next_at=0)
 
     def accept(self, event):
         validate_event(event)
