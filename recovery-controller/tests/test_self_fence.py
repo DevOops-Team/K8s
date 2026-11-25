@@ -20,7 +20,7 @@ def rr():
 
 
 def fence():
-    return dict(generation=Decimal(2), recovery_from_gen=Decimal(1), recovery_to_gen=Decimal(2),
+    return dict(stop_wait_started_at=Decimal(int(NOW)), generation=Decimal(2), recovery_from_gen=Decimal(1), recovery_to_gen=Decimal(2),
         recovery_id='r1', recovery_phase='GENERATION_ADVANCED', self_fence_gen=Decimal(1),
         self_fence_cluster='eks-a', self_fence_world_size=Decimal(2),
         self_fence_ranks={Decimal(0), Decimal(1)}, self_fence_pods={'0:uid0', '1:uid1'}, self_fence_at=STAMP)
@@ -118,6 +118,23 @@ class SelfFenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):validate_config(config)
         config['relocation_status_input']=dict(enabled=True,producer_contract_confirmed=True)
         validate_config(config)
+
+    def test_report_before_delayed_rr_uses_generation_advance_time(self):
+        r = rr()
+        r['metadata']['creationTimestamp'] = '2026-11-25T01:01:00Z'
+        r['status']['recoveryProgress']['oldRunStopEvidence'].update(
+            kind='self_fence', confirmed_at=r['metadata']['creationTimestamp'])
+        r['status']['recoveryProgress']['oldRunStopEvidence']['checks'][0]['kind'] = 'self_fence'
+        value = SelfFenceInput(self.store, lambda: NOW + 60)(EVENT, r)
+        self.assertIsNotNone(value)
+        r['metadata']['annotations'] = {ANNOTATION: value}
+        project = RelocationStatusInput(self.store, 'training', lambda: NOW + 60, allow_self_fence=True)
+        self.assertTrue(project(EVENT, r))
+        for invalid_start in (None, True, Decimal('1.5'), 0, int(NOW) + 31):
+            self.store.fencing_record.return_value['stop_wait_started_at'] = invalid_start
+            self.assertIsNone(SelfFenceInput(self.store, lambda: NOW + 60)(EVENT, r))
+            with self.assertRaises(RecoveryBlocked):
+                project(EVENT, r)
 
     def test_config_default_and_contract_gate(self):
         self.assertFalse(self_fence_config()['enabled'])

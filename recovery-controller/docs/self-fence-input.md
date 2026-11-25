@@ -22,7 +22,8 @@ VPN 단절만으로 종료를 인정하지 않는다. 워커 API 접근 가능 �
 - 원본은 단일 replicatedJob, maxRestarts=0(명시), Indexed, backoffLimit=0,
   podReplacementPolicy=Failed, restartPolicy=Never여야 한다. 이는 계약 검사이지
   모든 상황에서 Pod 재생성이 불가능하다는 증명이 아니다. 실제 동작 시험이 필요하다.
-- self_fence_at은 RR 생성 시각-30초 이후, 현재+30초 이하여야 한다.
+- self_fence_at은 펜싱 표의 세대 전환 시각(stop_wait_started_at)-30초 이후, 현재+30초 이하여야 한다.
+  RR 생성이 지연돼도 기준은 같으며, status 재검사 때도 현재 펜싱 표의 같은 값을 사용한다.
   복구 중에는 오래된 조회라는 이유로 전체 종료 보고를 만료시키지 않는다.
 - 일부/잘못된 보고는 주석을 생산하지 않고 기존 종료 대기를 유지한다. DB 오류는 기존
   API 오류 정책을 따른다. 취소 요청에는 생산하지 않는다.

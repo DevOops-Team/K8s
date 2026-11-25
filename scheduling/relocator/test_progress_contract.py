@@ -83,7 +83,7 @@ class ControllerAcceptsRelocatorStatus(unittest.TestCase):
         stamp = req['metadata']['creationTimestamp']
         now = relocator.datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
         store = mock.Mock()
-        store.fencing_record.return_value = dict(generation=2, recovery_from_gen=1, recovery_to_gen=2,
+        store.fencing_record.return_value = dict(stop_wait_started_at=int(now), generation=2, recovery_from_gen=1, recovery_to_gen=2,
             recovery_id='evt-1', recovery_phase='GENERATION_ADVANCED', self_fence_gen=1,
             self_fence_cluster='eks-a', self_fence_world_size=2, self_fence_ranks={0,1},
             self_fence_pods={'0:uid-a','1:uid-b'}, self_fence_at=stamp)
@@ -99,6 +99,7 @@ class ControllerAcceptsRelocatorStatus(unittest.TestCase):
             generation=1,namespace='training',jobset_name='job-j1-g0001',clusters=['eks-a'],
             kind='self_fence',checks=[dict(cluster='eks-a',kind='self_fence',detail=detail)],confirmed_at=stamp))}
         rec=Recorder()
+        rec.fencing_record = store.fencing_record
         self.assertTrue(RelocationStatusInput(rec,'training',lambda:now,allow_self_fence=True)(event,req))
         self.assertEqual(rec.calls[0][0],'OLD_RUN_STOPPED')
 
