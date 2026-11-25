@@ -178,6 +178,13 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.flow.accept(dict(EVENT, node=None))
 
+    def test_pod_failure_without_node_requests_group_restart(self):
+        event = dict(EVENT, event_id='pod-fault', node=None, source='pod',
+                     category='app', suggested_action='restart_in_place')
+        self.flow.accept(event)
+        self.flow.tick(self.store.events['pod-fault'])
+        self.assertEqual(self.requests.calls, [(event, 'restartInPlace')])
+
     def test_same_step_reapproval_is_not_progress(self):
         self.tick()
         self.store.nodes['progress']['completed_step'] = 1000
