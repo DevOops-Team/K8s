@@ -10,9 +10,10 @@ SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
 
 
 class RelocationClient:
-    def __init__(self, namespace, transport=None):
+    def __init__(self, namespace, transport=None, inputs=None):
         self.namespace = namespace
         self.transport = transport or self._request
+        self.inputs = inputs
 
     def _request(self, method, path, document=None):
         token = (SERVICE_ACCOUNT / 'token').read_text().strip()
@@ -21,7 +22,8 @@ class RelocationClient:
             'https://kubernetes.default.svc' + path,
             data=None if document is None else json.dumps(document).encode(),
             method=method,
-            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+            headers={'Authorization': 'Bearer ' + token, 'Content-Type':
+                     'application/merge-patch+json' if method == 'PATCH' else 'application/json'})
         with urllib.request.urlopen(request, context=tls, timeout=10) as response:
             return json.load(response)
 
@@ -48,6 +50,9 @@ class RelocationClient:
         document = {'apiVersion': 'scheduling.devoops.site/v1alpha1',
                     'kind': 'RelocationRequest',
                     'metadata': {'name': name, 'namespace': self.namespace}, 'spec': spec}
+        if self.inputs:
+            from integrations.relocation_inputs import ANNOTATION
+            document['metadata']['annotations'] = {ANNOTATION: self.inputs(event)}
         try:
             self.transport('POST', path, document)
         except urllib.error.HTTPError as exc:
@@ -56,7 +61,29 @@ class RelocationClient:
             existing = self.transport('GET', path + '/' + name)
             if existing.get('spec') != spec:
                 raise ValueError('RelocationRequest name belongs to a different request') from exc
+            if self.inputs:
+                self.transport('PATCH', path + '/' + name, {'metadata': {
+                    'resourceVersion': existing['metadata']['resourceVersion'],
+                    'annotations': document['metadata']['annotations']}})
         return name
+
+    def refresh(self, event, name):
+        """Refresh only this request; resourceVersion prevents a lost concurrent update."""
+        if self.inputs is None:
+            return
+        from integrations.relocation_inputs import ANNOTATION
+        path = (f'/apis/scheduling.devoops.site/v1alpha1/namespaces/'
+                f'{self.namespace}/relocationrequests/{name}')
+        existing = self.transport('GET', path)
+        spec = existing.get('spec', {})
+        expected_ref = f"{self.namespace}/job-{event['job_id']}-g{event['generation']:04d}"
+        if spec.get('requestId') != event['event_id'] or spec.get('jobRef') != expected_ref:
+            raise ValueError('cannot refresh another relocation request')
+        if existing.get('status', {}).get('phase') in ('Done', 'Failed', 'Duplicate'):
+            return
+        self.transport('PATCH', path, {'metadata': {
+            'resourceVersion': existing['metadata']['resourceVersion'],
+            'annotations': {ANNOTATION: self.inputs(event)}}})
 
 
 class DispatcherCapacity:

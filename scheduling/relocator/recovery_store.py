@@ -1,6 +1,6 @@
-"""복구 원본(jobset.json)과 펜싱 기록 읽기·쓰기 (체크포인트 규약 4·5·8절, IAM 답변 11/05).
+"""펜싱 조건부 쓰기 어댑터와 로컬 테스트 저장소.
 
-RECOVERY_STORE=aws       우리 망. S3 GetObject code/{job_id}/jobset.json, DynamoDB GetItem·UpdateItem(테이블 1개)
+RECOVERY_STORE=aws       운영: DynamoDB 조건부 UpdateItem만 사용. DB/S3 읽기는 복구 컨트롤러가 전달.
 RECOVERY_STORE=configmap kind. 관리 클러스터 전용 네임스페이스 scheduling-local-store의 ConfigMap으로 흉내
                          (platform의 다른 ConfigMap에 권한이 닿지 않게 따로 둠)
                          recovery-code-<job_id>    data.jobset.json  (= S3 code/{job_id}/jobset.json)
@@ -32,24 +32,22 @@ class Conflict(Exception):
 class AwsStore:
     def __init__(self):
         import boto3   # kind·단위 테스트에서는 필요 없게 여기서 import
-        from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+        from boto3.dynamodb.types import TypeSerializer
         region = os.getenv("AWS_REGION", "us-east-2")
-        self.bucket = os.environ["CKPT_BUCKET"]
         self.table = os.environ["FENCING_TABLE"]
-        self.s3 = boto3.client("s3", region_name=region)
         self.ddb = boto3.client("dynamodb", region_name=region)
-        self._de, self._se = TypeDeserializer(), TypeSerializer()
+        self._se = TypeSerializer()
 
-    def get_jobset(self, job_id):
-        body = self.s3.get_object(Bucket=self.bucket, Key=f"code/{job_id}/jobset.json")["Body"].read()
-        return json.loads(body)
-
-    def get_fencing(self, job_id):
-        item = self.ddb.get_item(TableName=self.table, Key={"job_id": {"S": job_id}}, ConsistentRead=True).get("Item")
-        if not item:
-            return None
-        rec = {k: self._de.deserialize(v) for k, v in item.items()}
-        return {k: (int(v) if k in NUMERIC and v is not None else v) for k, v in rec.items()}
+    def check_authority(self, job_id, recovery_id, to_gen):
+        try:
+            self.ddb.update_item(TableName=self.table, Key={"job_id": {"S": job_id}},
+                UpdateExpression="SET recovery_updated_at = :now",
+                ConditionExpression="recovery_id = :rid AND recovery_to_gen = :gen AND generation = :gen",
+                ExpressionAttributeValues={":rid": self._se.serialize(recovery_id),
+                    ":gen": self._se.serialize(to_gen), ":now": self._se.serialize(_now())})
+            return True
+        except self.ddb.exceptions.ConditionalCheckFailedException:
+            return False
 
     def set_phase(self, job_id, recovery_id, to_gen, allowed_from, new_phase, extra=None):
         values = {"phase": new_phase, "now": _now(), "rid": recovery_id, "gen": to_gen, **(extra or {})}
@@ -60,7 +58,7 @@ class AwsStore:
             self.ddb.update_item(
                 TableName=self.table, Key={"job_id": {"S": job_id}},
                 UpdateExpression="SET " + ", ".join(sets),
-                ConditionExpression=f"recovery_id = :rid AND recovery_to_gen = :gen AND recovery_phase IN ({', '.join(froms)})",
+                ConditionExpression=f"recovery_id = :rid AND recovery_to_gen = :gen AND generation = :gen AND recovery_phase IN ({', '.join(froms)})",
                 ExpressionAttributeValues={f":{k}": self._se.serialize(v) for k, v in values.items()})
             return True
         except self.ddb.exceptions.ConditionalCheckFailedException:
@@ -91,6 +89,12 @@ class ConfigMapStore:
         if cm is None:
             return None
         return {k: (int(v) if k in NUMERIC and v != "" else (v or None)) for k, v in (cm.data or {}).items()}
+
+    def check_authority(self, job_id, recovery_id, to_gen):
+        # Local test adapter only; production AwsStore performs a conditional write.
+        rec = self.get_fencing(job_id) or {}
+        return (rec.get('recovery_id') == recovery_id and rec.get('generation') == to_gen
+                and rec.get('recovery_to_gen') == to_gen)
 
     def set_phase(self, job_id, recovery_id, to_gen, allowed_from, new_phase, extra=None):
         cm = self._read(f"recovery-fencing-{job_id}")

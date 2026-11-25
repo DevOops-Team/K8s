@@ -17,9 +17,11 @@ action:
   복구 컨트롤러  판단 -> DynamoDB 세대 +1 (recovery_phase=GENERATION_ADVANCED, recovery_id·from/to gen) -> 이 요청 생성
   재배치 실행기  요청의 requestId = 펜싱 기록 recovery_id 인지 확인
                  -> 격리 -> 옛 실행이 멈춘 걸 확인하면 OLD_RUN_STOPPED
-                 -> 복구 원본(S3 code/{job_id}/jobset.json)에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
+                 -> RR 주석으로 전달받은 복구 원본에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
                  -> NEW_RUN_SUBMITTED + new_jobset_name·uid (전부 조건부 갱신)
   RESUMING·COMPLETED는 복구 컨트롤러 몫.
+  운영의 DB/S3 읽기 입력은 복구 컨트롤러가 devoops/recovery-inputs 주석으로 공급한다.
+  조건부 펜싱 쓰기 및 K8s/EC2 실제 종료 확인은 재배치기 책임을 유지한다.
 
 단계마다 요청 status에 시각을 남기고, 다음 루프에서 비어 있는 단계부터 이어서 한다.
 펜싱 기록 갱신과 JobSet 생성도 같은 이름·조건으로 다시 해도 결과가 같아서, 실행기가 중간에 죽었다 살아나도 두 번 하지 않는다.
@@ -48,6 +50,7 @@ import kube
 import leader
 import recovery_render as R
 import recovery_store
+from request_inputs import RequestStore, InputsUnavailable
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "120"))    # 옛 잡이 이 시간 안에 안 내려가면 WaitingForStop으로 알림
@@ -69,6 +72,8 @@ FINAL = {"Done", "Failed", "Duplicate"}
 
 class Ctx:
     def __init__(self, mgr, workers, store, rr, ec2=None):
+        if getattr(store, 'require_controller_inputs', False):
+            store = RequestStore(rr, store)
         self.mgr, self.workers, self.store, self.rr = mgr, workers, store, rr
         self.ec2 = ec2   # ec2_evidence.Ec2Evidence 또는 None (EC2 증거 안 씀)
         self.co = kube.kueue(mgr)
@@ -544,9 +549,15 @@ def reconcile(mgr, workers, store, ec2=None):
     for rr in rrs:
         if (rr.get("status") or {}).get("phase") in FINAL:
             continue
-        x = Ctx(mgr, workers, store, rr, ec2)
+        try:
+            x = Ctx(mgr, workers, store, rr, ec2)
+        except InputsUnavailable as e:
+            log.warning('%s: controller input pending: %s', rr['metadata']['name'], e)
+            continue
         try:
             step(x, rrs)
+        except InputsUnavailable as e:
+            log.warning('%s: controller refresh pending: %s', x.name, e)
         except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
             log.warning("%s: 거부 - %s", x.name, e)
             x.save(phase="Failed", message=f"거부: {e}")
@@ -563,6 +574,7 @@ def main():
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
     store = recovery_store.from_env(mgr)
+    store.require_controller_inputs = True
     ec2 = ec2_evidence.from_env()
     log.info("시작: interval=%ss store=%s ec2=%s", INTERVAL, type(store).__name__,
              "off" if ec2 is None else ("terminate" if ec2.can_terminate else "describe"))

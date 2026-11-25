@@ -36,7 +36,11 @@ CRD와 namespace는 scheduling 구성을 먼저 설치해야 합니다.
 기존 fault_type 입력도 새 내부 액션으로 변환합니다.
 collector_healthy=false인 비-site 이벤트는 HOLD로 낮춥니다.
 job_id/generation을 특정하지 못한 신호는 기록하고 HOLD합니다.
-실제 이벤트 cluster는 eks-a/b/c 계약을 유지합니다. worker-a 같은 별칭은 생산자와 맞춰야 합니다.
+실제 실행 대상 cluster는 eks-a/b/c 계약을 유지합니다. 그 외 비어 있지 않은 문자열은
+별칭으로 변환하지 않고 reason=unknown_cluster, state/action=HOLD로 기록합니다.
+inbox 영속 저장 성공 후 Kafka offset을 커밋하므로 이 사건 하나가 이후 정상 사건의
+소비를 막지 않습니다. 잘못된 event_id/필드 타입/세대 및 inbox 저장 실패는 기존처럼
+커밋하지 않습니다. unknown_cluster는 backend 메타데이터 조회·펜싱 변경·RR 생성 없이 끝납니다.
 원본 v1과 payload 봉투 입력 모두 수용하며 Kafka rule_version 헤더를 inbox에 보관합니다.
 
 클러스터 전체 펜싱인 evacuateCluster로 대신 승격하지 않습니다.
@@ -65,7 +69,42 @@ placement_generation=새 세대, cluster=새 owner, active_nodes=실제 참여 �
 완료 기록 후 복구 잠금을 해제하고 COMPLETED 단계는 남깁니다.
 별도 inbox 결과는 recovery.action으로 최소 한 번 발행합니다.
 HOLD/IGNORED는 별도 dedup_key 소비 없이 저장하며 같은 사건의 새 event_id 재판정을 받을 수 있습니다.
-event_id와 원본 내용의 충돌은 거부합니다. 사건 간 dedup_key 영속 소비는 추가 통합 대상입니다.
+event_id와 원본 내용의 충돌은 거부합니다. dedup_key를 실행 중복 제거용으로 영속 소비하지 않습니다.
+
+## 사이트 사건과 늦은 HOLD 재분류 — GPU-220 연동
+
+site 입력은 node=null, collector_healthy=false여도 fence_evacuate를 처리할 수 있습니다.
+job_id/generation을 모르는 신호는 저장 후 HOLD하며 클러스터 전체 작업을 임의로 추측하지 않습니다.
+분류기의 cluster/job_id 단위 dedup_key를 유지합니다. 다른 작업·세대·클러스터로 정정 판단을 전파하지 않습니다.
+
+Kafka 봉투의 type=fault.detected/fault.held/fault.reclassified와 occurred_at을
+inbox event의 classification_type/classification_occurred_at으로 보관합니다.
+occurred_at은 분류기 판정 시각이며 payload.ts는 원본 신호 시각입니다.
+봉투 문맥 필드는 기존 payload digest를 바꾸지 않으므로 코드 업그레이드/중복 수신 때
+동일 event_id의 기존 원본과 충돌하거나 판정 시각이 갱신되지 않습니다.
+
+재분류의 상관 범위는 cluster + job_id + 원래 generation + dedup_key 전체 일치입니다.
+event_id는 새 판정마다 달라야 하며 기존 판정/진행 레코드를 새 추천으로 덮어쓰지 않습니다.
+
+| 도착 시점 | 처리 |
+|---|---|
+| 원본이 RECEIVED이고 아직 펜싱 CLAIMED도 기록되지 않음 | 더 늦은 판정 시각의 reclassified hold가 저장되어 있으면 원본도 HOLD. 새 세대/RR 없음 |
+| 판정 시각 누락·유효하지 않은 시각·동일 시각 | 조치 전에는 순서를 임의 추정하지 않고 HOLD 우선. classification_order_unresolved 또는 classification_hold_before_claim 기록 |
+| 펜싱 CLAIMED 이후, GENERATION_ADVANCED·종료/제출/복원 대기 중 | 원본 복구는 유지. 새 hold 사건만 IGNORED/NONE으로 기록하고 recommended_action=HOLD·related_event_id·관찰한 복구 상태/단계를 남김 |
+| CLAIMED는 저장됐지만 응답 유실로 원본 inbox는 RECEIVED | 펜싱 recovery_id가 원본과 같으면 이미 시작한 것으로 판단. 기존 복구를 계속함 |
+| 과거 hold 뒤 더 최신 시각의 actionable 새 재분류 | 기존 dedup_key를 소비하지 않았으므로 정상 펜싱/세대 조건을 다시 확인할 수 있음. 기존 HOLD 레코드를 자동 해제하는 것은 아님 |
+| 관련 원본 없음·작업/세대/클러스터 미식별 | 해당 hold 사건만 HOLD. 다른 사건의 복구를 중단하거나 새로 만들지 않음 |
+
+진행 중에는 세대/owner/retry_count를 되돌리거나 RR을 삭제·재생성하지 않습니다.
+기존 단계 deadline·종료 증거·재개 확인·수동 HOLD 재개 규칙을 그대로 따릅니다.
+CLAIMED 이후 복구를 취소하는 운영 인터페이스는 이번 범위가 아닙니다.
+상관 조회는 기존 ConsistentRead·전체 pagination inbox scan을 재사용합니다. 조회 실패는
+관련 사건 없음으로 해석하지 않으며 새 조치를 실행하지 않습니다. 대규모 이력의 GSI 최적화는 별도입니다.
+복구를 진행한 뒤 받은 hold는 복구 실패/HOLD로 원본을 바꾸는 것이 아니므로
+새 hold의 결과 type은 recovery.decided이며 별도 recovery.held 알람을 만들지 않습니다.
+
+이 수정은 컨트롤러 로직·테스트·연동 규약만 변경합니다. 사이트 알람/분류기 실행 모드와
+Gitops 배포 설정은 켜지 않으며 실제 EKS 대피 통합 시험은 담당자와 시간을 맞춰 수행해야 합니다.
 
 ## 적용·전환 경계
 

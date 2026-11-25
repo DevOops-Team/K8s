@@ -17,19 +17,19 @@ def run(config, stop, health):
                                 config=Config(
                                     retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))
     table = dynamodb.Table(config['recovery_table'])
-    from integrations.backend_metadata import BackendMetadata, metadata_config
-    metadata = metadata_config(config.get('backend_metadata'))
-    metadata_client = BackendMetadata(metadata) if metadata['enabled'] else None
     store = Store(table, dynamodb.Table(config['fencing_table']),
                   max_recovery_attempts=config.get('retry_policy', {}).get('max_recovery_attempts', 3),
-                  stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900),
-                  metadata_client=metadata_client)
+                  stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900))
     from integrations.fencing_input import FencingProgressInput
     from recovery.evidence import EvidenceWriter
     evidence_input = FencingProgressInput(store, EvidenceWriter(store, config.get('evidence_policy')),
                                          config.get('fencing_progress_input'))
     execute = config['execution_enabled']
-    executor = RelocationClient(config.get('job_namespace', 'training')) if execute else None
+    from integrations.relocation_inputs import RelocationInputs
+    executor = (RelocationClient(config.get('job_namespace', 'training'),
+                inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
+                    config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))))
+                if execute else None)
     capacity = (DispatcherCapacity(config.get('dispatcher_capacity_url'))
                 if execute and config.get('straggler_auto_migration_enabled', False) else None)
     workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'),
@@ -73,7 +73,8 @@ def run(config, stop, health):
             msg=consumer.poll(1)
             if msg is None: continue
             if msg.error(): raise RuntimeError('Kafka poll failed')
-            # Invalid input is not committed: fail closed until schema/source is corrected.
+            # Unknown clusters are durable HOLD inputs. Other malformed inputs
+            # and failed inbox writes still fail closed without committing.
             received_fault = accept_message(consumer, workflow, msg)
             with guard_lock:
                 if guard and received_fault:

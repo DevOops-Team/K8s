@@ -15,7 +15,7 @@ RELOCATION_ACTIONS = {'RETRY_GROUP': 'restartInPlace',
 
 
 def validate_event(event):
-    plan(event)
+    decision = plan(event)
     if not event.get('job_id') or event.get('generation') is None:
         return event  # Unresolved signals are retained but never change execution authority.
     if (not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', event['job_id'])
@@ -23,7 +23,7 @@ def validate_event(event):
         raise ValueError('job_id must fit the JobSet DNS name')
     if type(event['generation']) is not int or event['generation'] < 1:
         raise ValueError('generation must be a positive integer')
-    if plan(event)['suggested_action'] in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY'):
+    if decision['suggested_action'] in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY'):
         if not isinstance(event.get('node'), str) or not event['node'].strip():
             raise ValueError('node is required for a node-scoped recovery')
     return event
@@ -35,9 +35,18 @@ class Workflow:
         self.store, self.executor, self.execute = store, executor, execute
         self.evidence_policy, self.clock = policy_config(evidence_policy), clock
 
+    def refresh_relocation_inputs(self, record):
+        refresh = getattr(self.executor, 'refresh', None)
+        if refresh and record.get('relocation_request'):
+            refresh(record['event'], record['relocation_request'])
+
     def accept(self, event):
         validate_event(event)
-        canonical = json.dumps(event, sort_keys=True, separators=(',', ':'))
+        # New envelope context must not change an existing payload's inbox digest
+        # across upgrades or refresh ordering when Kafka redelivers the same ID.
+        payload = {key: value for key, value in event.items()
+                   if key not in ('classification_type', 'classification_occurred_at')}
+        canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
         self.store.accept(event, hashlib.sha256(canonical.encode()).hexdigest())
 
     def held_relocation_progress(self, record):
@@ -62,6 +71,7 @@ class Workflow:
         action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
         if action not in RELOCATION_ACTIONS:
             return None
+        self.refresh_relocation_inputs(record)
         fence = self.store.fencing_record(event['job_id'])
         if (not all(whole(fence.get(key)) for key in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
                 or fence.get('recovery_id') != event['event_id']
@@ -106,27 +116,24 @@ class Workflow:
     def tick(self, record, monitoring_hold=False):
         e = record['event']
         rid = e['event_id']
-        action = plan(e)['suggested_action']
+        decision = plan(e)
+        action = decision['suggested_action']
         state = record.get('state', 'RECEIVED')
         if state == 'REVIEW':
             return self.store.save(rid, state='HOLD', action='HOLD',
                                    reason=record.get('reason', 'legacy review requires operator inspection'))
         if state in TERMINAL:
             return record
+        if decision.get('reason') == 'unknown_cluster':
+            return self.store.save(rid, state='HOLD', action='HOLD', reason='unknown_cluster')
         if not self.execute:
             init = init_decision(e)
             details = dict(stage='CKPT_INIT', exit_code=e['exit_code'], failure_class=init['failure_class']) if init else {}
             return self.store.save(rid, state='OBSERVED', action=action, **details)
-        # Bootstrap only for real, actionable recovery events; never pre-register
-        # normal jobs, observation-only inputs, or job.failed-only safety-net events.
-        register = getattr(self.store, 'ensure_job', None)
-        if (state == 'RECEIVED' and action in RELOCATION_ACTIONS and not monitoring_hold
-                and e.get('job_id') and e.get('generation') is not None and register):
-            try:
-                if not register(e):
-                    return self.store.save(rid, state='STALE', action='NONE', reason='stale metadata generation')
-            except RecoveryBlocked as exc:
-                return self.store.save(rid, state='HOLD', action='HOLD', reason=str(exc))
+        from recovery.reclassification import reconcile
+        revised = reconcile(self.store, record, action)
+        if revised is not None:
+            return revised
         init = init_decision(e)
         if init and state == 'RECEIVED':
             fence = self.store.fencing_record(e['job_id'])
@@ -171,6 +178,8 @@ class Workflow:
             return record  # Pending input survives monitoring outage without changing authority.
         if not e.get('job_id') or e.get('generation') is None:
             return self.store.save(rid, state='HOLD', action=action, reason='job identity unresolved')
+        # Inside Runner's retry/deadline budget, including held stop-progress polling.
+        self.refresh_relocation_inputs(record)
         try:
             job = self.store.claim(e)
         except RetryLimitReached as exc:
