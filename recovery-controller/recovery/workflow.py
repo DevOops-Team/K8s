@@ -35,6 +35,11 @@ class Workflow:
         self.store, self.executor, self.execute = store, executor, execute
         self.evidence_policy, self.clock = policy_config(evidence_policy), clock
 
+    def refresh_relocation_inputs(self, record):
+        refresh = getattr(self.executor, 'refresh', None)
+        if refresh and record.get('relocation_request'):
+            refresh(record['event'], record['relocation_request'])
+
     def accept(self, event):
         validate_event(event)
         # New envelope context must not change an existing payload's inbox digest
@@ -66,6 +71,7 @@ class Workflow:
         action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
         if action not in RELOCATION_ACTIONS:
             return None
+        self.refresh_relocation_inputs(record)
         fence = self.store.fencing_record(event['job_id'])
         if (not all(whole(fence.get(key)) for key in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
                 or fence.get('recovery_id') != event['event_id']
@@ -172,6 +178,8 @@ class Workflow:
             return record  # Pending input survives monitoring outage without changing authority.
         if not e.get('job_id') or e.get('generation') is None:
             return self.store.save(rid, state='HOLD', action=action, reason='job identity unresolved')
+        # Inside Runner's retry/deadline budget, including held stop-progress polling.
+        self.refresh_relocation_inputs(record)
         try:
             job = self.store.claim(e)
         except RetryLimitReached as exc:

@@ -25,7 +25,11 @@ def run(config, stop, health):
     evidence_input = FencingProgressInput(store, EvidenceWriter(store, config.get('evidence_policy')),
                                          config.get('fencing_progress_input'))
     execute = config['execution_enabled']
-    executor = RelocationClient(config.get('job_namespace', 'training')) if execute else None
+    from integrations.relocation_inputs import RelocationInputs
+    executor = (RelocationClient(config.get('job_namespace', 'training'),
+                inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
+                    config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))))
+                if execute else None)
     capacity = (DispatcherCapacity(config.get('dispatcher_capacity_url'))
                 if execute and config.get('straggler_auto_migration_enabled', False) else None)
     workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'),
