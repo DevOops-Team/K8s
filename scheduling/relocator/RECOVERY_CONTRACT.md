@@ -43,6 +43,32 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 - RR 수정은 기존 입장 정책 `scheduling-relocation-request-writers`로 복구 컨트롤러 SA(와 관리자)만 할 수 있다.
 - 사람 확인 주석 `devoops/old-execution-stopped`는 그대로 받는다(아래 5. 주의).
 
+### 자기 펜싱 확인 `devoops/self-fence-verified` (ADR-49, GPU-255, relocator `SELF_FENCE_EVIDENCE=on`일 때만)
+
+사이드카 기록은 RR을 만든 뒤에 생기고 spec은 만든 뒤 바꿀 수 없어서, 다른 제어 신호처럼 주석으로 받는다.
+복구 컨트롤러가 펜싱 표 `self_fence_*`를 읽어 확인한 뒤 값(JSON)을 붙인다.
+
+```json
+{"requestId": "evt-1", "generation": 1, "cluster": "eks-a", "worldSize": 2,
+ "ranks": [0, 1], "pods": ["0:<pod uid>", "1:<pod uid>"], "recordedAt": "2026-11-25T01:00:07Z"}
+```
+
+| 칸 | 펜싱 표 | relocator 확인 |
+| --- | --- | --- |
+| `requestId` | `recovery_id` | = spec.requestId |
+| `generation` | `self_fence_gen` | = jobRef 옛 세대 (정수) |
+| `cluster` | `self_fence_cluster` | = 닿지 않는 그 워커 |
+| `worldSize` | `self_fence_world_size` | = 복구 원본 Pod 수 N (spec.jobSet parallelism) |
+| `ranks` | `self_fence_ranks` | 정확히 0~N-1 (정수, 중복 없음) |
+| `pods` | `self_fence_pods` (ADR-49 남은 구멍 4) | 번호 0~N-1마다 Pod UID 정확히 하나 |
+| `recordedAt` | `self_fence_at` | 비어 있지 않음 |
+
+- 워커 API에 닿을 때는 쓰지 않는다. 닿는데 JobSet·Workload·Pod가 남아 있으면 이 주석이 있어도 멈춤이 아니다.
+- 복구 원본(spec.jobSet)이 Pod를 다시 만들지 않는 모양일 때만 쓴다: `maxRestarts` 0, replicatedJob 하나(replicas 1), `completionMode: Indexed`, `backoffLimit` 0, `podReplacementPolicy: Failed`, `restartPolicy: Never`.
+- 하나라도 어긋나면 이 증거를 쓰지 않고 EC2 증거 → `WaitingForStop`/`Held`로 넘어간다.
+- 쓰면 `oldRunStopEvidence.kind`와 그 워커의 `checks[].kind`가 `self_fence`다 (섞이면 ec2 > self_fence > automatic).
+- 컨트롤러가 붙이기 전 확인할 것(ADR-49 쓰기 조건): `generation > self_fence_gen`, 그리고 `recovery_from_gen`·`recovery_to_gen`·`recovery_id`·`GENERATION_ADVANCED`가 이 복구와 맞을 것.
+
 ## 4. RR status.recoveryProgress (relocator가 씀)
 
 복구 컨트롤러 `integrations/relocation_status.py` 계약 v1과 같다. 단위 테스트 `test_progress_contract.py`가 그 검사 코드에 실제로 넣어 확인한다.
@@ -76,6 +102,7 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 - **사람 확인 경로**: relocator는 `devoops/old-execution-stopped=true`를 받으면 `kind: manual`, `checks: []` 증거를 쓴다. 지금 컨트롤러 계약은 manual을 받지 않아 펜싱 표에 기록되지 않고 HOLD로 남는다. 워커가 끊겨 EC2 증거도 없을 때 사람이 풀 경로가 따로 필요하다.
 - **워커에 보내지기 전 잡**: 옛 잡이 어느 워커에도 안 보내졌으면 `clusters`가 빈 목록이다. 컨트롤러 계약은 빈 목록과 사건 클러스터가 빠진 목록을 거부한다.
 - **확인 주석 대기 시간**: relocator는 확인 주석을 기한 없이 기다린다. 기한 판단과 HOLD는 컨트롤러 몫이다.
+- **자기 펜싱 증거 kind**: 컨트롤러 `relocation_status.py`는 지금 kind `automatic`·`ec2`만 받는다. `SELF_FENCE_EVIDENCE`를 켜기 전에 컨트롤러가 `self_fence`를 받고 `devoops/self-fence-verified`를 붙이는 쪽을 구현해야 한다. 그 전에는 켜도 컨트롤러가 HOLD한다.
 
 ## 6. 배포 담당(Gitops·인프라)에 전달할 변경
 
