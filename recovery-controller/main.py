@@ -52,6 +52,9 @@ def validate_config(config):
     relocation_status = status_config(config.get('relocation_status_input'))
     if relocation_status['enabled'] and not config['execution_enabled']:
         raise ValueError('relocation status input requires execute mode')
+    from integrations.self_fence import self_fence_config
+    if self_fence_config(config.get('self_fence_input'))['enabled'] and not relocation_status['enabled']:
+        raise ValueError('self fence input requires relocation status input and execute mode')
     if 'backend_metadata' in config:
         legacy = config['backend_metadata']
         # Existing deployments retain this disabled block across image upgrades.
