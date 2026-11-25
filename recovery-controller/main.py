@@ -53,7 +53,11 @@ def validate_config(config):
     if relocation_status['enabled'] and not config['execution_enabled']:
         raise ValueError('relocation status input requires execute mode')
     if 'backend_metadata' in config:
-        raise ValueError('backend_metadata has been removed; remove the obsolete setting')
+        legacy = config['backend_metadata']
+        # Existing deployments retain this disabled block across image upgrades.
+        # Accept it without restoring the removed Backend client or its credentials.
+        if not isinstance(legacy, dict) or legacy.get('enabled') is not False:
+            raise ValueError('backend_metadata has been removed; disable it with enabled: false or remove the setting')
     progress_input = input_config(config.get('fencing_progress_input'))
     if progress_input['enabled'] and source != 'kafka':
         raise ValueError('fencing progress input requires DynamoDB/Kafka runtime')

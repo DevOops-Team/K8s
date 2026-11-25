@@ -28,12 +28,31 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_removed_backend_setting_fails_loudly(self):
+    def test_disabled_backend_setting_remains_compatible(self):
         from main import validate_config
         config = dict(schema_version=1, mode='observe', event_source='disabled',
-                      execution_enabled=False, backend_metadata={'enabled': False})
-        with self.assertRaisesRegex(ValueError, 'backend_metadata has been removed'):
-            validate_config(config)
+                      execution_enabled=False, backend_metadata={'enabled': False,
+                          'url': 'https://obsolete.invalid', 'token_file': '/missing/legacy-token'})
+        self.assertIs(validate_config(config), config)
+
+    def test_enabled_or_ambiguous_backend_setting_is_rejected(self):
+        from main import validate_config
+        for legacy in ({'enabled': True}, {'enabled': 0}, {'enabled': 'false'}, {}, None, False):
+            with self.subTest(legacy=legacy):
+                config = dict(schema_version=1, mode='observe', event_source='disabled',
+                              execution_enabled=False, backend_metadata=legacy)
+                with self.assertRaisesRegex(ValueError, 'backend_metadata has been removed'):
+                    validate_config(config)
+
+    def test_execute_mode_accepts_disabled_legacy_backend_config(self):
+        from main import validate_config
+        config = dict(schema_version=1, mode='execute', event_source='kafka', execution_enabled=True,
+                      aws_region='us-east-2', recovery_table='recovery', fencing_table='fencing',
+                      kafka_bootstrap_servers='kafka:9092', kafka_group_id='recovery-v1',
+                      fault_topic='gpu.fault', result_topic='recovery.action',
+                      redispatch_policy='controller-only', scheduler_policy_confirmed=True,
+                      backend_metadata={'enabled': False})
+        self.assertIs(validate_config(config), config)
 
     def test_execution_cannot_be_enabled(self):
         from main import validate_config
