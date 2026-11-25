@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from decimal import Decimal
 from unittest.mock import Mock
 from integrations.kafka import accept_message
 from recovery.workflow import Workflow
@@ -46,6 +47,18 @@ class JobFailedTests(unittest.TestCase):
         self.assertEqual(self.store.job['generation'], 1)
         self.assertEqual(self.executor.calls, [])
         self.assertEqual(self.tick(1400), result)
+
+    def test_dynamodb_generation_reaches_hold_and_outbox(self):
+        self.store.events[self.rid]['event']['generation'] = Decimal('1')
+        result = self.tick(1300)
+        self.assertEqual(result['state'], 'HOLD')
+        producer = self.runner.producer
+        producer.flush.return_value = 0
+        producer.produce.side_effect = lambda *args, **kwargs: kwargs['on_delivery'](None, None)
+        self.runner.deliver(result, 1300)
+        envelope = json.loads(producer.produce.call_args.kwargs['value'])
+        self.assertEqual(envelope['generation'], 1)
+        self.assertEqual(envelope['reason'], 'unclassified_job_failure')
 
     def test_duplicate_and_restart_do_not_slide_deadline(self):
         self.tick(1000)

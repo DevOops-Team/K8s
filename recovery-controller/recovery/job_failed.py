@@ -36,8 +36,9 @@ def reconcile(runner, record, now):
                               related_event_id=source['event_id'])
     if now < record['job_failed_deadline']:
         return record
+    result = store.save(rid, state='HOLD', action='HOLD', reason='unclassified_job_failure',
+                        failure_class='UNCLASSIFIED_JOB_FAILURE', stopped_stage='WAITING_FOR_FAULT')
     print(json.dumps(dict(component='recovery', event_id=rid,
-          job_id=event['job_id'], generation=event['generation'], state='HOLD',
+          job_id=event['job_id'], generation=int(event['generation']), state='HOLD',
           reason='unclassified_job_failure')), flush=True)
-    return store.save(rid, state='HOLD', action='HOLD', reason='unclassified_job_failure',
-                      failure_class='UNCLASSIFIED_JOB_FAILURE', stopped_stage='WAITING_FOR_FAULT')
+    return result
