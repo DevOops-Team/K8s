@@ -7,8 +7,9 @@
 #   ghcr.io/devoops-team/aws-signing-helper    aws-signing-helper/              (빌드 단계에서 helper 버전 확인)
 #                                              Roles Anywhere 인증 sidecar. 배포는 각 앱 overlay가 참조 (GPU-173)
 #
-#   PR(→ develop, → main)              : 모든 이미지 테스트 + 이미지 빌드 (push 안 함)
-#   main push(머지)                     : 같은 검사 → 릴리스 버전 계산 → 바뀐 이미지만 push {X.Y.Z, X.Y, main, sha-<7자리>}
+#   PR(→ develop, → main)              : 모든 이미지 테스트 + 바뀐 이미지만 빌드 (push 안 함, GPU-282)
+#   main push(머지)                     : 릴리스 버전 계산 → 바뀐 이미지만 빌드 · push {X.Y.Z, X.Y, main, sha-<7자리>}
+#                                         테스트는 다시 돌리지 않는다: develop → main PR에서 같은 트리를 이미 검사했다 (GPU-282)
 #                                         → 버전 봇이 태그 vX.Y.Z · Release 생성
 #                                         → Variable DEPLOY_IMAGES에 든 이미지만 Gitops overlay에 X.Y.Z@digest 반영 (배포 봇)
 #
@@ -48,7 +49,8 @@ jobs:
       contents: read
       pull-requests: read
 
-  # main push에서 push · 배포할 이미지 고르기. PR · develop은 결과와 관계없이 전부 빌드만 한다.
+  # 빌드(PR) · push · 배포(main push)할 이미지 고르기. workflow_dispatch는 전부.
+  #   안 바뀐 이미지는 job 안에서 빌드 step만 건너뛴다. job 단위 if로 건너뛰면 matrix 이름이 안 풀린 채로 보고된다 (GPU-282)
   changes:
     name: changes
     runs-on: ubuntu-latest
@@ -64,11 +66,18 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           all="recovery-controller dispatcher relocator aws-signing-helper"
-          if [ "$EVENT" != push ] || [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ] \
-             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+          if [ "$EVENT" = pull_request ] && git rev-parse -q --verify 'HEAD^2' >/dev/null; then
+            base='HEAD^1'      # PR merge ref: 첫 부모 = base 브랜치 끝, 둘째 부모 = PR head
+          elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          else
+            base=""
+          fi
+          if [ -z "$base" ]; then
             images="$all"
           else
-            files=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
+            files=$(git diff --name-only "$base" HEAD)
             printf '바뀐 파일:\n%s\n' "$files"
             has() { grep -qE "$1" <<<"$files"; }
             images=""
@@ -121,21 +130,27 @@ jobs:
             test: ""
     env:
       IMAGE: ghcr.io/devoops-team/${{ matrix.name }}     # GHCR 이름은 소문자만
+      # 이번 PR · 머지에서 이 이미지가 바뀌었나 (changes job). 아니면 빌드 step을 건너뛴다 (GPU-282)
+      BUILD: ${{ contains(format(' {0} ', needs.changes.outputs.images), format(' {0} ', matrix.name)) }}
       PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && contains(format(' {0} ', needs.changes.outputs.images), format(' {0} ', matrix.name)) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5.6.0
-        if: matrix.requirements != ''
+        if: matrix.requirements != '' && github.event_name != 'push'   # main push는 PR에서 검사한 트리 (GPU-282)
         with:
           python-version: "3.12"          # Dockerfile 베이스와 같게
       - name: pip install
-        if: matrix.requirements != ''
+        if: matrix.requirements != '' && github.event_name != 'push'
         run: python -m pip install --disable-pip-version-check -q $(printf -- '-r %s ' ${{ matrix.requirements }})
       - name: unittest
-        if: matrix.test != ''
+        if: matrix.test != '' && github.event_name != 'push'
         run: ${{ matrix.test }}           # 쿠버네티스 · AWS 없이 돈다
+      - name: 이미지 건너뜀 (변경 없음)
+        if: env.BUILD != 'true'
+        run: echo "### ${{ matrix.name }} — 바뀐 파일이 없어 이미지 빌드를 건너뜀" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f   # v3.12.0
+        if: env.BUILD == 'true'
       - name: Log in to GHCR
         if: env.PUSH == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9   # v3.7.0
@@ -144,6 +159,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
+        if: env.BUILD == 'true'
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051   # v5.10.0
         with:
           images: ${{ env.IMAGE }}
@@ -158,6 +174,7 @@ jobs:
           annotations: |
             ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
       - id: build
+        if: env.BUILD == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8   # v6.19.2
         with:
           context: ${{ matrix.context }}
