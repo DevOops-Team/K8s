@@ -16,7 +16,9 @@ Kafka 모드에서는 Lease 리더만 소비·복구 작업을 실행합니다.
 실행은 mode=execute, execution_enabled=true, redispatch_policy=controller-only,
 scheduler_policy_confirmed=true를 요구합니다. job_namespace는 기본 training입니다.
 해당 namespace에 scheduling RelocationRequest CRD와 relocator를 먼저 설치해야 합니다.
-요청 생성은 create/get 권한만 사용합니다. Node 변경 권한은 relocator 담당입니다.
+요청 생성·입력 갱신은 create/get/patch 권한을 사용합니다. Node 변경 권한은 relocator 담당입니다.
+DB/S3 입력은 기존 RelocationRequest 주석으로 전달합니다.
+[필드·함수 매핑 및 배포 권한](docs/relocation-request-inputs.md)을 참조하세요.
 
 AWS 인증은 boto3 기본 인증 체인을 사용합니다. Roles Anywhere helper, 인증서/키,
 AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 필요합니다.
@@ -27,7 +29,8 @@ DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateIt
 Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
 examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.
 모니터링 서비스 VIP 172.30.0.35는 예약 상태이므로 watchdog은 기본 비활성화입니다. Alertmanager의 실제 URL·포트와 접근 경로를 확인한 뒤 URL을 입력하고 활성화합니다.
-이 컨트롤러는 EC2/S3/SQS API나 EKS API를 직접 호출하지 않습니다.
+이 컨트롤러는 검증된 원본 JobSet을 위해 S3 GetObject를 호출합니다.
+EC2/SQS 및 워커 EKS API를 직접 호출하지 않습니다.
 
 ## 로컬 테스트·빌드
 

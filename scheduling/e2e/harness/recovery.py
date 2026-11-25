@@ -6,6 +6,7 @@
 kind에서 펜싱 기록은 scheduling-local-store의 ConfigMap recovery-fencing-<작업ID> (recovery_store.ConfigMapStore).
 """
 import logging
+import json
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from .verdict import Invalid, precondition
 log = logging.getLogger("e2e")
 T = REQUEST_TIMEOUT
 FINAL = ("Done", "Failed", "Duplicate")
+INPUT_ANNOTATION = 'devoops/recovery-inputs'
 PLACEHOLDER = ROOT / "examples" / "spare" / "placeholder.yaml"
 JOBSET_LABEL = "jobset.sigs.k8s.io/jobset-name"
 
@@ -47,6 +49,23 @@ def advance_generation(kube, job_id, recovery_id):
     return gen
 
 
+def controller_inputs(kube, job_id, recovery_id):
+    """Local controller stand-in: production reads DB/S3, harness reads isolated CMs."""
+    try:
+        rec = fencing(kube, job_id)
+        cm = kube.core.read_namespaced_config_map(f'recovery-code-{job_id}', STORE_NS, _request_timeout=T)
+    except client.ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+    keys = ('generation', 'recovery_id', 'recovery_from_gen', 'recovery_to_gen',
+            'recovery_phase', 'stop_wait_started_at', 'stop_wait_deadline', 'new_jobset_name', 'new_jobset_uid')
+    numbers = {'generation', 'recovery_from_gen', 'recovery_to_gen'}
+    return json.dumps(dict(schema_version=1, job_id=job_id, request_id=recovery_id,
+        observed_at=int(time.time()), original_jobset=json.loads(cm.data['jobset.json']),
+        fencing={k: int(rec[k]) if k in numbers else rec[k] for k in keys if rec.get(k) not in (None, '')}))
+
+
 def create_rr(kube, name, recovery_id, action, job_id, gen, nodes=None, clusters=None, reason="hardware"):
     spec = {"requestId": recovery_id, "action": action, "jobRef": f"{NS}/{jsname(job_id, gen)}", "reason": reason}
     if nodes:
@@ -55,6 +74,9 @@ def create_rr(kube, name, recovery_id, action, job_id, gen, nodes=None, clusters
         spec["excludeClusters"] = list(clusters)
     body = {"apiVersion": f"{K.RR_GROUP}/{K.RR_VERSION}", "kind": "RelocationRequest",
             "metadata": {"name": name, "namespace": NS}, "spec": spec}
+    inputs = controller_inputs(kube, job_id, recovery_id)
+    if inputs:
+        body['metadata']['annotations'] = {INPUT_ANNOTATION: inputs}
     try:
         kube.co.create_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, body, _request_timeout=T)
     except client.ApiException as e:
@@ -73,7 +95,16 @@ def relocate(kube, name, recovery_id, action, job_id, nodes=None, clusters=None,
 
 
 def rr(kube, name):
-    return kube.co.get_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name, _request_timeout=T)
+    obj = kube.co.get_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name, _request_timeout=T)
+    if (obj.get('status') or {}).get('phase') not in FINAL:
+        job_name = obj['spec']['jobRef'].split('/')[-1]
+        job_id = job_name[4:].rsplit('-g', 1)[0]
+        inputs = controller_inputs(kube, job_id, obj['spec']['requestId'])
+        if inputs:
+            kube.co.patch_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name,
+                {'metadata': {'resourceVersion': obj['metadata']['resourceVersion'],
+                              'annotations': {INPUT_ANNOTATION: inputs}}}, _request_timeout=T)
+    return obj
 
 
 def rr_status(kube, name):
