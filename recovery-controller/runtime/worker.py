@@ -29,10 +29,13 @@ def run(config, stop, health):
     execute = config['execution_enabled']
     from integrations.relocation_inputs import RelocationInputs
     from integrations.relocation_status import RelocationStatusInput, status_config
-    status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'))
+    from integrations.self_fence import SelfFenceInput, self_fence_config
+    self_fence_enabled = self_fence_config(config.get('self_fence_input'))['enabled']
+    status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'), allow_self_fence=self_fence_enabled)
                     if status_config(config.get('relocation_status_input'))['enabled'] else None)
     executor = (RelocationClient(config.get('job_namespace', 'training'),
                 status_input=status_input,
+                self_fence_input=SelfFenceInput(store) if self_fence_enabled else None,
                 inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
                     config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))))
                 if execute else None)
