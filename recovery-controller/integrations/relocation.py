@@ -10,10 +10,11 @@ SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
 
 
 class RelocationClient:
-    def __init__(self, namespace, transport=None, inputs=None):
+    def __init__(self, namespace, transport=None, inputs=None, status_input=None):
         self.namespace = namespace
         self.transport = transport or self._request
         self.inputs = inputs
+        self.status_input = status_input
 
     def _request(self, method, path, document=None):
         token = (SERVICE_ACCOUNT / 'token').read_text().strip()
@@ -69,7 +70,7 @@ class RelocationClient:
 
     def refresh(self, event, name):
         """Refresh only this request; resourceVersion prevents a lost concurrent update."""
-        if self.inputs is None:
+        if self.inputs is None and self.status_input is None:
             return
         from integrations.relocation_inputs import ANNOTATION
         path = (f'/apis/scheduling.devoops.site/v1alpha1/namespaces/'
@@ -79,7 +80,11 @@ class RelocationClient:
         expected_ref = f"{self.namespace}/job-{event['job_id']}-g{event['generation']:04d}"
         if spec.get('requestId') != event['event_id'] or spec.get('jobRef') != expected_ref:
             raise ValueError('cannot refresh another relocation request')
+        if self.status_input:
+            self.status_input(event, existing)
         if existing.get('status', {}).get('phase') in ('Done', 'Failed', 'Duplicate'):
+            return
+        if self.inputs is None:
             return
         self.transport('PATCH', path, {'metadata': {
             'resourceVersion': existing['metadata']['resourceVersion'],

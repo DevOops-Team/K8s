@@ -47,5 +47,9 @@
     "enabled": false,
     "producer_contract_confirmed": false,
     "attribute": "recovery_training_evidence"
+  },
+  "relocation_status_input": {
+    "enabled": false,
+    "producer_contract_confirmed": false
   }
 }
