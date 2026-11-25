@@ -22,9 +22,7 @@ AWS 인증은 boto3 기본 인증 체인을 사용합니다. Roles Anywhere help
 AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 필요합니다.
 리전은 예시 us-east-2, fencing_table은 devoops-prod-fencing입니다.
 recovery_table의 실제 이름과 초기 job 배치 메타데이터는 별도 준비합니다.
-장애 발생 때만 Backend API를 조회해 누락된 job# 항목을 등록하는 선택 기능과
-Backend 응답·인증 계약은 [backend-metadata-api.md](docs/backend-metadata-api.md)에 있습니다.
-기본 비활성화이며 Backend 서버 API와 배치 정보 제공·배포 인증 연결은 별도 구현이 필요합니다.
+Backend API 자동 조회·등록 기능은 제거했습니다. 초기 job 메타데이터가 없으면 실행은 HOLD됩니다.
 DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateItem/Scan입니다.
 Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
 examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.

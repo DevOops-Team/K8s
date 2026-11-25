@@ -28,6 +28,13 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_removed_backend_setting_fails_loudly(self):
+        from main import validate_config
+        config = dict(schema_version=1, mode='observe', event_source='disabled',
+                      execution_enabled=False, backend_metadata={'enabled': False})
+        with self.assertRaisesRegex(ValueError, 'backend_metadata has been removed'):
+            validate_config(config)
+
     def test_execution_cannot_be_enabled(self):
         from main import validate_config
         with self.assertRaises(ValueError):
