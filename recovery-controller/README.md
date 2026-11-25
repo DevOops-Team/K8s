@@ -25,6 +25,7 @@ AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 �
 리전은 예시 us-east-2, fencing_table은 devoops-prod-fencing입니다.
 recovery_table의 실제 이름과 초기 job 배치 메타데이터는 별도 준비합니다.
 Backend API 자동 조회·등록 기능은 제거했습니다. 초기 job 메타데이터가 없으면 실행은 HOLD됩니다.
+기존 배포 설정의 `backend_metadata` 블록은 `enabled: false`일 때 호환 목적으로 무시합니다. Backend 연동을 다시 활성화하지 않으며, `enabled: true` 또는 비활성 여부가 불명확한 설정은 시작 시 오류로 처리합니다.
 DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateItem/Scan입니다.
 Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
 examples/config.kafka.example.json의 브로커 3개 주소는 11/09 데이터 파트의 전환 목표입니다. 실제 KRaft 설치·advertised.listeners·인증/ACL 확인 후 사용합니다.
@@ -189,3 +190,9 @@ Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preempt
 예비 GPU가 한 장 이상이고 전체 요청량을 수용할 수 있으면 용량 조건을 통과한다.
 이 결과는 물리 용량 추정치다. 실제 Kueue 쿼터·승인과 GPU 예약은 별도다.
 `straggler_migration_count`는 펜싱 항목에서 세대 증가와 같은 조건부 쓰기로 1을 기록한다.
+
+Controller-owned fencing progress can be enabled with `relocation_status_input`
+after the relocator status contract and writer handoff are deployed. It validates
+RR stop/submission evidence and performs conditional DynamoDB updates; default is
+disabled for compatibility. See [the handoff contract](docs/relocation-request-inputs.md#controller-owned-storage-handoff-gpu-268-receiver-work-pending).
+This controller-only patch does not remove existing relocator DB calls.

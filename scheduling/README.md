@@ -11,7 +11,7 @@ ADR-38: `restartInPlace`·`moveToSpare` 재제출본은 `devoops/recovery-source
 
 - `keys.py`: 다른 파트와 맞물리는 이름(라벨·어노테이션·CRD). 이름 바꿀 땐 여기만.
 - `placement.py`·`recovery_render.py`: 디스패처(빈 패킹)·재배치 실행기 판단만 떼어 낸 순수 함수. `python -m unittest test_*.py`
-- 재배치 실행기는 복구 컨트롤러가 DynamoDB 세대 +1(`GENERATION_ADVANCED`)을 한 요청만 처리한다. 복구 원본(S3 `code/{job_id}/jobset.json`)에서 JobSet 템플릿 6절 값만 바꿔 `job-{id}-g{4자리}`로 제출하고, `OLD_RUN_STOPPED`·`NEW_RUN_SUBMITTED`·`new_jobset_name/uid`를 조건부로 기록한다(체크포인트 규약 5·8절). 저장소는 `recovery_store.py`: 우리 망 `RECOVERY_STORE=aws`, kind `configmap`(전용 네임스페이스 `scheduling-local-store`의 `recovery-code-<id>`·`recovery-fencing-<id>`를 시나리오가 백엔드·복구 컨트롤러 대신 씀).
+- 재배치 실행기는 S3·DynamoDB에 가지 않는다(ADR-50). 입력은 RR spec(`toGeneration`·`stopDeadline`·`jobSet` 원본 등), 결과는 RR `status.recoveryProgress`(옛 실행 종료 증거, 관리 클러스터 새 JobSet 이름·UID)뿐이다. 원본 JobSet에서 JobSet 템플릿 6절 값만 바꿔 `job-{id}-g{4자리}`로 제출한다. 펜싱 표 기록(`OLD_RUN_STOPPED`·`NEW_RUN_SUBMITTED`·`new_jobset_name/uid`)은 복구 컨트롤러가 status를 보고 한다. 컨트롤러 신호는 RR 주석 두 개: `devoops/recovery-stop-recorded=true`(OLD_RUN_STOPPED 기록됨 → 재제출), `devoops/recovery-cancel`(만든 JobSet 철회 → `Cancelled`). kind에서는 e2e 하네스가 복구 컨트롤러를 흉내 내며 `scheduling-local-store`의 `recovery-code-<id>`·`recovery-fencing-<id>`를 쓴다.
 - 워커 접속: 재배치 실행기는 `kueue-system/<워커>-relocator-kubeconfig`(EKS별 relocator SA, `deploy/worker/relocator-rbac.yaml`)를 먼저 쓰고, 없으면 MultiKueue Secret.
 - 둘 다 "N초마다 전체를 다시 보고 하나를 바꾼다"(폴링 루프). 상태는 쿠버네티스 객체에만 있어서 재시작해도 이어서 동작.
 - HA: 컨트롤러마다 레플리카 3개를 `platform-worker=true` 노드(worker1~3)에 하나씩 둠. `leader.py`가 Lease `platform/scheduling-<이름>`으로 리더 하나만 일하게 함(`python -m unittest -v test_leader.py`). 리더 노드가 죽으면 15s(`LEASE_SECONDS`) 안에 넘어가고, 정상 종료면 Lease를 내려놓아 바로 넘어감. `run-local.sh`도 같은 Lease를 다투므로 클러스터 안 Deployment와 동시에 돌려도 하나만 일함.
@@ -41,7 +41,7 @@ For local execution, run `python scheduling/dispatcher/dispatcher.py` or
 ### Layout and tests
 
 - `dispatcher/`: dispatcher, placement, tests and Dockerfile.
-- `relocator/`: relocator, recovery_store, ec2_evidence, tests and Dockerfile.
+- `relocator/`: relocator, ec2_evidence, tests and Dockerfile.
 - `common/`: keys, kube, leader, recovery_render, tests and requirements.txt.
 
 ```bash
@@ -127,10 +127,8 @@ kubectl get multikueuecluster eks-a -o jsonpath='{.metadata.annotations.devoops/
 | `RELOCATION_HOLD_SECONDS` | 300 | 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지키는 최대 시간 (격리 시각, 옛 실행 종료 뒤엔 그 시각부터) |
 | `LEASE_SECONDS` / `RENEW_SECONDS` | 15 / 5 | 리더가 이만큼 갱신 안 하면 남이 가져감 / 갱신 주기 |
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
-| `RECOVERY_STORE` | configmap | 복구 원본·펜싱 기록 저장소 (`aws`면 `CKPT_BUCKET`·`FENCING_TABLE`·`AWS_REGION`) |
-| `FENCING_WAIT_SECONDS` | 300 | 요청을 받고 세대 +1 기록이 이 시간 안에 안 보이면 Failed |
 | `STOP_WAIT_SECONDS` | 120 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
-| `STOP_HOLD_SECONDS` | 900 | 펜싱 `stop_wait_deadline` 우선. 없으면 `stop_wait_started_at`부터 이 시간, 둘 다 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 |
+| `STOP_HOLD_SECONDS` | 900 | RR `spec.stopDeadline` 우선. 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 |
 | `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 기록한 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만, `terminate` = 워커가 `STOP_WAIT_SECONDS` 넘게 안 닿으면 격리 때 기록한 옛 노드 인스턴스만 한 번 강제 종료(ID로 조회 후 태그 확인, 증거는 여전히 클러스터 전체 기준). 필요 IAM: `ec2:DescribeInstances`(+`ec2:TerminateInstances`, `eks:nodegroup-name` 태그 조건). 고정 노드그룹은 ASG가 대체 인스턴스를 띄우므로 강제 종료 뒤에도 보통 사람 확인으로 넘어감 |
 | `EC2_CLUSTERS` / `EC2_NODEGROUPS` | `{}` / training,spare | MultiKueueCluster 이름 → EKS 클러스터 이름(JSON, 없으면 같은 이름, `eks:cluster-name` 태그) / 찾을 학습·예비 관리형 노드그룹 이름(`eks:nodegroup-name` 태그, 실제 이름으로 넣을 것) |
 | `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |

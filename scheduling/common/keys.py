@@ -36,6 +36,10 @@ ANN_RECOVERY_ID = "devoops/recovery-id"      # 재제출본에만. = 재배치 �
 
 # --- 재배치 요청에 붙이는 어노테이션: 요청을 만든 쪽(복구 컨트롤러·사람)이 씀
 ANN_STOP_CONFIRMED = "devoops/old-execution-stopped"   # "true" = 옛 실행이 멈춘 걸 다른 방법으로 확인함
+# 복구 컨트롤러 -> relocator 제어 신호 (ADR-50). spec은 만든 뒤 못 바꾸므로 이 둘만 주석으로 받는다.
+# RR 수정은 입장 정책으로 복구 컨트롤러(와 관리자)만 할 수 있다
+ANN_STOP_RECORDED = "devoops/recovery-stop-recorded"   # "true" = 컨트롤러가 펜싱 표에 OLD_RUN_STOPPED를 기록함 -> 재제출해도 됨
+ANN_CANCEL = "devoops/recovery-cancel"                 # 값 = 이유. 권한 잃음·이미 끝난 복구 -> 만든 JobSet 철회
 
 # --- 펜싱 / 노드
 LABEL_FENCED = "devoops/fenced"              # MultiKueueCluster에 "true" -> 새 잡 안 보냄

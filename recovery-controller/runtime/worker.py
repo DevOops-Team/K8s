@@ -26,7 +26,11 @@ def run(config, stop, health):
                                          config.get('fencing_progress_input'))
     execute = config['execution_enabled']
     from integrations.relocation_inputs import RelocationInputs
+    from integrations.relocation_status import RelocationStatusInput, status_config
+    status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'))
+                    if status_config(config.get('relocation_status_input'))['enabled'] else None)
     executor = (RelocationClient(config.get('job_namespace', 'training'),
+                status_input=status_input,
                 inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
                     config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))))
                 if execute else None)
