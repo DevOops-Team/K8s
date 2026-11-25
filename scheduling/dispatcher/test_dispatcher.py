@@ -8,6 +8,17 @@ import dispatcher as D
 import keys as K
 from placement import Cluster
 
+# 쿼터 예약은 기본 켜짐이지만 여기서는 지명·찜 동작만 본다 (쿼터 예약은 test_quota_hold.py)
+_quota_hold_off = mock.patch.object(D.quota_hold, "ENABLED", False)
+
+
+def setUpModule():
+    _quota_hold_off.start()
+
+
+def tearDownModule():
+    _quota_hold_off.stop()
+
 
 def wl(name, gpus, created, *, priority=100, reserved=None, nominated=None):
     ann = {K.ANN_RESERVED: reserved} if reserved else {}
