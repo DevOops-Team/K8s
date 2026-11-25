@@ -387,6 +387,48 @@ class Store:
             raise
         return True
 
+    def record_relocation_phase(self, event, phase, extra, stop_evidence=None):
+        """Project trusted RR execution evidence; never change generation or owner."""
+        fields = {'OLD_RUN_STOPPED': {'old_run_stop_evidence'},
+                  'NEW_RUN_SUBMITTED': {'new_jobset_name', 'new_jobset_uid'}}
+        if phase not in fields or set(extra) != fields[phase]:
+            raise RecoveryBlocked('invalid relocation phase fields')
+        if phase == 'NEW_RUN_SUBMITTED' and not stop_evidence:
+            raise RecoveryBlocked('stop barrier required before new submission')
+        current = self.fencing_record(event['job_id'])
+        generation = event['generation'] + 1
+        if (current.get('recovery_id') != event['event_id']
+                or current.get('generation') != generation
+                or current.get('recovery_from_gen') != event['generation']
+                or current.get('recovery_to_gen') != generation):
+            raise RecoveryBlocked('relocation progress lost fencing authority')
+        order = ('GENERATION_ADVANCED', 'OLD_RUN_STOPPED', 'NEW_RUN_SUBMITTED', 'RESUMING')
+        old = current.get('recovery_phase')
+        if old not in order:
+            raise RecoveryBlocked('relocation progress outside active recovery')
+        if order.index(old) >= order.index(phase):
+            if (any(current.get(k) != v for k, v in extra.items())
+                    or (stop_evidence and current.get('old_run_stop_evidence') != stop_evidence)):
+                raise RecoveryBlocked('conflicting relocation evidence')
+            return False
+        expected = 'GENERATION_ADVANCED' if phase == 'OLD_RUN_STOPPED' else 'OLD_RUN_STOPPED'
+        if old != expected:
+            raise RecoveryBlocked('relocation phase cannot skip stop barrier')
+        values = {':rid': event['event_id'], ':gen': generation, ':from': event['generation'],
+                  ':previous': expected, ':phase': phase,
+                  ':now': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+        values.update({':'+k: v for k, v in extra.items()})
+        condition = ('recovery_id = :rid AND generation = :gen AND recovery_to_gen = :gen '
+                     'AND recovery_from_gen = :from AND recovery_phase = :previous')
+        if stop_evidence:
+            condition += ' AND old_run_stop_evidence = :stop'
+            values[':stop'] = stop_evidence
+        self.fencing.update_item(Key={'job_id': event['job_id']},
+            UpdateExpression='SET recovery_phase = :phase, recovery_updated_at = :now, '
+                             + ', '.join(k+' = :'+k for k in extra),
+            ConditionExpression=condition, ExpressionAttributeValues=values)
+        return True
+
     def resuming(self, event, generation):
         self.fencing.update_item(
             Key={'job_id':event['job_id']},

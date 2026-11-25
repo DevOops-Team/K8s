@@ -58,3 +58,90 @@ RESUMING/COMPLETED와 recovery_training_evidence 판정 규칙은 바꾸지 않�
 - 양쪽 시계 동기화가 필요하다. 활성화 전 서명 없는 주석에 대한 위 작성자 제한을 검증한다.
 - 이 저장소 변경으로 Gitops 운영 매니페스트·RBAC·VAP·CI를 수정하거나 배포하지 않았다.
   코드 머지와 실제 운영 전환을 구분한다. 기존 RR에 입력이 없으면 컨트롤러 갱신 전까지 실행기는 보류한다.
+
+## Controller-owned storage handoff (GPU-268, receiver work pending)
+
+This change edits **recovery-controller only**. Existing relocator code, CRD,
+RBAC, IAM and deployment manifests are unchanged. The existing relocator still
+performs DynamoDB UpdateItem; this commit does not remove those calls.
+
+The recovery controller now has an optional RR-status → fencing projection.
+S3 original reads already run in `RelocationInputs`. Storage operations required
+by recovery belong to this controller; no new S3 write/delete operation is needed
+for relocation and none is invented here. Pod/JobSet deletion remains relocator's
+Kubernetes execution responsibility. Training/sidecar ownership of checkpoint,
+owner and heartbeat fields is unchanged.
+
+Enable only after Seongmo's receiver implementation and deployment are ready:
+
+```json
+"relocation_status_input": {
+  "enabled": true,
+  "producer_contract_confirmed": true
+}
+```
+
+Both values default to false. Confirmation means: RR status can only be written
+by the trusted relocator ServiceAccount, RR requests can only be created by the
+controller, CRD preserves the fields below, and relocator's direct fencing writes
+have been removed. These are deployment prerequisites, not facts established by
+this patch. Do not enable two simultaneous phase writers. Keep existing
+annotation input delivery until the spec/CRD migration is coordinated; this patch
+does not silently add spec fields that the current CRD could prune.
+
+### Receiver result contract to implement
+
+The relocator must persist `status.recoveryProgress` before acknowledging the
+execution stage. The field is a proposed integration contract, **not a claim that
+the current relocator produces it**:
+
+```json
+{
+  "schemaVersion": 1,
+  "requestId": "same-as-spec.requestId",
+  "jobId": "abc",
+  "fromGeneration": 1,
+  "toGeneration": 2,
+  "phase": "NEW_RUN_SUBMITTED",
+  "oldRunStopEvidence": {
+    "generation": 1,
+    "namespace": "training",
+    "jobset_name": "job-abc-g0001",
+    "clusters": ["eks-a"],
+    "kind": "automatic",
+    "checks": [
+      {"cluster": "eks-a", "kind": "automatic", "detail": "JobSet/Workload/Pods absent"}
+    ],
+    "confirmed_at": "2026-11-25T01:00:00Z"
+  },
+  "newJobSet": {"name": "job-abc-g0002", "uid": "manager-jobset-uid"}
+}
+```
+
+- For OLD_RUN_STOPPED, omit `newJobSet`; for NEW_RUN_SUBMITTED, include it and
+  retain **the same immutable oldRunStopEvidence**. Report the manager JobSet UID,
+  not a MultiKueue worker-copy UID.
+- Stop evidence must cover every possibly running worker cluster. `kind` and
+  per-cluster checks use `automatic` or `ec2`. Stop timestamps must be timezone-aware,
+  within this RR's lifetime (30-second skew) and not in the future. Historical
+  evidence stays valid across retries; it is not a 60-second lease.
+- Manual stop confirmation is not accepted by this new input. It needs a separate
+  authenticated operator contract; an arbitrary annotation or phase label is
+  insufficient. Never infer proof from `Done`, `stoppedAt` or `message` alone.
+- Controller writes OLD_RUN_STOPPED before NEW_RUN_SUBMITTED, conditioned on
+  recovery ID, from/to generations and previous phase. The second CAS also binds
+  the exact stop evidence. Replays never regress RESUMING, replace a UID or modify
+  generation/owner. Lost authority or conflicting proof fails closed.
+- Controller consumes this result even when the outer RR phase is Done; it does
+  not recreate the RR or refresh terminal inputs. Receiver must preserve result
+  fields until controller has recorded them.
+- The receiver must wait for controller's forwarded OLD_RUN_STOPPED fencing
+  acknowledgement before submitting the new JobSet. New init must not acquire
+  the owner until NEW_RUN_SUBMITTED is recorded; retain/retry the result on
+  controller/API outages. Cancellation/authority withdrawal needs a coordinated
+  receiver protocol before adopting the full ADR-50 spec-only design.
+
+Still required from scheduling: receiver/status implementation, CRD preservation,
+status-writer isolation, removing relocator's DB access, and integration E2E. These
+files are deliberately owned by Seongmo and are not edited here. New-placement
+and training-resume evidence remain separate from these stop/submission results.

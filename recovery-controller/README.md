@@ -189,3 +189,9 @@ Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preempt
 예비 GPU가 한 장 이상이고 전체 요청량을 수용할 수 있으면 용량 조건을 통과한다.
 이 결과는 물리 용량 추정치다. 실제 Kueue 쿼터·승인과 GPU 예약은 별도다.
 `straggler_migration_count`는 펜싱 항목에서 세대 증가와 같은 조건부 쓰기로 1을 기록한다.
+
+Controller-owned fencing progress can be enabled with `relocation_status_input`
+after the relocator status contract and writer handoff are deployed. It validates
+RR stop/submission evidence and performs conditional DynamoDB updates; default is
+disabled for compatibility. See [the handoff contract](docs/relocation-request-inputs.md#controller-owned-storage-handoff-gpu-268-receiver-work-pending).
+This controller-only patch does not remove existing relocator DB calls.

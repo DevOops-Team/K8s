@@ -48,6 +48,10 @@ def validate_config(config):
                 raise ValueError('invalid job_namespace')
 
     from integrations.fencing_input import input_config
+    from integrations.relocation_status import status_config
+    relocation_status = status_config(config.get('relocation_status_input'))
+    if relocation_status['enabled'] and not config['execution_enabled']:
+        raise ValueError('relocation status input requires execute mode')
     if 'backend_metadata' in config:
         raise ValueError('backend_metadata has been removed; remove the obsolete setting')
     progress_input = input_config(config.get('fencing_progress_input'))
