@@ -16,15 +16,17 @@ Kafka 모드에서는 Lease 리더만 소비·복구 작업을 실행합니다.
 실행은 mode=execute, execution_enabled=true, redispatch_policy=controller-only,
 scheduler_policy_confirmed=true를 요구합니다. job_namespace는 기본 training입니다.
 해당 namespace에 scheduling RelocationRequest CRD와 relocator를 먼저 설치해야 합니다.
-요청 생성·입력 갱신은 create/get/patch 권한을 사용합니다. Node 변경 권한은 relocator 담당입니다.
-DB/S3 입력은 기존 RelocationRequest 주석으로 전달합니다.
+요청 생성·확인/취소 주석은 create/get/patch 권한을 사용합니다. Node 변경 권한은 relocator 담당입니다.
+DB/S3 입력(새 세대·종료 마감·해시 대조한 원본)은 RelocationRequest spec에 생성 때 고정합니다(ADR-50).
 [필드·함수 매핑 및 배포 권한](docs/relocation-request-inputs.md)을 참조하세요.
 
 AWS 인증은 boto3 기본 인증 체인을 사용합니다. Roles Anywhere helper, 인증서/키,
 AWS config 마운트와 AWS_PROFILE/AWS_CONFIG_FILE은 별도 배포 연결이 필요합니다.
 리전은 예시 us-east-2, fencing_table은 devoops-prod-fencing입니다.
 recovery_table의 실제 이름과 초기 job 배치 메타데이터는 별도 준비합니다.
-Backend API 자동 조회·등록 기능은 제거했습니다. 초기 job 메타데이터가 없으면 실행은 HOLD됩니다.
+Backend API 자동 조회·등록 기능은 제거했습니다. 초기 job 메타데이터는 `job.lifecycle`에서 받습니다(GPU-276):
+Backend `job.submitted`의 `jobset_uri`·`jobset_sha256`·`gpus`, job-watcher `job.placement`의
+`placement_cluster`·`active_nodes`·`placement_generation`·`jobset_uid`. 아직 받지 못했으면 실행은 HOLD됩니다.
 기존 배포 설정의 `backend_metadata` 블록은 `enabled: false`일 때 호환 목적으로 무시합니다. Backend 연동을 다시 활성화하지 않으며, `enabled: true` 또는 비활성 여부가 불명확한 설정은 시작 시 오류로 처리합니다.
 DynamoDB 권한은 fencing GetItem/UpdateItem, recovery GetItem/PutItem/UpdateItem/Scan입니다.
 Kafka 인증은 platform/recovery-controller-credentials의 KAFKA_CLIENT_CONFIG_JSON으로 공급합니다.
@@ -191,8 +193,6 @@ Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preempt
 이 결과는 물리 용량 추정치다. 실제 Kueue 쿼터·승인과 GPU 예약은 별도다.
 `straggler_migration_count`는 펜싱 항목에서 세대 증가와 같은 조건부 쓰기로 1을 기록한다.
 
-Controller-owned fencing progress can be enabled with `relocation_status_input`
-after the relocator status contract and writer handoff are deployed. It validates
-RR stop/submission evidence and performs conditional DynamoDB updates; default is
-disabled for compatibility. See [the handoff contract](docs/relocation-request-inputs.md#controller-owned-storage-handoff-gpu-268-receiver-work-pending).
-This controller-only patch does not remove existing relocator DB calls.
+relocator 2.0.0은 펜싱 표를 쓰지 않으므로 execute 배포는 `relocation_status_input`을 켜야 합니다.
+컨트롤러가 RR status의 종료·재제출 결과를 펜싱 표에 조건부 기록한 뒤 `devoops/recovery-stop-recorded`
+주석을 붙이고, 권한을 잃으면 `devoops/recovery-cancel`을 붙입니다. [계약](docs/relocation-request-inputs.md)

@@ -36,9 +36,30 @@ class Workflow:
         self.evidence_policy, self.clock = policy_config(evidence_policy), clock
 
     def refresh_relocation_inputs(self, record):
+        """Project RR status into fencing. Returns a HOLD record when this recovery lost authority."""
         refresh = getattr(self.executor, 'refresh', None)
-        if refresh and record.get('relocation_request'):
+        if not (refresh and record.get('relocation_request')):
+            return None
+        try:
             refresh(record['event'], record['relocation_request'])
+        except RecoveryBlocked:
+            if not self.authority_lost(record):
+                raise
+            return self.cancel_relocation(record)
+        return None
+
+    def authority_lost(self, record):
+        event = record['event']
+        fence = self.store.fencing_record(event['job_id'])
+        return (fence.get('recovery_id') != event['event_id']
+                or fence.get('generation') != event['generation'] + 1)
+
+    def cancel_relocation(self, record, reason='recovery authority changed'):
+        """ADR-50: relocator withdraws the new-generation JobSet it made, then ends Cancelled."""
+        cancel = getattr(self.executor, 'cancel', None)
+        if cancel and record.get('relocation_request'):
+            cancel(record['event'], record['relocation_request'], reason)
+        return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason)
 
     def accept(self, event):
         validate_event(event)
@@ -71,7 +92,8 @@ class Workflow:
         action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
         if action not in RELOCATION_ACTIONS:
             return None
-        self.refresh_relocation_inputs(record)
+        if self.refresh_relocation_inputs(record) is not None:
+            return None
         fence = self.store.fencing_record(event['job_id'])
         if (not all(whole(fence.get(key)) for key in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
                 or fence.get('recovery_id') != event['event_id']
@@ -179,7 +201,9 @@ class Workflow:
         if not e.get('job_id') or e.get('generation') is None:
             return self.store.save(rid, state='HOLD', action=action, reason='job identity unresolved')
         # Inside Runner's retry/deadline budget, including held stop-progress polling.
-        self.refresh_relocation_inputs(record)
+        lost = self.refresh_relocation_inputs(record)
+        if lost is not None:
+            return lost
         try:
             job = self.store.claim(e)
         except RetryLimitReached as exc:
@@ -205,7 +229,7 @@ class Workflow:
             raise ValueError('unknown recovery state')
         fencing = self.store.fencing_record(e['job_id'])
         if fencing.get('recovery_id') != rid or int(fencing.get('generation', 0)) != generation:
-            return self.store.save(rid, state='HOLD', action='HOLD', reason='recovery authority changed')
+            return self.cancel_relocation(record)
         phase = fencing.get('recovery_phase')
         if record.get('waiting_phase') != phase:
             record = self.store.save(rid, waiting_phase=phase, stage=phase)
