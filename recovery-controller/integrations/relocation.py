@@ -7,6 +7,9 @@ import urllib.request
 from pathlib import Path
 
 SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
+# relocator 2.0.0 control annotations (K8s scheduling/common/keys.py, RECOVERY_CONTRACT.md section 3)
+STOP_RECORDED_ANNOTATION = 'devoops/recovery-stop-recorded'
+CANCEL_ANNOTATION = 'devoops/recovery-cancel'
 
 
 class RelocationClient:
@@ -48,12 +51,12 @@ class RelocationClient:
             spec['excludeNodes'] = [event['node']]
         if action == 'evacuateCluster':
             spec['excludeClusters'] = [event['cluster']]
+        if self.inputs:
+            # ADR-50: fixed at creation (spec is immutable); relocator reads nothing else.
+            spec.update(self.inputs(event))
         document = {'apiVersion': 'scheduling.devoops.site/v1alpha1',
                     'kind': 'RelocationRequest',
                     'metadata': {'name': name, 'namespace': self.namespace}, 'spec': spec}
-        if self.inputs:
-            from integrations.relocation_inputs import ANNOTATION
-            document['metadata']['annotations'] = {ANNOTATION: self.inputs(event)}
         try:
             self.transport('POST', path, document)
         except urllib.error.HTTPError as exc:
@@ -62,17 +65,9 @@ class RelocationClient:
             existing = self.transport('GET', path + '/' + name)
             if existing.get('spec') != spec:
                 raise ValueError('RelocationRequest name belongs to a different request') from exc
-            if self.inputs:
-                self.transport('PATCH', path + '/' + name, {'metadata': {
-                    'resourceVersion': existing['metadata']['resourceVersion'],
-                    'annotations': document['metadata']['annotations']}})
         return name
 
-    def refresh(self, event, name):
-        """Refresh only this request; resourceVersion prevents a lost concurrent update."""
-        if self.inputs is None and self.status_input is None:
-            return
-        from integrations.relocation_inputs import ANNOTATION
+    def _owned(self, event, name):
         path = (f'/apis/scheduling.devoops.site/v1alpha1/namespaces/'
                 f'{self.namespace}/relocationrequests/{name}')
         existing = self.transport('GET', path)
@@ -80,15 +75,36 @@ class RelocationClient:
         expected_ref = f"{self.namespace}/job-{event['job_id']}-g{event['generation']:04d}"
         if spec.get('requestId') != event['event_id'] or spec.get('jobRef') != expected_ref:
             raise ValueError('cannot refresh another relocation request')
-        if self.status_input:
-            self.status_input(event, existing)
-        if existing.get('status', {}).get('phase') in ('Done', 'Failed', 'Duplicate'):
-            return
-        if self.inputs is None:
-            return
+        return path, existing
+
+    def _annotate(self, path, existing, key, value):
+        """Merge-patch one control annotation; resourceVersion prevents a lost concurrent update."""
+        if (existing.get('metadata', {}).get('annotations') or {}).get(key) == value:
+            return False
         self.transport('PATCH', path, {'metadata': {
             'resourceVersion': existing['metadata']['resourceVersion'],
-            'annotations': {ANNOTATION: self.inputs(event)}}})
+            'annotations': {key: value}}})
+        return True
+
+    def refresh(self, event, name):
+        """Project RR status into fencing, then acknowledge the stop barrier (ADR-36 order)."""
+        if self.status_input is None:
+            return
+        path, existing = self._owned(event, name)
+        annotations = existing.get('metadata', {}).get('annotations') or {}
+        if (self.status_input(event, existing)
+                and existing.get('status', {}).get('phase') not in ('Cancelled', 'Duplicate')
+                and not annotations.get(CANCEL_ANNOTATION)):
+            # OLD_RUN_STOPPED is now in fencing: relocator may submit the new generation.
+            self._annotate(path, existing, STOP_RECORDED_ANNOTATION, 'true')
+
+    def cancel(self, event, name, reason):
+        """Lost authority: relocator withdraws its new JobSet and ends Cancelled (Done/Failed too)."""
+        path, existing = self._owned(event, name)
+        annotations = existing.get('metadata', {}).get('annotations') or {}
+        if annotations.get(CANCEL_ANNOTATION) or existing.get('status', {}).get('phase') in ('Duplicate', 'Cancelled'):
+            return False
+        return self._annotate(path, existing, CANCEL_ANNOTATION, str(reason)[:256] or 'cancelled')
 
 
 class DispatcherCapacity:

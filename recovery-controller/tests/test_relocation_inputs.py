@@ -4,9 +4,10 @@ import io
 import json
 import unittest
 from unittest.mock import Mock
+from urllib.error import HTTPError
 from integrations.dynamodb import RecoveryBlocked
-from integrations.relocation import RelocationClient
-from integrations.relocation_inputs import ANNOTATION, RelocationInputs
+from integrations.relocation import CANCEL_ANNOTATION, RelocationClient
+from integrations.relocation_inputs import RelocationInputs
 
 EVENT = dict(event_id='r1', job_id='abc', generation=1, cluster='eks-a', node='bad', category='hw')
 
@@ -15,21 +16,34 @@ class InputTests(unittest.TestCase):
     def setUp(self):
         self.raw = json.dumps({'kind': 'JobSet', 'metadata': {'name': 'job-abc-g0001'}, 'spec': {}}).encode()
         self.fence = dict(generation=2, recovery_id='r1', recovery_from_gen=1,
-                          recovery_to_gen=2, recovery_phase='GENERATION_ADVANCED')
+                          recovery_to_gen=2, recovery_phase='GENERATION_ADVANCED',
+                          stop_wait_started_at=1000, stop_wait_deadline=1900)
         self.store, self.s3 = Mock(), Mock()
         self.store.fencing_record.return_value = self.fence
         self.store.placement.return_value = dict(jobset_uri='s3://code/code/abc/jobset.json',
             jobset_sha256=hashlib.sha256(self.raw).hexdigest())
         self.s3.get_object.side_effect = lambda **kw: {'Body': io.BytesIO(self.raw)}
-        self.provider = RelocationInputs(self.store, self.s3, clock=lambda: 100)
+        self.provider = RelocationInputs(self.store, self.s3)
 
-    def test_producer_sends_selected_fencing_fields_and_verified_original(self):
+    def test_spec_carries_only_new_generation_deadline_and_verified_original(self):
         self.fence['credential'] = 'not-for-wire'
-        data = json.loads(self.provider(EVENT))
-        self.assertEqual(data['fencing']['generation'], 2)
-        self.assertNotIn('credential', data['fencing'])
-        self.assertEqual(data['original_jobset']['metadata']['name'], 'job-abc-g0001')
+        fields = self.provider(EVENT)
+        self.assertEqual(set(fields), {'toGeneration', 'stopDeadline', 'jobSet'})
+        self.assertEqual(fields['toGeneration'], 2)
+        self.assertEqual(fields['stopDeadline'], 1900)
+        self.assertEqual(fields['jobSet']['metadata']['name'], 'job-abc-g0001')
+        self.assertNotIn('not-for-wire', json.dumps(fields))
         self.s3.get_object.assert_called_once_with(Bucket='code', Key='code/abc/jobset.json')
+
+    def test_dynamodb_decimal_deadline_becomes_epoch_integer(self):
+        from decimal import Decimal
+        self.fence['stop_wait_deadline'] = Decimal('1900')
+        self.assertIs(type(self.provider(EVENT)['stopDeadline']), int)
+
+    def test_missing_deadline_fails_closed(self):
+        del self.fence['stop_wait_deadline']
+        with self.assertRaisesRegex(RecoveryBlocked, 'stop_wait_deadline'): self.provider(EVENT)
+        self.s3.get_object.assert_not_called()
 
     def test_missing_and_mutated_original_fail_closed(self):
         self.store.placement.return_value = {}
@@ -45,28 +59,48 @@ class InputTests(unittest.TestCase):
         with self.assertRaises(RecoveryBlocked): self.provider(EVENT)
         self.s3.get_object.assert_not_called()
 
-    def test_create_and_refresh_use_same_spec_and_versioned_annotation(self):
+    def test_create_puts_inputs_in_spec_without_annotation_and_retry_matches(self):
         saved, calls = {}, []
         def transport(method, path, document=None):
             calls.append((method, copy.deepcopy(document)))
             if method == 'POST':
+                if saved:
+                    raise HTTPError(path, 409, 'AlreadyExists', {}, None)
                 saved.update(copy.deepcopy(document))
                 saved['metadata']['resourceVersion'] = '7'
-            return saved
+            return copy.deepcopy(saved)
         client = RelocationClient('training', transport, self.provider)
         name = client.submit(EVENT, 'moveToSpare')
-        before = copy.deepcopy(saved['spec'])
-        self.assertEqual(json.loads(saved['metadata']['annotations'][ANNOTATION])['request_id'], 'r1')
-        self.fence['recovery_phase'] = 'OLD_RUN_STOPPED'
-        client.refresh(EVENT, name)
-        patch = calls[-1][1]
-        self.assertEqual(calls[-1][0], 'PATCH')
-        self.assertEqual(patch['metadata']['resourceVersion'], '7')
-        self.assertEqual(json.loads(patch['metadata']['annotations'][ANNOTATION])['fencing']['recovery_phase'], 'OLD_RUN_STOPPED')
-        self.assertEqual(saved['spec'], before)
+        self.assertEqual(saved['spec']['toGeneration'], 2)
+        self.assertEqual(saved['spec']['jobSet']['kind'], 'JobSet')
+        self.assertEqual(saved['spec']['excludeNodes'], ['bad'])
+        self.assertNotIn('annotations', saved['metadata'])
+        self.assertEqual(client.submit(EVENT, 'moveToSpare'), name)  # response loss: 409 + same spec
+        self.assertEqual([c[0] for c in calls], ['POST', 'POST', 'GET'])
+
+    def test_retry_with_different_inputs_is_not_adopted(self):
+        existing = {'spec': {'requestId': 'r1', 'jobRef': 'training/job-abc-g0001',
+                             'action': 'moveToSpare', 'reason': 'hardware', 'excludeNodes': ['bad'],
+                             'toGeneration': 2, 'stopDeadline': 1, 'jobSet': {'kind': 'JobSet'}}}
+        def transport(method, path, document=None):
+            if method == 'POST':
+                raise HTTPError(path, 409, 'AlreadyExists', {}, None)
+            return existing
+        with self.assertRaises(ValueError):
+            RelocationClient('training', transport, self.provider).submit(EVENT, 'moveToSpare')
+
+    def test_refresh_never_patches_inputs(self):
+        rr = {'metadata': {'resourceVersion': '7'},
+              'spec': {'requestId': 'r1', 'jobRef': 'training/job-abc-g0001'}, 'status': {'phase': 'Stopping'}}
+        transport = Mock(return_value=rr)
+        status_input = Mock(return_value=False)
+        RelocationClient('training', transport, self.provider, status_input).refresh(EVENT, 'rr')
+        self.assertEqual([c.args[0] for c in transport.call_args_list], ['GET'])
+        self.s3.get_object.assert_not_called()
 
     def test_refresh_cannot_target_someone_else(self):
-        client = RelocationClient('training', lambda *a: {'spec': {'requestId': 'other'}}, self.provider)
+        client = RelocationClient('training', lambda *a: {'spec': {'requestId': 'other'}},
+                                  self.provider, Mock())
         with self.assertRaises(ValueError): client.refresh(EVENT, 'rr')
 
     def test_refresh_failure_is_bounded_by_runner_not_worker_polling(self):
@@ -85,11 +119,76 @@ class InputTests(unittest.TestCase):
         self.assertEqual(requests.refresh.call_count, 3)
         self.assertEqual(len(requests.calls), 1)
 
-    def test_final_request_is_not_refreshed_or_recreated(self):
-        existing = dict(spec={'requestId': 'r1', 'jobRef': 'training/job-abc-g0001'},
-                        status={'phase': 'Done'})
-        transport = Mock(return_value=existing)
-        provider = Mock()
-        RelocationClient('training', transport, provider).refresh(EVENT, 'rr')
-        provider.assert_not_called()
-        self.assertEqual(transport.call_count, 1)
+    def test_cancelled_request_is_not_acknowledged(self):
+        rr = {'metadata': {'resourceVersion': '7'},
+              'spec': {'requestId': 'r1', 'jobRef': 'training/job-abc-g0001'}, 'status': {'phase': 'Cancelled'}}
+        transport = Mock(return_value=rr)
+        RelocationClient('training', transport, status_input=Mock(return_value=True)).refresh(EVENT, 'rr')
+        self.assertEqual([c.args[0] for c in transport.call_args_list], ['GET'])
+
+
+class CancelTests(unittest.TestCase):
+    def rr(self, phase='Submitted', annotations=None):
+        return {'metadata': {'resourceVersion': '9', 'annotations': annotations or {}},
+                'spec': {'requestId': 'r1', 'jobRef': 'training/job-abc-g0001'}, 'status': {'phase': phase}}
+
+    def test_cancel_annotates_with_reason_even_after_done(self):
+        for phase in ('Submitted', 'Done', 'Failed'):
+            transport = Mock(return_value=self.rr(phase))
+            self.assertTrue(RelocationClient('training', transport).cancel(EVENT, 'rr', 'authority lost'))
+            method, path, body = transport.call_args.args
+            self.assertEqual(method, 'PATCH')
+            self.assertEqual(body, {'metadata': {'resourceVersion': '9',
+                                                 'annotations': {CANCEL_ANNOTATION: 'authority lost'}}})
+
+    def test_cancel_is_idempotent_and_skips_finished_withdrawals(self):
+        for rr in (self.rr(annotations={CANCEL_ANNOTATION: 'x'}), self.rr('Cancelled'), self.rr('Duplicate')):
+            transport = Mock(return_value=rr)
+            self.assertFalse(RelocationClient('training', transport).cancel(EVENT, 'rr', 'again'))
+            self.assertEqual(transport.call_count, 1)
+
+    def test_cancel_cannot_target_someone_else(self):
+        transport = Mock(return_value={'spec': {'requestId': 'other'}})
+        with self.assertRaises(ValueError):
+            RelocationClient('training', transport).cancel(EVENT, 'rr', 'x')
+
+    def test_workflow_cancels_when_fencing_authority_moves(self):
+        from recovery.workflow import Workflow
+        from test_workflow import MemoryStore, Requests, EVENT as fault
+        store, requests = MemoryStore(), Requests()
+        requests.cancel = Mock()
+        flow = Workflow(store, requests, execute=True)
+        flow.accept(fault)
+        self.assertEqual(flow.tick(store.get('e1'))['state'], 'REQUESTED')
+        store.fence['recovery_id'] = 'someone-else'
+        result = flow.tick(store.get('e1'))
+        self.assertEqual((result['state'], result['reason']), ('HOLD', 'recovery authority changed'))
+        requests.cancel.assert_called_once_with(store.get('e1')['event'], 'recovery-stable',
+                                                'recovery authority changed')
+
+    def test_lost_authority_during_status_projection_cancels(self):
+        from recovery.workflow import Workflow
+        from test_workflow import MemoryStore, Requests, EVENT as fault
+        store, requests = MemoryStore(), Requests()
+        flow = Workflow(store, requests, execute=True)
+        flow.accept(fault)
+        flow.tick(store.get('e1'))
+        store.fence['recovery_id'] = 'someone-else'
+        requests.refresh = Mock(side_effect=RecoveryBlocked('relocation progress lost fencing authority'))
+        requests.cancel = Mock()
+        result = flow.tick(store.get('e1'))
+        self.assertEqual(result['state'], 'HOLD')
+        requests.cancel.assert_called_once()
+
+    def test_other_status_errors_are_not_cancellations(self):
+        from recovery.workflow import Workflow
+        from test_workflow import MemoryStore, Requests, EVENT as fault
+        store, requests = MemoryStore(), Requests()
+        flow = Workflow(store, requests, execute=True)
+        flow.accept(fault)
+        flow.tick(store.get('e1'))
+        requests.refresh = Mock(side_effect=RecoveryBlocked('complete old-run stop evidence required'))
+        requests.cancel = Mock()
+        with self.assertRaises(RecoveryBlocked):
+            flow.tick(store.get('e1'))
+        requests.cancel.assert_not_called()

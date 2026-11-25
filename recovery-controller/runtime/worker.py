@@ -22,8 +22,10 @@ def run(config, stop, health):
                   stop_timeout_seconds=config.get('retry_policy', {}).get('stop_timeout_seconds', 900))
     from integrations.fencing_input import FencingProgressInput
     from recovery.evidence import EvidenceWriter
-    evidence_input = FencingProgressInput(store, EvidenceWriter(store, config.get('evidence_policy')),
-                                         config.get('fencing_progress_input'))
+    evidence_writer = EvidenceWriter(store, config.get('evidence_policy'))
+    evidence_input = FencingProgressInput(store, evidence_writer, config.get('fencing_progress_input'))
+    from integrations.job_registration import JobRegistry
+    registry = JobRegistry(store, evidence_writer, config.get('evidence_policy'))
     execute = config['execution_enabled']
     from integrations.relocation_inputs import RelocationInputs
     from integrations.relocation_status import RelocationStatusInput, status_config
@@ -79,7 +81,7 @@ def run(config, stop, health):
             if msg.error(): raise RuntimeError('Kafka poll failed')
             # Unknown clusters are durable HOLD inputs. Other malformed inputs
             # and failed inbox writes still fail closed without committing.
-            received_fault = accept_message(consumer, workflow, msg)
+            received_fault = accept_message(consumer, workflow, msg, registry)
             with guard_lock:
                 if guard and received_fault:
                     guard.fault_received(int(time.time()))

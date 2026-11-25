@@ -36,10 +36,18 @@ def lifecycle_failure(envelope):
     return event
 
 
-def accept_message(consumer, workflow, msg):
+REGISTRATION_TYPES = ('job.submitted', 'job.placement')  # GPU-276: integrations/job_registration.py
+
+
+def accept_message(consumer, workflow, msg, registry=None):
     envelope=json.loads(msg.value())
     lifecycle = msg.topic() == JOB_LIFECYCLE_TOPIC if hasattr(msg, 'topic') else False
     if lifecycle:
+        if envelope.get('type') in REGISTRATION_TYPES and registry is not None:
+            # Infrastructure errors (DynamoDB) propagate: the offset stays uncommitted.
+            registry.ingest(envelope)
+            consumer.commit(message=msg, asynchronous=False)
+            return False
         if envelope.get('type') not in ('job.init_failed', 'job.failed'):
             consumer.commit(message=msg, asynchronous=False)
             return False
