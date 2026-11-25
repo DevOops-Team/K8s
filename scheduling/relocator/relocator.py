@@ -1,6 +1,6 @@
 """재배치 실행기 (GPU-68) — 관리 클러스터에서 돈다. 노드 격리만 워커에 직접 한다.
 
-보는 것:  RelocationRequest (장애복구 파트가 만든다. 지금은 손으로 넣어 흉내 냄)
+보는 것:  RelocationRequest (복구 컨트롤러가 만든다) — spec과 컨트롤러 제어 주석 두 개만
 판단:     action에 따라 정해진 순서대로
 바꾸는 것: 워커 노드 cordon·taint / MultiKueueCluster 펜싱 라벨 / 잡 내리기·재제출 / 요청 status
 
@@ -13,26 +13,25 @@ action:
 
 자리는 정하지 않는다. 재제출한 잡도 디스패처를 다시 거친다.
 
-복구 컨트롤러와 나누는 일 (체크포인트 규약 5·8절, JobSet 템플릿 2·6절):
-  복구 컨트롤러  판단 -> DynamoDB 세대 +1 (recovery_phase=GENERATION_ADVANCED, recovery_id·from/to gen) -> 이 요청 생성
-  재배치 실행기  요청의 requestId = 펜싱 기록 recovery_id 인지 확인
-                 -> 격리 -> 옛 실행이 멈춘 걸 확인하면 OLD_RUN_STOPPED
-                 -> RR 주석으로 전달받은 복구 원본에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
-                 -> NEW_RUN_SUBMITTED + new_jobset_name·uid (전부 조건부 갱신)
-  RESUMING·COMPLETED는 복구 컨트롤러 몫.
-  운영의 DB/S3 읽기 입력은 복구 컨트롤러가 devoops/recovery-inputs 주석으로 공급한다.
-  조건부 펜싱 쓰기 및 K8s/EC2 실제 종료 확인은 재배치기 책임을 유지한다.
+복구 컨트롤러와 나누는 일 (ADR-50. relocator는 S3·DynamoDB에 가지 않는다):
+  복구 컨트롤러  판단 -> 펜싱 표 세대 +1 -> S3 원본 읽기·해시 대조 -> 이 요청 생성
+                 spec: requestId · jobRef(옛 세대) · action · excludeNodes/Clusters · toGeneration · stopDeadline · jobSet(원본)
+  재배치 실행기  격리 -> 옛 실행이 멈춘 걸 확인하면 status.recoveryProgress(OLD_RUN_STOPPED + 종료 증거)
+  복구 컨트롤러  status를 보고 펜싱 표에 OLD_RUN_STOPPED 조건부 기록 -> 요청에 devoops/recovery-stop-recorded=true
+  재배치 실행기  spec.jobSet에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
+                 -> status.recoveryProgress(NEW_RUN_SUBMITTED + 관리 클러스터 새 JobSet 이름·UID)
+  복구 컨트롤러  펜싱 표에 NEW_RUN_SUBMITTED·new_jobset_name/uid 조건부 기록. RESUMING·COMPLETED도 컨트롤러 몫
+  권한을 잃었거나 이미 끝난 복구면 컨트롤러가 devoops/recovery-cancel을 붙인다 -> 실행기가 만든 JobSet을 철회하고 Cancelled
 
 단계마다 요청 status에 시각을 남기고, 다음 루프에서 비어 있는 단계부터 이어서 한다.
-펜싱 기록 갱신과 JobSet 생성도 같은 이름·조건으로 다시 해도 결과가 같아서, 실행기가 중간에 죽었다 살아나도 두 번 하지 않는다.
+JobSet 생성도 같은 이름으로 다시 해도 결과가 같아서(409 -> 같은 복구 확인), 실행기가 중간에 죽었다 살아나도 두 번 하지 않는다.
   acceptedAt -> isolatedAt -> stoppedAt -> resubmittedAt -> admittedAt (Done)
 
 시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
-  옛 실행 종료 15분 (STOP_HOLD_SECONDS) -> 넘으면 Held, 확인 어노테이션으로만 재개
+  옛 실행 종료: spec.stopDeadline(없으면 요청 생성 + 15분) -> 넘으면 Held, 확인 어노테이션으로만 재개
     워커 API에 접속이 안 되면 EC2 인스턴스 상태를 종료 증거로 쓴다 (ec2_evidence.py, 기본 off)
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
-import json
 import os
 import sys
 from pathlib import Path
@@ -49,32 +48,28 @@ import ec2_evidence
 import kube
 import leader
 import recovery_render as R
-import recovery_store
-from request_inputs import RequestStore, InputsUnavailable
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
 STOP_WAIT_SECONDS = int(os.getenv("STOP_WAIT_SECONDS", "120"))    # 옛 잡이 이 시간 안에 안 내려가면 WaitingForStop으로 알림
 # 복구 컨트롤러는 옛 실행 종료를 15분 기다린 뒤 HOLD한다 (장애 복구 규약 2절). 그 뒤에 실행기가 혼자 재제출하지 않게
-# 펜싱 종료 대기 기준(없으면 RR 생성)부터 기한이 지나면 Held. 확인 어노테이션(수동 재개)만 받는다
+# spec.stopDeadline(없으면 RR 생성 + 이 시간)이 지나면 Held. 확인 어노테이션(수동 재개)만 받는다
 STOP_HOLD_SECONDS = int(os.getenv("STOP_HOLD_SECONDS", "900"))
 # 재제출 잡이 이 시간 안에 입장 못 하면 AdmitDelayed로 알리고 계속 기다린다 (JobSet은 그대로 둠).
 # 복구 성공·실패 판단은 복구 컨트롤러 몫 (복원·학습 진행 확인 30분 뒤 HOLD)
 ADMIT_TIMEOUT_SECONDS = int(os.getenv("ADMIT_TIMEOUT_SECONDS", "900"))
-FENCING_WAIT_SECONDS = int(os.getenv("FENCING_WAIT_SECONDS", "300"))   # 복구 컨트롤러의 세대 +1을 기다리는 최대 시간
 # EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔). 없으면 MultiKueue Secret
 OWN_SECRET = os.getenv("RELOCATOR_KUBECONFIG_SECRET", "{name}-relocator-kubeconfig")
 
 kube.setup_logging("relocator")
 log = kube.logging.getLogger("relocator")
 
-FINAL = {"Done", "Failed", "Duplicate"}
+FINAL = {"Done", "Failed", "Duplicate", "Cancelled"}
+PROGRESS_SCHEMA = 1   # status.recoveryProgress 계약 버전 (복구 컨트롤러 relocation_status.py와 맞춤)
 
 
 class Ctx:
-    def __init__(self, mgr, workers, store, rr, ec2=None):
-        if getattr(store, 'require_controller_inputs', False):
-            store = RequestStore(rr, store)
-        self.mgr, self.workers, self.store, self.rr = mgr, workers, store, rr
+    def __init__(self, mgr, workers, rr, ec2=None):
+        self.mgr, self.workers, self.rr = mgr, workers, rr
         self.ec2 = ec2   # ec2_evidence.Ec2Evidence 또는 None (EC2 증거 안 씀)
         self.co = kube.kueue(mgr)
         self.ns = rr["metadata"]["namespace"]
@@ -87,10 +82,11 @@ class Ctx:
         self.co.patch_namespaced_custom_object_status(
             K.RR_GROUP, K.RR_VERSION, self.ns, K.RR_PLURAL, self.name, {"status": self.st})
 
+    def ann(self, key):
+        return (self.rr["metadata"].get("annotations") or {}).get(key)
+
     def job(self):
-        # 학습 잡 네임스페이스(training)에 있는 요청이, 같은 네임스페이스의 잡만 다룬다.
-        # 복구 원본·펜싱 기록은 job_id로만 찾으므로(S3 code/{job_id}, DynamoDB job_id) 다른 네임스페이스에서
-        # 같은 job_id를 대면 남의 기록을 쓰게 된다 -> 요청 자체를 training에서만 받는다
+        # 학습 잡 네임스페이스(training)에 있는 요청이, 같은 네임스페이스의 잡만 다룬다
         ns, _, name = self.spec["jobRef"].partition("/")
         if self.ns != K.NAMESPACE:
             raise PermissionError(f"요청 네임스페이스 {self.ns} != 학습 잡 네임스페이스 {K.NAMESPACE}")
@@ -99,17 +95,26 @@ class Ctx:
         return ns, name
 
     # status(jobId·toGeneration)는 기록용. 다른 주체도 status를 쓸 수 있으므로 판단에는 쓰지 않고
-    # 매번 spec.jobRef(바꿀 수 없음)와 펜싱 기록에서 다시 구한다
+    # 매번 spec(만든 뒤 바꿀 수 없음)에서 다시 구한다
     def job_id(self):
         return R.parse_name(self.job()[1])[0]
 
+    def old_gen(self):
+        return R.parse_name(self.job()[1])[1]
+
     def to_gen(self):
-        """펜싱 기록을 새로 읽어 이 요청의 새 세대. 진행해도 되는 상태가 아니면 PermissionError"""
-        _, old_gen = R.parse_name(self.job()[1])
-        verdict, why, to_gen = R.check_fencing(self.store.get_fencing(self.job_id()), self.spec["requestId"], old_gen)
-        if verdict != "go":
-            raise PermissionError(f"펜싱 기록이 진행 상태가 아님 ({verdict}: {why})")
+        """spec.toGeneration = 옛 세대 + 1 (복구 컨트롤러가 세대 +1 뒤에만 요청을 만든다). 아니면 PermissionError"""
+        to_gen, old_gen = self.spec.get("toGeneration"), self.old_gen()
+        if type(to_gen) is not int or old_gen is None or to_gen != old_gen + 1:
+            raise PermissionError(f"spec.toGeneration={to_gen!r}이 옛 세대 {old_gen} + 1이 아님")
         return to_gen
+
+    def original(self):
+        """spec.jobSet = 복구 컨트롤러가 S3에서 읽고 해시를 대조한 원본 JobSet"""
+        orig = self.spec.get("jobSet")
+        if not isinstance(orig, dict) or orig.get("kind") != "JobSet":
+            raise PermissionError("spec.jobSet에 원본 JobSet이 없음")
+        return orig
 
 
 # ---------- 단계
@@ -130,23 +135,13 @@ def accept(x: Ctx, all_rrs):
         x.save(phase="Failed", message=f"잡 이름 {name}이 job-<작업ID>-g<세대 4자리> 형식이 아님",
                acceptedAt=kube.now_rfc3339())
         return False
-    verdict, why, to_gen = R.check_fencing(x.store.get_fencing(job_id), rid, old_gen)
-    if verdict == "wait":
-        if kube.since(x.rr["metadata"]["creationTimestamp"]) > FENCING_WAIT_SECONDS:
-            x.save(phase="Failed", message=f"{FENCING_WAIT_SECONDS}s 동안 세대 +1이 안 보임: {why}",
-                   acceptedAt=kube.now_rfc3339())
-        elif x.st.get("message") != f"대기: {why}":
-            x.save(phase="Pending", message=f"대기: {why}")
-            log.info("%s: 대기 - %s", x.name, why)
-        return False
-    if verdict == "done":
-        x.save(phase="Done", message=f"펜싱 기록이 {why} -> 재배치 할 일 없음", acceptedAt=kube.now_rfc3339())
-        return False
-    if verdict == "fail":
-        x.save(phase="Failed", message=f"펜싱 기록: {why}", acceptedAt=kube.now_rfc3339())
-        return False
+    to_gen = x.to_gen()      # 형식이 틀린 요청은 PermissionError -> Failed
+    x.original()
     wl = kube.workload_for_jobset(x.mgr, ns, name)
-    source = (wl or {}).get("status", {}).get("clusterName") or ""
+    if not wl:
+        x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
+        return False
+    source = (wl.get("status") or {}).get("clusterName") or ""
     old_exclude = ""
     try:
         old = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
@@ -154,14 +149,10 @@ def accept(x: Ctx, all_rrs):
     except client.ApiException as e:
         if e.status != 404:
             raise
-    # 옛 잡이 벌써 없으면 원래 클러스터를 모른다. 단계가 OLD_RUN_STOPPED 이후(실행기가 이미 지운 뒤 재시작)일 때만 진행
-    if not wl and why == "GENERATION_ADVANCED":
-        x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
-        return False
     x.save(phase="Accepted", sourceCluster=source, jobId=job_id, fromGeneration=old_gen, toGeneration=to_gen,
-           oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message=f"펜싱 기록 {why}",
+           oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message="접수",
            seenClusters=sorted(set(x.st.get("seenClusters") or []) | copy_clusters(wl)),
-           **({"gpus": sum(kube.workload_pods(wl))} if (wl or {}).get("spec", {}).get("podSets") else {}))
+           **({"gpus": sum(kube.workload_pods(wl))} if wl.get("spec", {}).get("podSets") else {}))
     log.info("%s: 접수 %s %s/%s (지금 %s, 세대 %s -> %s)", x.name, x.spec["action"], ns, name,
              source or "워커 미정", old_gen, to_gen)
     return True
@@ -231,7 +222,7 @@ def current_source(x: Ctx):
 
 def isolate(x: Ctx):
     # 노드 cordon·클러스터 펜싱은 되돌리기 어려운 일이라 status(다른 주체도 쓸 수 있음)를 믿지 않는다:
-    # 펜싱 기록을 다시 확인하고, 대상 클러스터도 Workload에서 다시 구한다
+    # 대상 클러스터를 Workload에서 다시 구한다. 권한을 잃은 요청은 컨트롤러가 취소 주석으로 멈춘다(step 맨 앞)
     x.to_gen()
     action, src = x.spec["action"], current_source(x)
     if src != (x.st.get("sourceCluster") or ""):
@@ -313,24 +304,33 @@ def gone_on(x: Ctx, src, ns, name):
         return False, Unreachable(f"{src} 접속 안 됨 ({type(e).__name__})")
 
 
+def _epoch(value):
+    """epoch 초(숫자·문자열) 또는 시간대가 있는 RFC3339 -> epoch 초"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("종료 마감 시각에 시간대가 없음")
+        return parsed.timestamp()
+
+
 def stop_held(x: Ctx):
-    """펜싱 deadline 우선, 없으면 시작 시각 + 15분. epoch seconds/RFC3339 지원."""
-    rec = x.store.get_fencing(x.job_id()) or {}
-
-    def age(value):
-        try:
-            return time.time() - float(value)
-        except (TypeError, ValueError):
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                raise ValueError("종료 대기 시각에 시간대가 없음")
-            return time.time() - parsed.timestamp()
-
-    if rec.get("stop_wait_deadline") not in (None, ""):
-        return age(rec["stop_wait_deadline"]) >= 0
-    if rec.get("stop_wait_started_at") not in (None, ""):
-        return age(rec["stop_wait_started_at"]) >= STOP_HOLD_SECONDS
+    """spec.stopDeadline(복구 컨트롤러가 정한 종료 마감)이 지났는지. 없으면 요청 생성 + 15분"""
+    deadline = x.spec.get("stopDeadline")
+    if deadline not in (None, ""):
+        return time.time() >= _epoch(deadline)
     return kube.since(x.rr["metadata"]["creationTimestamp"]) > STOP_HOLD_SECONDS
+
+
+def progress(x: Ctx, phase, evidence, new_jobset=None):
+    """status.recoveryProgress: 복구 컨트롤러가 펜싱 표로 옮기는 결과 (relocation_status.py 계약 v1)"""
+    out = {"schemaVersion": PROGRESS_SCHEMA, "requestId": x.spec["requestId"], "jobId": x.job_id(),
+           "fromGeneration": x.old_gen(), "toGeneration": x.to_gen(), "phase": phase,
+           "oldRunStopEvidence": evidence}
+    if new_jobset:
+        out["newJobSet"] = new_jobset
+    return out
 
 
 def stop_old(x: Ctx):
@@ -347,14 +347,14 @@ def stop_old(x: Ctx):
     note_copies(x, left)
     mgr_gone = left is None
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
-    confirmed = (x.rr["metadata"].get("annotations") or {}).get(K.ANN_STOP_CONFIRMED) == "true"
+    confirmed = x.ann(K.ANN_STOP_CONFIRMED) == "true"
     held = stop_held(x)
     if confirmed or (mgr_gone and worker_gone and not held):
         how = f"요청자가 {K.ANN_STOP_CONFIRMED}=true로 확인" if confirmed else f"옛 Workload 삭제 확인 ({why})"
         stopped_at = kube.now_rfc3339()
         checks = [] if confirmed else getattr(x, "stop_evidence", [])
         evidence = {
-            "generation": R.parse_name(name)[1], "namespace": ns, "jobset_name": name,
+            "generation": x.old_gen(), "namespace": ns, "jobset_name": name,
             "clusters": sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c}),
             "kind": "manual" if confirmed else ("ec2" if any(c["kind"] == "ec2" for c in checks) else "automatic"),
             "checks": checks, "confirmed_at": stopped_at,
@@ -362,10 +362,10 @@ def stop_old(x: Ctx):
             "recorded_by": os.getenv("POD_NAME") or f"{socket.gethostname()}-{os.getpid()}",
             "detail": how,
         }
-        advance(x, ("GENERATION_ADVANCED", "OLD_RUN_STOPPED"), "OLD_RUN_STOPPED",
-                {"old_run_stop_evidence": json.dumps(evidence, ensure_ascii=False, sort_keys=True)})
-        log.info("%s: 옛 실행 멈춤 (%s) -> OLD_RUN_STOPPED", x.name, how)
-        x.save(phase="Executing", stoppedAt=stopped_at, message=how)
+        # 펜싱 표 기록은 복구 컨트롤러가 이 status를 보고 한다. 증거는 이후 바꾸지 않는다 (NEW_RUN_SUBMITTED에도 그대로)
+        x.save(phase="Executing", stoppedAt=stopped_at, message=how,
+               recoveryProgress=progress(x, "OLD_RUN_STOPPED", evidence))
+        log.info("%s: 옛 실행 멈춤 (%s) -> status OLD_RUN_STOPPED", x.name, how)
         return
     if held:
         # 복구 컨트롤러가 이미 HOLD했을 시간. 뒤늦게 멈춘 게 보여도 혼자 재제출하지 않는다
@@ -409,29 +409,11 @@ def ec2_stop_evidence(x: Ctx, why, src=None):
     return ok, f"{why}; {ev}"
 
 
-PHASE_ORDER = ["GENERATION_ADVANCED", "OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED", "RESUMING", "COMPLETED"]
-
-
-def advance(x: Ctx, allowed_from, new_phase, extra=None):
-    """펜싱 기록 recovery_phase를 new_phase로 (조건부). 이미 그 단계 이후면 그대로 둠"""
-    rid = x.spec["requestId"]
-    if x.store.set_phase(x.job_id(), rid, x.to_gen(), allowed_from, new_phase, extra):
-        return
-    rec = x.store.get_fencing(x.job_id()) or {}
-    cur = rec.get("recovery_phase")
-    if (rec.get("recovery_id") == rid and cur in PHASE_ORDER
-            and PHASE_ORDER.index(cur) >= PHASE_ORDER.index(new_phase)):
-        return
-    raise PermissionError(f"펜싱 기록을 {new_phase}로 못 바꿈 (recovery_id={rec.get('recovery_id')}, "
-                          f"phase={cur}, to_gen={rec.get('recovery_to_gen')}) - 다른 복구가 진행 중")
-
-
 def build_new(x: Ctx):
     target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
                                         x.st.get("oldExclude"), x.spec.get("excludeClusters"))
-    # 만들기 직전에 펜싱 기록을 다시 확인 (to_gen이 매번 새로 읽음)
-    orig = x.store.get_jobset(x.job_id())
-    # 복구 원본이 이 요청의 잡 것인지 확인 (job_id만으로 찾으므로 네임스페이스·작업 ID를 한 번 더 맞춰 본다)
+    orig = x.original()
+    # 복구 원본이 이 요청의 잡 것인지 확인 (컨트롤러가 해시를 대조했지만 네임스페이스·작업 ID를 한 번 더 맞춰 본다)
     ometa = orig.get("metadata") or {}
     if ometa.get("namespace") and ometa["namespace"] != x.ns:
         raise PermissionError(f"복구 원본 네임스페이스 {ometa['namespace']} != 요청 네임스페이스 {x.ns}")
@@ -445,6 +427,13 @@ def build_new(x: Ctx):
 
 
 def resubmit(x: Ctx):
+    # 컨트롤러가 펜싱 표에 OLD_RUN_STOPPED를 기록했다는 확인이 와야 새 세대를 낸다 (ADR-36 순서: 종료 기록 -> 재제출)
+    if x.ann(K.ANN_STOP_RECORDED) != "true":
+        msg = "복구 컨트롤러의 OLD_RUN_STOPPED 기록 확인 대기"
+        if x.st.get("message") != msg:
+            x.save(message=msg)
+            log.info("%s: %s", x.name, msg)
+        return
     ns, _ = x.job()
     new = build_new(x)
     name = new["metadata"]["name"]
@@ -457,31 +446,27 @@ def resubmit(x: Ctx):
         made = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
         if (made["metadata"].get("annotations") or {}).get(K.ANN_RECOVERY_ID) != x.spec["requestId"]:
             raise PermissionError(f"{name}이 이미 있는데 다른 복구가 만든 것") from e
-    try:
-        advance(x, ("OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"), "NEW_RUN_SUBMITTED",
-                {"new_jobset_name": name, "new_jobset_uid": made["metadata"]["uid"]})
-    except PermissionError as e:
-        # 만든 사이 펜싱 기록이 다른 복구로 넘어감 -> 이 JobSet은 기록에 없는 실행. 남겨 두면 이중 실행이라 지운다.
-        # (끊김 같은 일시 오류는 여기 안 옴: 다음 루프에서 409 -> 같은 복구 확인 -> 다시 기록)
-        if withdraw(x, ns, name, made["metadata"]["uid"]):
-            raise PermissionError(f"{e} -> 만든 {name} 철회함") from e
-        raise PermissionError(f"{e} -> 만든 {ns}/{name} 철회 실패, 손으로 지울 것") from e
-    x.save(resubmittedAt=kube.now_rfc3339(), newJob=f"{ns}/{name}")
+    uid = made["metadata"]["uid"]
+    evidence = (x.st.get("recoveryProgress") or {}).get("oldRunStopEvidence")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("status.recoveryProgress에 종료 증거가 없음")
+    x.save(resubmittedAt=kube.now_rfc3339(), newJob=f"{ns}/{name}", newJobUid=uid, message="재제출",
+           recoveryProgress=progress(x, "NEW_RUN_SUBMITTED", evidence, {"name": name, "uid": uid}))
     ann = new["metadata"]["annotations"]
-    log.info("%s: 재제출 %s (%s, exclude=%s, target=%s) -> NEW_RUN_SUBMITTED", x.name, name, K.RECOVERY_QUEUE,
+    log.info("%s: 재제출 %s (%s, exclude=%s, target=%s) -> status NEW_RUN_SUBMITTED", x.name, name, K.RECOVERY_QUEUE,
              ann.get(K.ANN_EXCLUDE, "-"), ann.get(K.ANN_TARGET, "-"))
 
 
 def withdraw(x: Ctx, ns, name, uid):
     """이 요청이 만든 JobSet만 지운다 (uid 전제조건: 그 사이 같은 이름으로 다시 만든 남의 것은 안 지움).
-    지웠거나 이미 없으면 True. 요청은 곧 Failed로 끝나 다시 안 오므로 여기서 몇 번 더 시도한다"""
+    지웠거나 이미 없으면 True"""
     for i in range(3):
         try:
             x.co.delete_namespaced_custom_object(
                 K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name,
                 body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid),
                                             propagation_policy="Background"))
-            log.warning("%s: 기록 못 한 재제출 잡 %s/%s 철회", x.name, ns, name)
+            log.warning("%s: 재제출 잡 %s/%s 철회", x.name, ns, name)
             return True
         except client.ApiException as e:
             if e.status in (404, 409):   # 404 이미 없음 / 409 uid가 다름 = 남의 것
@@ -490,8 +475,35 @@ def withdraw(x: Ctx, ns, name, uid):
         except Exception as e:  # noqa: BLE001  끊김
             err = type(e).__name__
         time.sleep(1 + i)
-    log.error("%s: 재제출 잡 %s/%s 철회 실패 (%s) - 손으로 지울 것", x.name, ns, name, err)
+    log.error("%s: 재제출 잡 %s/%s 철회 실패 (%s) - 다음 루프에서 다시", x.name, ns, name, err)
     return False
+
+
+def cancel(x: Ctx):
+    """복구 컨트롤러의 취소 신호: 이 요청이 만든 새 세대 JobSet을 철회하고 Cancelled.
+    status를 쓰기 전에 죽었을 수 있으니 새 세대 이름으로 찾고, 이 요청의 recovery-id가 붙은 것만 지운다.
+    철회에 실패하면 Cancelled로 끝내지 않는다 (다음 루프에서 다시)"""
+    js = None
+    try:
+        ns, _ = x.job()
+        name = R.jobset_name(x.job_id(), x.to_gen())
+    except PermissionError:   # 형식이 틀린 요청은 JobSet을 만들었을 리 없다
+        ns = name = None
+    if name:
+        try:
+            js = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+    withdrawn = ""
+    if js and (js["metadata"].get("annotations") or {}).get(K.ANN_RECOVERY_ID) == x.spec["requestId"]:
+        if not withdraw(x, ns, name, js["metadata"]["uid"]):
+            x.save(message=f"취소: {ns}/{name} 철회 실패, 다음 루프에서 다시")
+            return
+        withdrawn = f", {ns}/{name} 철회"
+    reason = x.ann(K.ANN_CANCEL)
+    x.save(phase="Cancelled", cancelledAt=kube.now_rfc3339(), message=f"복구 컨트롤러 취소 ({reason}){withdrawn}")
+    log.warning("%s: 취소 (%s)%s", x.name, reason, withdrawn)
 
 
 def watch_admit(x: Ctx):
@@ -530,6 +542,8 @@ def step(x: Ctx, all_rrs):
     action = x.spec.get("action")
     if action not in (*R.PREFER_SOURCE, "evacuateCluster"):
         raise PermissionError(f"지원하지 않는 재배치 action: {action}")
+    if x.ann(K.ANN_CANCEL):   # 어느 단계에서든 취소가 먼저
+        return cancel(x)
     st = x.st
     if not st.get("acceptedAt"):
         if not accept(x, all_rrs):
@@ -543,21 +557,24 @@ def step(x: Ctx, all_rrs):
     return watch_admit(x)
 
 
-def reconcile(mgr, workers, store, ec2=None):
+def wanted(rr):
+    """이번 루프에서 볼 요청: 끝나지 않은 요청 + 끝났어도 취소가 붙은 요청(Done 뒤 권한을 잃은 경우 철회).
+    Duplicate·Cancelled는 만든 JobSet이 없거나 이미 철회했으므로 다시 보지 않는다"""
+    phase = (rr.get("status") or {}).get("phase")
+    if phase not in FINAL:
+        return True
+    return phase in ("Done", "Failed") and bool((rr["metadata"].get("annotations") or {}).get(K.ANN_CANCEL))
+
+
+def reconcile(mgr, workers, ec2=None):
     co = kube.kueue(mgr)
     rrs = co.list_cluster_custom_object(K.RR_GROUP, K.RR_VERSION, K.RR_PLURAL)["items"]
     for rr in rrs:
-        if (rr.get("status") or {}).get("phase") in FINAL:
+        if not wanted(rr):
             continue
-        try:
-            x = Ctx(mgr, workers, store, rr, ec2)
-        except InputsUnavailable as e:
-            log.warning('%s: controller input pending: %s', rr['metadata']['name'], e)
-            continue
+        x = Ctx(mgr, workers, rr, ec2)
         try:
             step(x, rrs)
-        except InputsUnavailable as e:
-            log.warning('%s: controller refresh pending: %s', x.name, e)
         except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
             log.warning("%s: 거부 - %s", x.name, e)
             x.save(phase="Failed", message=f"거부: {e}")
@@ -573,17 +590,15 @@ def main():
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
-    store = recovery_store.from_env(mgr)
-    store.require_controller_inputs = True
     ec2 = ec2_evidence.from_env()
-    log.info("시작: interval=%ss store=%s ec2=%s", INTERVAL, type(store).__name__,
+    log.info("시작: interval=%ss ec2=%s", INTERVAL,
              "off" if ec2 is None else ("terminate" if ec2.can_terminate else "describe"))
     while True:
         if not elector.is_leader():
             time.sleep(1)
             continue
         try:
-            reconcile(mgr, workers, store, ec2)
+            reconcile(mgr, workers, ec2)
         except Exception:  # noqa: BLE001
             log.exception("루프 실패")
         time.sleep(INTERVAL)

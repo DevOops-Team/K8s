@@ -120,24 +120,3 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
                 ct["args"] = values[len(command):]
     return new
 
-
-def check_fencing(rec, request_id, old_gen):
-    """재배치를 시작해도 되는지 펜싱 기록(DynamoDB)으로 판단 -> ("go" | "wait" | "done" | "fail", 이유, 새 세대)
-    복구 컨트롤러가 세대 +1(GENERATION_ADVANCED)까지 해 둔 요청만 처리한다 (체크포인트 규약 5·8절)"""
-    if not rec:
-        return "wait", "펜싱 기록 없음", None
-    if rec.get("recovery_id") != request_id:
-        return "wait", f"펜싱 기록의 recovery_id={rec.get('recovery_id')} (이 요청 {request_id} 아님)", None
-    phase = rec.get("recovery_phase")
-    to_gen = rec.get("recovery_to_gen")
-    if phase == "CLAIMED":
-        return "wait", "복구 컨트롤러가 아직 세대 +1 전 (CLAIMED)", None
-    if phase in ("RESUMING", "COMPLETED"):
-        return "done", f"이미 {phase}", to_gen
-    if phase not in ("GENERATION_ADVANCED", "OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"):
-        return "fail", f"모르는 recovery_phase {phase}", None
-    if to_gen is None or rec.get("recovery_from_gen") is None:
-        return "fail", "recovery_from_gen·recovery_to_gen 없음", None
-    if old_gen is not None and int(rec["recovery_from_gen"]) != old_gen:
-        return "fail", f"요청한 잡은 {old_gen}세대인데 펜싱 기록은 {rec['recovery_from_gen']}세대 복구", None
-    return "go", phase, int(to_gen)

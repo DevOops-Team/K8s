@@ -38,7 +38,6 @@ class Controllers:
         self.seq += 1
         self.logfile = self.logdir / f"controllers-{self.seq:02d}-{'+'.join(names) or 'none'}.log"
         full = {**os.environ, **env, "KUBE_CONTEXT": MGR_CONTEXT, "PYTHONUNBUFFERED": "1",
-                "RECOVERY_STORE": "configmap",
                 "WORKER_CONTEXTS": ",".join(f"{w}={c}" for w, c in WORKER_CONTEXTS.items())}
         out = open(self.logfile, "a", buffering=1)
         out.write(f"# {datetime.now():%H:%M:%S} 설정: {names} {env}\n")

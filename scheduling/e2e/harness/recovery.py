@@ -1,9 +1,13 @@
 """장애복구 케이스 공통: 복구 컨트롤러 흉내, 재배치 요청(RR), 워커 쪽 조회, 이중 실행 감시.
 
-정본 4.1(R7) 순서를 그대로 흉내 낸다.
-  복구 컨트롤러 (여기서 흉내)  펜싱 기록 세대 +1, recovery_phase=GENERATION_ADVANCED, recovery_id -> training에 RR 생성
-  relocator (진짜 컨트롤러)    펜싱 확인 -> 격리 -> 옛 실행 종료 확인(OLD_RUN_STOPPED) -> 재제출(NEW_RUN_SUBMITTED)
-kind에서 펜싱 기록은 scheduling-local-store의 ConfigMap recovery-fencing-<작업ID> (recovery_store.ConfigMapStore).
+정본 4.1(R7) 순서와 ADR-50 계약을 그대로 흉내 낸다.
+  복구 컨트롤러 (여기서 흉내)  펜싱 기록 세대 +1 -> 원본을 spec.jobSet에 넣어 training에 RR 생성
+  relocator (진짜 컨트롤러)    격리 -> 옛 실행 종료 확인 -> status.recoveryProgress(OLD_RUN_STOPPED)
+  복구 컨트롤러 (여기서 흉내)  펜싱 기록에 OLD_RUN_STOPPED -> RR에 devoops/recovery-stop-recorded=true
+  relocator                    재제출 -> status.recoveryProgress(NEW_RUN_SUBMITTED + 새 JobSet 이름·UID)
+  복구 컨트롤러 (여기서 흉내)  펜싱 기록에 NEW_RUN_SUBMITTED·new_jobset_name/uid
+흉내는 RR을 읽을 때마다(rr()) 한 번씩 돈다. relocator는 펜싱 기록·원본 저장소를 보지 않는다.
+kind에서 펜싱 기록·원본은 scheduling-local-store의 ConfigMap recovery-fencing-<작업ID>·recovery-code-<작업ID>.
 """
 import logging
 import json
@@ -21,8 +25,8 @@ from .verdict import Invalid, precondition
 
 log = logging.getLogger("e2e")
 T = REQUEST_TIMEOUT
-FINAL = ("Done", "Failed", "Duplicate")
-INPUT_ANNOTATION = 'devoops/recovery-inputs'
+FINAL = ("Done", "Failed", "Duplicate", "Cancelled")
+HOLD_ACK = set()   # 이 이름의 RR에는 흉내 컨트롤러가 OLD_RUN_STOPPED 확인을 붙이지 않음 (ack_stop으로 직접)
 PLACEHOLDER = ROOT / "examples" / "spare" / "placeholder.yaml"
 JOBSET_LABEL = "jobset.sigs.k8s.io/jobset-name"
 
@@ -49,34 +53,32 @@ def advance_generation(kube, job_id, recovery_id):
     return gen
 
 
-def controller_inputs(kube, job_id, recovery_id):
-    """Local controller stand-in: production reads DB/S3, harness reads isolated CMs."""
+def original(kube, job_id):
+    """흉내 컨트롤러가 S3 대신 읽는 원본 JobSet (submit이 recovery-code-<id>에 둔 것). 없으면 None"""
     try:
-        rec = fencing(kube, job_id)
         cm = kube.core.read_namespaced_config_map(f'recovery-code-{job_id}', STORE_NS, _request_timeout=T)
     except client.ApiException as e:
         if e.status == 404:
             return None
         raise
-    keys = ('generation', 'recovery_id', 'recovery_from_gen', 'recovery_to_gen',
-            'recovery_phase', 'stop_wait_started_at', 'stop_wait_deadline', 'new_jobset_name', 'new_jobset_uid')
-    numbers = {'generation', 'recovery_from_gen', 'recovery_to_gen'}
-    return json.dumps(dict(schema_version=1, job_id=job_id, request_id=recovery_id,
-        observed_at=int(time.time()), original_jobset=json.loads(cm.data['jobset.json']),
-        fencing={k: int(rec[k]) if k in numbers else rec[k] for k in keys if rec.get(k) not in (None, '')}))
+    return json.loads(cm.data['jobset.json'])
 
 
 def create_rr(kube, name, recovery_id, action, job_id, gen, nodes=None, clusters=None, reason="hardware"):
-    spec = {"requestId": recovery_id, "action": action, "jobRef": f"{NS}/{jsname(job_id, gen)}", "reason": reason}
+    spec = {"requestId": recovery_id, "action": action, "jobRef": f"{NS}/{jsname(job_id, gen)}", "reason": reason,
+            "toGeneration": gen + 1}
+    orig = original(kube, job_id)
+    if orig:
+        spec["jobSet"] = orig
+    deadline = fencing(kube, job_id).get("stop_wait_deadline")
+    if deadline:
+        spec["stopDeadline"] = deadline
     if nodes:
         spec["excludeNodes"] = list(nodes)
     if clusters:
         spec["excludeClusters"] = list(clusters)
     body = {"apiVersion": f"{K.RR_GROUP}/{K.RR_VERSION}", "kind": "RelocationRequest",
             "metadata": {"name": name, "namespace": NS}, "spec": spec}
-    inputs = controller_inputs(kube, job_id, recovery_id)
-    if inputs:
-        body['metadata']['annotations'] = {INPUT_ANNOTATION: inputs}
     try:
         kube.co.create_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, body, _request_timeout=T)
     except client.ApiException as e:
@@ -94,16 +96,56 @@ def relocate(kube, name, recovery_id, action, job_id, nodes=None, clusters=None,
     return jsname(job_id, gen + 1)
 
 
+PHASES = ["GENERATION_ADVANCED", "OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED", "RESUMING", "COMPLETED"]
+
+
+def project(kube, obj):
+    """복구 컨트롤러 흉내: RR status.recoveryProgress -> 펜싱 기록 (같은 recovery_id·세대일 때만, 단계는 앞으로만).
+    OLD_RUN_STOPPED를 기록하면 RR에 확인 주석을 붙인다 (HOLD_ACK에 있는 RR은 빼고)"""
+    p = (obj.get("status") or {}).get("recoveryProgress")
+    if not isinstance(p, dict) or p.get("phase") not in ("OLD_RUN_STOPPED", "NEW_RUN_SUBMITTED"):
+        return
+    job_id = p.get("jobId")
+    rec = fencing(kube, job_id)
+    if (rec.get("recovery_id") != obj["spec"]["requestId"]
+            or rec.get("recovery_to_gen") != str(p.get("toGeneration"))):
+        return   # 진짜 컨트롤러라면 취소를 붙일 상황. 시나리오가 직접 판단
+    cur = rec.get("recovery_phase")
+    data = {}
+    if cur in PHASES and PHASES.index(cur) < PHASES.index("OLD_RUN_STOPPED"):
+        data.update(recovery_phase="OLD_RUN_STOPPED",
+                    old_run_stop_evidence=json.dumps(p.get("oldRunStopEvidence"), ensure_ascii=False, sort_keys=True))
+        cur = "OLD_RUN_STOPPED"
+    new = p.get("newJobSet") or {}
+    if p["phase"] == "NEW_RUN_SUBMITTED" and cur == "OLD_RUN_STOPPED" and new.get("uid"):
+        data.update(recovery_phase="NEW_RUN_SUBMITTED", new_jobset_name=new["name"], new_jobset_uid=new["uid"])
+    if data:
+        kube.core.patch_namespaced_config_map(f"recovery-fencing-{job_id}", STORE_NS, {"data": data}, _request_timeout=T)
+        log.info("  (복구 컨트롤러 흉내) %s 펜싱 기록 %s", job_id, data["recovery_phase"])
+    ann = obj["metadata"].get("annotations") or {}
+    if obj["metadata"]["name"] not in HOLD_ACK and ann.get(K.ANN_STOP_RECORDED) != "true":
+        ack_stop(kube, obj["metadata"]["name"])
+
+
+def ack_stop(kube, name):
+    """복구 컨트롤러 흉내: 펜싱 기록에 OLD_RUN_STOPPED를 남겼다는 확인 -> relocator가 재제출해도 됨"""
+    kube.co.patch_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name,
+                                           {"metadata": {"annotations": {K.ANN_STOP_RECORDED: "true"}}},
+                                           _request_timeout=T)
+    log.info("  (복구 컨트롤러 흉내) RR %s에 %s=true", name, K.ANN_STOP_RECORDED)
+
+
+def cancel_rr(kube, name, reason="superseded"):
+    """복구 컨트롤러 흉내: 권한을 잃었거나 이미 끝난 복구 -> 취소 주석"""
+    kube.co.patch_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name,
+                                           {"metadata": {"annotations": {K.ANN_CANCEL: reason}}},
+                                           _request_timeout=T)
+    log.info("  (복구 컨트롤러 흉내) RR %s에 %s=%s", name, K.ANN_CANCEL, reason)
+
+
 def rr(kube, name):
     obj = kube.co.get_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name, _request_timeout=T)
-    if (obj.get('status') or {}).get('phase') not in FINAL:
-        job_name = obj['spec']['jobRef'].split('/')[-1]
-        job_id = job_name[4:].rsplit('-g', 1)[0]
-        inputs = controller_inputs(kube, job_id, obj['spec']['requestId'])
-        if inputs:
-            kube.co.patch_namespaced_custom_object(K.RR_GROUP, K.RR_VERSION, NS, K.RR_PLURAL, name,
-                {'metadata': {'resourceVersion': obj['metadata']['resourceVersion'],
-                              'annotations': {INPUT_ANNOTATION: inputs}}}, _request_timeout=T)
+    project(kube, obj)
     return obj
 
 
@@ -409,3 +451,14 @@ def under_load(kube, wait):
     return {"new": new, "placed": placed_on(kube, new), "took": took, "recovery_quota_at": rq, "wait_c_quota_at": cq,
             "wait_c_cluster": placed_on(kube, "job-wait-c-g0001"), "stolen": stolen,
             "rr": stage_summary(rr_status(kube, "rr-load"))}
+
+
+def wait_until_status(kube, name, key, timeout):
+    """RR status에 key가 생길 때까지. 반환: status 또는 None"""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        st = rr_status(kube, name)
+        if st.get(key):
+            return st
+        time.sleep(3)
+    return None
