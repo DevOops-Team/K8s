@@ -101,22 +101,6 @@ class SelfFenceTests(unittest.TestCase):
         e['checks']=[dict(cluster='eks-a',kind='self_fence',detail='all exited'),dict(cluster='eks-b',kind='ec2',detail='terminated')]
         self.assertTrue(RelocationStatusInput(self.store,'training',lambda:NOW,allow_self_fence=True)(EVENT,r))
 
-    def test_generated_annotation_is_accepted_by_real_relocator(self):
-        import sys
-        from pathlib import Path
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        root = Path(__file__).resolve().parents[2]
-        sys.path.extend([str(root / 'scheduling/common'), str(root / 'scheduling/relocator')])
-        import relocator
-        r = rr()
-        value = self.input(EVENT, r)
-        x = SimpleNamespace(original=lambda:r['spec']['jobSet'], old_gen=lambda:1,
-                            spec=r['spec'], ann=lambda key:value)
-        with patch.object(relocator, 'SELF_FENCE_EVIDENCE', True):
-            ok, detail = relocator.self_fence_stop_evidence(x, relocator.Unreachable('VPN'), 'eks-a')
-        self.assertTrue(ok, detail)
-
     def test_validated_annotation_is_stable_after_late_duplicate(self):
         r=rr(); value=self.input(EVENT,r)
         r['metadata']['annotations']={ANNOTATION:value}

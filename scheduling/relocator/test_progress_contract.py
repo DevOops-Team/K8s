@@ -72,6 +72,36 @@ class ControllerAcceptsRelocatorStatus(unittest.TestCase):
         # 두 번째 기록도 첫 번째와 똑같은 종료 증거에 묶인다 (증거를 바꾸지 않음)
         self.assertEqual(rec.calls[1][2], stop_evidence)
 
+    def test_controller_generated_self_fence_annotation_is_accepted(self):
+        import json
+        from types import SimpleNamespace
+        from integrations.self_fence import SelfFenceInput
+        from test_self_fence import rr, ORIG, WHY
+        req = rr()
+        req['spec']['jobSet']['spec']['failurePolicy']['maxRestarts'] = 0
+        event = dict(job_id='j1', generation=1, event_id='evt-1', cluster='eks-a')
+        stamp = req['metadata']['creationTimestamp']
+        now = relocator.datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+        store = mock.Mock()
+        store.fencing_record.return_value = dict(generation=2, recovery_from_gen=1, recovery_to_gen=2,
+            recovery_id='evt-1', recovery_phase='GENERATION_ADVANCED', self_fence_gen=1,
+            self_fence_cluster='eks-a', self_fence_world_size=2, self_fence_ranks={0,1},
+            self_fence_pods={'0:uid-a','1:uid-b'}, self_fence_at=stamp)
+        value = SelfFenceInput(store, lambda:now)(event,req)
+        self.assertIsNotNone(value)
+        x = SimpleNamespace(original=lambda:ORIG, old_gen=lambda:1, spec=req['spec'], ann=lambda key:value)
+        with mock.patch.object(relocator,'SELF_FENCE_EVIDENCE',True):
+            ok, detail=relocator.self_fence_stop_evidence(x,WHY,'eks-a')
+        self.assertTrue(ok,detail)
+        req['metadata']['annotations'][relocator.K.ANN_SELF_FENCE]=value
+        req['status']={'recoveryProgress':dict(schemaVersion=1,requestId='evt-1',jobId='j1',
+            fromGeneration=1,toGeneration=2,phase='OLD_RUN_STOPPED',oldRunStopEvidence=dict(
+            generation=1,namespace='training',jobset_name='job-j1-g0001',clusters=['eks-a'],
+            kind='self_fence',checks=[dict(cluster='eks-a',kind='self_fence',detail=detail)],confirmed_at=stamp))}
+        rec=Recorder()
+        self.assertTrue(RelocationStatusInput(rec,'training',lambda:now,allow_self_fence=True)(event,req))
+        self.assertEqual(rec.calls[0][0],'OLD_RUN_STOPPED')
+
     def test_ec2_evidence_is_accepted(self):
         co = FakeCO()
         x = ctx(co, sourceCluster="worker1", isolatedAt="t")
