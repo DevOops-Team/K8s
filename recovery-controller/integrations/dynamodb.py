@@ -81,6 +81,8 @@ class Store:
         item = self.table.get_item(Key={'pk':'job#'+event['job_id']}, ConsistentRead=True).get('Item')
         if not item:
             raise RecoveryBlocked('registered recovery job metadata missing')
+        if item.get('registration_conflict'):
+            raise RecoveryBlocked('conflicting job.submitted original registration')
         if not recovering and (item.get('cluster') != event['cluster'] or (event.get('node') is not None and event['node'] not in item.get('active_nodes',[]))):
             return None
         if not 1 <= int(item.get('gpu_count',0)) <= 4:
@@ -306,6 +308,61 @@ class Store:
                 ExpressionAttributeValues={':rid':event['event_id'], ':generation':generation, ':target':target, ':phase':'COMPLETED', ':uid':record['evidence_jobset_uid'],
                                            ':now':datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')})
         # owner and approved checkpoint fields remain owned by init/sidecar.
+
+    @staticmethod
+    def _conditional_failed(exc):
+        return getattr(exc, 'response', {}).get('Error', {}).get('Code') == 'ConditionalCheckFailedException'
+
+    def register_original(self, job_id, jobset_uri, jobset_sha256, gpu_count, event_id):
+        """job.submitted: first original wins; a different original latches a conflict (HOLD)."""
+        values = {':kind': 'job', ':uri': jobset_uri, ':sha': jobset_sha256, ':gpus': gpu_count,
+                  ':event': event_id, ':now': int(self.clock())}
+        try:
+            self.table.update_item(Key={'pk': 'job#' + job_id},
+                UpdateExpression=('SET #kind = :kind, jobset_uri = :uri, jobset_sha256 = :sha, '
+                                  'gpu_count = :gpus, registration_event_id = if_not_exists('
+                                  'registration_event_id, :event), registered_at = if_not_exists(registered_at, :now)'),
+                ConditionExpression=('attribute_not_exists(jobset_sha256) OR (jobset_sha256 = :sha '
+                                     'AND jobset_uri = :uri AND gpu_count = :gpus)'),
+                ExpressionAttributeNames={'#kind': 'kind'}, ExpressionAttributeValues=values)
+            return True
+        except Exception as exc:
+            if not self._conditional_failed(exc):
+                raise
+        # Never replace the original recovery would restore; stop automatic recovery instead.
+        self.table.update_item(Key={'pk': 'job#' + job_id},
+            UpdateExpression='SET registration_conflict = :event',
+            ExpressionAttributeValues={':event': event_id})
+        return False
+
+    def register_placement(self, job_id, generation, cluster, active_nodes, jobset_uid,
+                           observed_at, event_id, recovery_id=None):
+        """job.placement of a non-recovery generation: where faults are matched (context())."""
+        if recovery_id:
+            raise RecoveryBlocked('recovery placements are evidence, not registration')
+        values = {':kind': 'job', ':gen': generation, ':cluster': cluster, ':nodes': active_nodes,
+                  ':uid': jobset_uid, ':observed': observed_at, ':event': event_id}
+        sets = ('SET #kind = :kind, placement_generation = :gen, #cluster = :cluster, '
+                'active_nodes = :nodes, jobset_uid = :uid, placement_observed_at = :observed, '
+                'placement_event_id = :event')
+        names = {'#kind': 'kind', '#cluster': 'cluster'}
+        attempts = (
+            # New generation (first run or user restart): drop the previous run's recovery evidence.
+            (sets + ' REMOVE recovery_id, progress, placement_evidence',
+             'attribute_not_exists(placement_generation) OR placement_generation < :gen'),
+            # Same run moved nodes/cluster: only newer observations of the same manager JobSet.
+            (sets, 'placement_generation = :gen AND jobset_uid = :uid AND attribute_not_exists(recovery_id) '
+                   'AND (attribute_not_exists(placement_observed_at) OR placement_observed_at <= :observed)'))
+        for update, condition in attempts:
+            try:
+                self.table.update_item(Key={'pk': 'job#' + job_id}, UpdateExpression=update,
+                    ConditionExpression=condition, ExpressionAttributeNames=names,
+                    ExpressionAttributeValues=values)
+                return True
+            except Exception as exc:
+                if not self._conditional_failed(exc):
+                    raise
+        return False  # Older generation, older observation, or a recovery-owned placement.
 
     def records(self):
         # Foundation-scale scan; replace with a pending/outbox GSI for larger workloads.

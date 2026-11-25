@@ -36,9 +36,58 @@ class Workflow:
         self.evidence_policy, self.clock = policy_config(evidence_policy), clock
 
     def refresh_relocation_inputs(self, record):
+        """Project RR status into fencing. Returns a HOLD record when this recovery lost authority."""
         refresh = getattr(self.executor, 'refresh', None)
-        if refresh and record.get('relocation_request'):
+        if not (refresh and record.get('relocation_request')):
+            return None
+        try:
             refresh(record['event'], record['relocation_request'])
+        except RecoveryBlocked:
+            if not self.authority_lost(record):
+                raise
+            return self.cancel_relocation(record)
+        return None
+
+    def authority_lost(self, record):
+        event = record['event']
+        fence = self.store.fencing_record(event['job_id'])
+        return (fence.get('recovery_id') != event['event_id']
+                or fence.get('generation') != event['generation'] + 1)
+
+    def cancel_relocation(self, record, reason='recovery authority changed'):
+        """ADR-50: HOLD, then ask relocator to withdraw the new-generation JobSet it made."""
+        held = self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason)
+        return self.request_cancel(held, reason)
+
+    def request_cancel(self, record, reason):
+        """Persist the cancel intent before the API call; a failed PATCH is retried by retry_cancel."""
+        if not record.get('relocation_request') or record.get('relocation_cancelled') is True:
+            return record
+        record = self.store.save(record['event']['event_id'], relocation_cancelled=False,
+                                 relocation_cancel_reason=reason)
+        return self.retry_cancel(record, now=int(self.clock()))
+
+    def retry_cancel(self, record, now):
+        """Retry a pending cancel annotation with backoff. Never releases HOLD."""
+        if record.get('relocation_cancelled') is not False or now < int(record.get('relocation_cancel_next_at', 0)):
+            return record
+        rid = record['event']['event_id']
+        cancel = getattr(self.executor, 'cancel', None)
+        if cancel is None:
+            return record
+        try:
+            cancel(record['event'], record['relocation_request'], record.get('relocation_cancel_reason')
+                   or 'recovery authority changed')
+        except Exception as exc:
+            failures = int(record.get('relocation_cancel_errors', 0)) + 1
+            delay = min(300, 5 * 2 ** min(failures - 1, 6))
+            print(json.dumps(dict(component='recovery', event_id=rid, cancel='retry',
+                                  error_type=type(exc).__name__)), flush=True)
+            return self.store.save(rid, relocation_cancel_errors=failures,
+                                   relocation_cancel_error=type(exc).__name__,
+                                   relocation_cancel_next_at=now + delay)
+        return self.store.save(rid, relocation_cancelled=True, relocation_cancel_errors=0,
+                               relocation_cancel_error=None, relocation_cancel_next_at=0)
 
     def accept(self, event):
         validate_event(event)
@@ -71,7 +120,8 @@ class Workflow:
         action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
         if action not in RELOCATION_ACTIONS:
             return None
-        self.refresh_relocation_inputs(record)
+        if self.refresh_relocation_inputs(record) is not None:
+            return None
         fence = self.store.fencing_record(event['job_id'])
         if (not all(whole(fence.get(key)) for key in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
                 or fence.get('recovery_id') != event['event_id']
@@ -179,7 +229,9 @@ class Workflow:
         if not e.get('job_id') or e.get('generation') is None:
             return self.store.save(rid, state='HOLD', action=action, reason='job identity unresolved')
         # Inside Runner's retry/deadline budget, including held stop-progress polling.
-        self.refresh_relocation_inputs(record)
+        lost = self.refresh_relocation_inputs(record)
+        if lost is not None:
+            return lost
         try:
             job = self.store.claim(e)
         except RetryLimitReached as exc:
@@ -205,7 +257,7 @@ class Workflow:
             raise ValueError('unknown recovery state')
         fencing = self.store.fencing_record(e['job_id'])
         if fencing.get('recovery_id') != rid or int(fencing.get('generation', 0)) != generation:
-            return self.store.save(rid, state='HOLD', action='HOLD', reason='recovery authority changed')
+            return self.cancel_relocation(record)
         phase = fencing.get('recovery_phase')
         if record.get('waiting_phase') != phase:
             record = self.store.save(rid, waiting_phase=phase, stage=phase)

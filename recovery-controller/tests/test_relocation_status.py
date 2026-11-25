@@ -59,7 +59,9 @@ class StatusTests(unittest.TestCase):
         self.input = RelocationStatusInput(self.store, 'training', lambda: NOW)
 
     def test_done_projects_both_barriers_and_replay_does_not_write(self):
-        transport = Mock(return_value=request())
+        rr = request()
+        rr['metadata']['annotations'] = {'devoops/recovery-stop-recorded': 'true'}
+        transport = Mock(return_value=rr)
         client = RelocationClient('training', transport, status_input=self.input)
         client.refresh(EVENT, 'rr')
         self.assertEqual(self.fence.item['new_jobset_uid'], 'manager-uid')
@@ -70,6 +72,37 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(len(self.fence.calls), 2)
         self.assertNotIn('owner', self.fence.item)
         self.assertEqual(self.fence.item['generation'], 2)
+
+    def test_stop_recorded_annotation_follows_the_fencing_write(self):
+        rr = request()
+        rr['status'].update(phase='Stopping')
+        rr['status']['recoveryProgress']['phase'] = 'OLD_RUN_STOPPED'
+        del rr['status']['recoveryProgress']['newJobSet']
+        calls = []
+        def transport(method, path, document=None):
+            calls.append((method, copy.deepcopy(document)))
+            if method == 'PATCH':
+                # Barrier order: the fencing write must already be done.
+                self.assertEqual(self.fence.item['recovery_phase'], 'OLD_RUN_STOPPED')
+            return rr
+        RelocationClient('training', transport, status_input=self.input).refresh(EVENT, 'rr')
+        self.assertEqual(calls[-1], ('PATCH', {'metadata': {'resourceVersion': '7',
+            'annotations': {'devoops/recovery-stop-recorded': 'true'}}}))
+
+    def test_no_progress_means_no_stop_acknowledgement(self):
+        rr = request()
+        del rr['status']['recoveryProgress']
+        transport = Mock(return_value=rr)
+        RelocationClient('training', transport, status_input=self.input).refresh(EVENT, 'rr')
+        self.assertEqual([x.args[0] for x in transport.call_args_list], ['GET'])
+
+    def test_failed_fencing_write_is_not_acknowledged(self):
+        rr = request()
+        rr['status']['recoveryProgress']['fromGeneration'] = 9
+        transport = Mock(return_value=rr)
+        with self.assertRaises(RecoveryBlocked):
+            RelocationClient('training', transport, status_input=self.input).refresh(EVENT, 'rr')
+        self.assertEqual([x.args[0] for x in transport.call_args_list], ['GET'])
 
     def test_old_status_is_not_inferred_as_stop_proof(self):
         rr = request()

@@ -225,7 +225,7 @@ Pod Running, owner 선점, RR Done, heartbeat만으로 COMPLETED로 처리하지
 
 ### Kafka job.init_failed 입력
 
-복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`와 안전망용 `job.failed`를 inbox에 저장한다. 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
+복구 컨트롤러는 `job.lifecycle`을 함께 구독하며 `job.init_failed`와 안전망용 `job.failed`를 inbox에 저장한다. `job.submitted`(Backend, 원본 해시)·`job.placement`(감시기, 실제 배치)는 recovery_table `job#ID` 등록에 쓴다(`integrations/job_registration.py`, GPU-276). 다른 작업 사건은 오프셋만 커밋한다. Watchdog의 장애 수신 시각은 기존 장애 토픽으로만 갱신한다. 생산자는 발행과 S3 재전송에 동일한 envelope event_id를 사용하고, payload에 pod_uid·jobset_uid·exit_code·reason과 실제 시도한 checkpoint_gen·checkpoint_step을 넣는다. 코드 4·7은 현재 배치 신원과 펜싱을 다시 검사한다. 운영에서 생산자와 토픽 접근 권한을 함께 검증한다.
 
 ### Pod 상태 수집 어댑터
 
