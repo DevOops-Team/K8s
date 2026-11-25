@@ -48,10 +48,8 @@ def validate_config(config):
                 raise ValueError('invalid job_namespace')
 
     from integrations.fencing_input import input_config
-    from integrations.backend_metadata import metadata_config
-    metadata = metadata_config(config.get('backend_metadata'))
-    if metadata['enabled'] and source != 'kafka':
-        raise ValueError('backend metadata lookup requires Kafka runtime')
+    if 'backend_metadata' in config:
+        raise ValueError('backend_metadata has been removed; remove the obsolete setting')
     progress_input = input_config(config.get('fencing_progress_input'))
     if progress_input['enabled'] and source != 'kafka':
         raise ValueError('fencing progress input requires DynamoDB/Kafka runtime')

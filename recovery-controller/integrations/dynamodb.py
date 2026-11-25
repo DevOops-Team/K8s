@@ -34,8 +34,7 @@ class RetryLimitReached(RecoveryBlocked):
 
 
 class Store:
-    def __init__(self, table, fencing_table, max_recovery_attempts=3, stop_timeout_seconds=900, clock=time.time,
-                 metadata_client=None):
+    def __init__(self, table, fencing_table, max_recovery_attempts=3, stop_timeout_seconds=900, clock=time.time):
         if type(max_recovery_attempts) is not int or max_recovery_attempts < 1:
             raise ValueError("max_recovery_attempts must be a positive integer")
         if type(stop_timeout_seconds) is not int or stop_timeout_seconds < 1:
@@ -44,45 +43,6 @@ class Store:
         self.max_recovery_attempts = max_recovery_attempts
         self.table = table  # Our durable event inbox and placement/template metadata.
         self.fencing = fencing_table  # Hyunsu's table: PK job_id, sole generation/owner authority.
-        self.metadata_client = metadata_client
-
-    def ensure_job(self, event):
-        """Only actionable faults invoke this; create once, never overwrite recovery state."""
-        if self.placement(event['job_id']) or self.metadata_client is None:
-            return True
-        current = self.fencing_record(event['job_id'])
-        if not current:
-            raise RecoveryBlocked('fencing job record missing before metadata registration')
-        if current.get('generation') != event['generation']:
-            return False
-        if current.get('owner') is not None and current['owner'] != event['cluster']:
-            raise RecoveryBlocked('source cluster does not own metadata generation')
-        if current.get('recovery_id'):
-            raise RecoveryBlocked('cannot bootstrap metadata while recovery owns job')
-        item = self.metadata_client.fetch(event)
-        # Fencing and recovery table are not one transaction. Claim rechecks authority
-        # with a generation CAS; re-read here also avoids registering a known stale run.
-        latest = self.fencing_record(event['job_id'])
-        if latest.get('generation') != event['generation']:
-            return False
-        if latest.get('recovery_id') or latest.get('owner') not in (None, event['cluster']):
-            raise RecoveryBlocked('fencing authority changed during metadata lookup')
-        if (latest.get('new_jobset_uid') and latest['new_jobset_uid'] != item['jobset_uid']):
-            raise RecoveryBlocked('backend manager JobSet UID disagrees with fencing')
-        try:
-            self.table.put_item(Item=dict(item, pk='job#'+event['job_id'], kind='job',
-                registration_source='backend_api', registration_event_id=event['event_id'],
-                registered_at=int(self.clock())), ConditionExpression='attribute_not_exists(pk)')
-        except Exception as exc:
-            if getattr(exc, 'response', {}).get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
-                raise
-            existing = self.placement(event['job_id'])
-            if not existing:
-                raise RecoveryBlocked('job metadata registration conflict without readable item') from exc
-            if any(existing.get(k) != item[k] for k in ('jobset_uri', 'jobset_sha256', 'gpu_count')):
-                raise RecoveryBlocked('job metadata registration conflicts with existing original') from exc
-        return True
-
     def accept(self, event, digest):
         key = 'event#' + event['event_id']
         try:
