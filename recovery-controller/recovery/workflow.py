@@ -23,7 +23,7 @@ def validate_event(event):
         raise ValueError('job_id must fit the JobSet DNS name')
     if type(event['generation']) is not int or event['generation'] < 1:
         raise ValueError('generation must be a positive integer')
-    if decision['suggested_action'] in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY'):
+    if decision['suggested_action'] == 'QUARANTINE_AND_RETRY':
         if not isinstance(event.get('node'), str) or not event['node'].strip():
             raise ValueError('node is required for a node-scoped recovery')
     return event
