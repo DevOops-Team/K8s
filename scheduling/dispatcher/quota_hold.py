@@ -14,7 +14,7 @@ import keys as K
 import kube
 
 log = logging.getLogger("dispatcher.quota_hold")
-ENABLED = os.getenv("QUOTA_HOLD_ENABLED", "false").lower() in ("1", "true", "yes")
+ENABLED = os.getenv("QUOTA_HOLD_ENABLED", "true").lower() in ("1", "true", "yes")
 LIGHT_N = max(1, int(os.getenv("QUOTA_HOLD_BYPASS_LIGHT", "3")))
 RECOVERY_N = max(1, int(os.getenv("QUOTA_HOLD_BYPASS_RECOVERY", "3")))
 
