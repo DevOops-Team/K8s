@@ -9,6 +9,7 @@
 | label devoops/generation (JobSet · Pod 템플릿)    | 1 -> 2 |
 | annotation devoops/recovery-id                    | (없음) -> recovery-... |
 | trainer args --master-addr                        | job-{id}-g0001-workers-0-0.job-{id}-g0001 -> ...g0002 |
+| command·args·env 값 안의 Pod 주소 (getent 대기 줄 등) | job-{id}-g0001-{rj}-{i}-{j}.job-{id}-g0001 -> ...g0002 |
 | env GENERATION (모든 컨테이너)                    | 1 -> 2 |
 | 배치 힌트 어노테이션                              | recovery-source-cluster(원래 우선) · exclude-clusters |
 | Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
@@ -53,8 +54,20 @@ def _pod_specs(js):
         yield tmpl
 
 
-def _master_addresses(values, old_names, name):
-    """Rewrite only master-address values, preserving argv and shell formatting."""
+def _pod_addresses(job_id):
+    """옛 세대 Pod 주소 job-{id}-g{n}-{replicatedJob}-{i}-{j}.job-{id}-g{n} (뒤의 .ns.svc… 는 그대로 둔다).
+    대기 줄(getent hosts …)처럼 --master-addr 밖에 박힌 주소도 이 형태면 새 세대로 바꾼다.
+    로그 경로처럼 주소 형태가 아닌 옛 이름은 건드리지 않는다."""
+    jid = re.escape(job_id)
+    return re.compile(rf"(?<![\w.-])job-{jid}-g(\d{{4}})-([a-z0-9-]+-\d+-\d+)\.job-{jid}-g\1(?![\w-])")
+
+
+def _new_addresses(addresses, name, value):
+    return addresses.sub(lambda m: f"{name}-{m[2]}.{name}", value)
+
+
+def _master_addresses(values, old_names, addresses, name):
+    """--master-addr 값과 Pod 주소 형태만 새 이름으로 바꾸고, argv·셸 서식은 그대로 둔다."""
     option = re.compile(r"(?<![\w-])(--master-addr(?:=|\s+))([^\s;]+)")
     out = []
     previous = None
@@ -63,7 +76,7 @@ def _master_addresses(values, old_names, name):
             updated = old_names.sub(name, value)
         else:
             updated = option.sub(lambda m: m[1] + old_names.sub(name, m[2]), value)
-        out.append(updated)
+        out.append(_new_addresses(addresses, name, updated))
         previous = value
     return out
 
@@ -100,6 +113,7 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
         network["subdomain"] = name
 
     old_names = re.compile(rf"job-{re.escape(job_id)}-g\d{{4}}")
+    addresses = _pod_addresses(job_id)
     for tmpl in _pod_specs(new):
         tmeta = tmpl.setdefault("metadata", {})
         tmeta.setdefault("labels", {})[K.LABEL_GENERATION] = str(gen)
@@ -111,9 +125,11 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:
                     e["value"] = str(gen)
+                elif isinstance(e.get("value"), str):
+                    e["value"] = _new_addresses(addresses, name, e["value"])
             command = ct.get("command") or []
             args = ct.get("args") or []
-            values = _master_addresses(command + args, old_names, name)
+            values = _master_addresses(command + args, old_names, addresses, name)
             if command:
                 ct["command"] = values[:len(command)]
             if args:
