@@ -119,10 +119,34 @@ kubectl get multikueuecluster eks-a -o jsonpath='{.metadata.annotations.devoops/
 - 라벨을 떼도 ack는 지우지 않는다. 다음 OFF에서는 새 T와 비교하니 옛 ack는 통과하지 못한다.
 - 리더가 바뀌는 순간 옛 리더가 돌던 루프는 이 ack로 덮이지 않는다. 그래서 ack 뒤에도 OFF 전 확인을 한 번 더 돌린다.
 
+## 쿼터 단계 예약 (GPU-251, 로컬 검증)
+
+`dispatcher/quota_hold.py`는 워커 지명·찜보다 먼저 관리 Workload를 확인한다.
+Light 2장 잡 또는 복구 몫이 부족한 큰 복구 잡이 기다리는 동안, 늦게 온 학습 잡이 서로 다른 Workload로
+3번 먼저 쿼터를 받으면 경쟁 대기 잡의 `spec.active=false`와 `devoops/held-for=<namespace/name>`·`held-at`을 기록한다.
+Light는 같은 ClusterQueue의 뒤 Light 잡만, 복구는 같은 cohort의 Heavy·Light 대기 잡을 보류한다.
+한 번에 하나를 보호하며 복구가 우선이다. 실행 중인 잡은 계속 실행하므로, 필요한 쿼터가 모이면 Kueue가 보호한 잡을 입장시킨다.
+
+- 이미 쿼터를 받았거나 admission·지명이 있는 잡, 복구 잡, 수동 디스패치 잡, 원래 비활성이던 잡은 보류하지 않는다.
+- 모든 변경은 읽은 `resourceVersion`으로 patch한다. Kueue가 먼저 쿼터를 줬으면 409로 건너뛰고 다음 루프에서 재평가한다.
+- 쿼터 확보·보호 대상 삭제/완료/비활성·조건 해소·기능 꺼짐 때 우리 보류를 해제한다. `held-for-uid`로 이름 재사용을 구별한다.
+- `quota-bypasses`에 대기 시작 시각과 관측한 UID를 N개까지 남겨 재시작·리더 교체 후 이어간다. 같은 잡을 여러 번 세지 않는다.
+- 단일 GPU flavor, 같은 평면 cohort의 현행 큐 구성을 대상으로 한다. CQ/LQ 설정은 수정하지 않는다.
+- 폴링 사이에 제출·완료되어 사라진 잡은 집계하지 못할 수 있다. 새 잡이 다음 루프 전에 쿼터를 받는 틈도 있어 N은 실시간 하드 제한이 아니다.
+
+현재는 ADR-41 제안의 로컬 구현으로 **기본 꺼짐**이다. 2026-11-22 VirtualBox Ubuntu VM의 kind/KWOK에서
+Light 2장·복구 4장 꺼짐/켜짐 비교, 리더 재시작·보류 해제·워커 입장을 모두 확인했다.
+운영 활성화는 Gitops 담당자가 `QUOTA_HOLD_ENABLED=true`를 반영하는 별도 배포 단계다.
+Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patch`, ClusterQueue·LocalQueue `get/list` 권한 확인.
+추가 파드·Secret·CRD·이미지 실행 명령 변경은 없다. 운영 매니페스트·CI workflow는 이 작업에서 변경하지 않는다.
+잡 투입기는 보류된 JobSet을 계속 대기 중으로 취급하므로 실험 종료를 앞당기지 않는다.
+
 ## 조정 값 (환경 변수)
 
 | 변수 | 기본 | 뜻 |
 |---|---|---|
+| `QUOTA_HOLD_ENABLED` | false | GPU-251 / ADR-41 제안의 로컬 검증용 쿼터 예약. 켜면 뒤 잡이 3번 먼저 쿼터를 받은 Light 2장 잡·학습 몫을 빌려야 하는 복구 잡을 보호한다. 끄면 디스패처가 남긴 보류부터 해제 |
+| `QUOTA_HOLD_BYPASS_LIGHT` / `QUOTA_HOLD_BYPASS_RECOVERY` | 3 / 3 | 새치기한 서로 다른 Workload 수. 폴링 횟수가 아니며, 복구 기준도 3회로 통일(2026-11-22 사용자 지시) |
 | `RENOMINATE_SECONDS` | 60 | 지명했는데 이 시간 안에 워커 입장 못 하면 다른 곳으로 |
 | `RELOCATION_HOLD_SECONDS` | 300 | 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지키는 최대 시간 (격리 시각, 옛 실행 종료 뒤엔 그 시각부터) |
 | `LEASE_SECONDS` / `RENEW_SECONDS` | 15 / 5 | 리더가 이만큼 갱신 안 하면 남이 가져감 / 갱신 주기 |

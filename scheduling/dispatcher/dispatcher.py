@@ -39,6 +39,7 @@ import keys as K
 import kube
 import leader
 import recovery_render as R
+import quota_hold
 from placement import Cluster, choose, reserve, eligible
 
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "5"))
@@ -321,12 +322,16 @@ def ack_fenced(mgr, clusters, started):
 
 def reconcile(mgr, workers):
     """한 바퀴. 끝까지 돌면 이번 루프가 본 클러스터 목록을 돌려준다 (fenced-ack용)"""
+    all_wls = kube.list_workloads(mgr)
+    try:
+        quota_hold.reconcile(mgr, all_wls)
+    except Exception:  # 추가 큐 권한·일시적인 조회 실패가 기존 워커 지명까지 막지 않게
+        log.exception("쿼터 예약 실패, 다음 루프에서 재시도")
     clusters = cluster_state(mgr, workers)
     if clusters and not any(c.active for c in clusters):
         log.warning("워커 %d개 전부 끊김 -> 지명 중단 (네트워크 쪽 장애일 수 있음)", len(clusters))
         return clusters
     by_name = {c.name: c for c in clusters}
-    all_wls = kube.list_workloads(mgr)
     try:
         record_placements(mgr, all_wls, clusters)
     except Exception:  # noqa: BLE001  배치 기록 문제로 지명을 멈추지 않는다
@@ -604,6 +609,8 @@ def main():
     elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)
     log.info("시작: interval=%ss renominate=%ss", INTERVAL, RENOMINATE_SECONDS)
+    log.info("쿼터 예약: enabled=%s bypass_light=%d bypass_recovery=%d", quota_hold.ENABLED,
+             quota_hold.LIGHT_N, quota_hold.RECOVERY_N)
     while True:
         if not elector.is_leader():
             time.sleep(1)
