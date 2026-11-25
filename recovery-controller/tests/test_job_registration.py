@@ -99,6 +99,15 @@ class StoreTests(unittest.TestCase):
         self.table.update_item.side_effect = [ConditionalFailure(), ConditionalFailure()]
         self.assertFalse(self.store.register_placement(**actual_placement(placement())))
 
+    def test_deferred_placement_store_and_conditional_clear(self):
+        self.store.defer_recovery_placement('abc', dict(event_id='p1', observed_at=1000), 1010)
+        kwargs = self.table.update_item.call_args.kwargs
+        self.assertEqual(kwargs['ExpressionAttributeValues'][':p']['received_at'], 1010)
+        self.assertIn('attribute_exists(pk)', kwargs['ConditionExpression'])
+        self.table.update_item.side_effect = ConditionalFailure()      # a newer one replaced it
+        self.store.clear_recovery_placement('abc', 'p1')
+        self.assertIn('message.event_id = :e', self.table.update_item.call_args.kwargs['ConditionExpression'])
+
     def test_infrastructure_errors_propagate(self):
         self.table.update_item.side_effect = TimeoutError()
         with self.assertRaises(TimeoutError):
@@ -134,10 +143,12 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(JobRegistry(self.store, self.writer).ingest(message), 'ignored')
         self.writer.write.assert_not_called()
         self.store.register_placement.assert_not_called()
-        trusted = JobRegistry(self.store, self.writer, dict(placement_producers=['scheduling', 'job-watcher']))
+        trusted = JobRegistry(self.store, self.writer, dict(placement_producers=['scheduling', 'job-watcher']),
+                              clock=lambda: 1010)
         self.assertEqual(trusted.ingest(message), 'evidence')
         body = self.writer.write.call_args.args[0]
-        self.assertEqual(self.writer.write.call_args.kwargs, {'authenticated_producer': 'job-watcher'})
+        self.assertEqual(self.writer.write.call_args.kwargs, {'authenticated_producer': 'job-watcher',
+                                                              'received_at': 1010})
         self.assertEqual((body['kind'], body['recovery_id'], body['generation'], body['jobset_uid']),
                          ('placement', 'r1', 2, 'uid-1'))
         self.assertNotIn('producer', body)
@@ -150,12 +161,13 @@ class RegistryTests(unittest.TestCase):
         store.write_evidence.return_value = True
         policy = dict(placement_producers=['job-watcher'])
         writer = EvidenceWriter(store, dict(policy), clock=lambda: 1010)
-        self.assertEqual(JobRegistry(store, writer, policy).ingest(placement(2, recovery_id='r1')), 'evidence')
+        registry = JobRegistry(store, writer, policy, clock=lambda: 1010)
+        self.assertEqual(registry.ingest(placement(2, recovery_id='r1')), 'evidence')
         written = store.write_evidence.call_args.args[0]
         self.assertEqual((written['producer'], written['received_at']), ('job-watcher', 1010))
         # A recovery placement for another JobSet is not evidence.
         bad = placement(2, recovery_id='r1', jobset_uid='other')
-        self.assertEqual(JobRegistry(store, writer, policy).ingest(bad), 'rejected')
+        self.assertEqual(registry.ingest(bad), 'rejected')
 
 
 class IntakeTests(unittest.TestCase):
@@ -207,3 +219,88 @@ class ConsumerPathTests(unittest.TestCase):
     def test_valid_placement_reaches_dynamodb(self):
         table = self.run_message(placement())
         self.assertEqual(table.update_item.call_args.kwargs['Key'], {'pk': 'job#abc'})
+
+
+class DeferredPlacementTests(unittest.TestCase):
+    """E2E blocker: job.placement is sent once and may arrive before fencing has the new JobSet."""
+    def setUp(self):
+        from recovery.evidence import EvidenceWriter
+        self.fence = dict(generation=2, recovery_id='r1', recovery_phase='OLD_RUN_STOPPED', owner='eks-a')
+        self.job = dict(pk='job#abc', gpu_count=2, placement_generation=1, cluster='eks-a')
+        self.store = Mock()
+        self.store.fencing_record.side_effect = lambda _: dict(self.fence)
+        self.store.placement.side_effect = lambda _: dict(self.job)
+        self.store.defer_recovery_placement.side_effect = (
+            lambda job_id, message, received: self.job.update(
+                pending_recovery_placement=dict(message=message, received_at=received)))
+        self.store.clear_recovery_placement.side_effect = (
+            lambda job_id, event_id: self.job.pop('pending_recovery_placement'))
+        self.store.write_evidence.return_value = True
+        self.now = [1010]
+        policy = dict(placement_producers=['job-watcher'])
+        writer = EvidenceWriter(self.store, dict(policy), clock=lambda: self.now[0])
+        self.registry = JobRegistry(self.store, writer, policy, clock=lambda: self.now[0])
+        self.record = dict(state='REQUESTED', event=dict(event_id='r1', job_id='abc'))
+
+    def test_early_placement_is_kept_then_projected_with_its_receipt_time(self):
+        self.assertEqual(self.registry.ingest(placement(2, recovery_id='r1')), 'deferred')
+        self.store.write_evidence.assert_not_called()
+        self.assertFalse(self.registry.reconcile(self.record))       # fencing still not ready
+        self.fence.update(recovery_phase='NEW_RUN_SUBMITTED', new_jobset_uid='uid-1')
+        self.now[0] = 1900                                            # long after observed_at 1000
+        self.assertTrue(self.registry.reconcile(self.record))
+        body = self.store.write_evidence.call_args.args[0]
+        self.assertEqual((body['received_at'], body['observed_at'], body['producer']), (1010, 1000, 'job-watcher'))
+        self.assertNotIn('pending_recovery_placement', self.job)
+
+    def test_deferred_placement_for_another_jobset_is_dropped(self):
+        self.registry.ingest(placement(2, recovery_id='r1'))
+        self.fence.update(recovery_phase='NEW_RUN_SUBMITTED', new_jobset_uid='someone-else')
+        self.assertTrue(self.registry.reconcile(self.record))
+        self.store.write_evidence.assert_not_called()
+        self.assertNotIn('pending_recovery_placement', self.job)
+
+    def test_other_recovery_or_finished_record_does_not_touch_it(self):
+        self.registry.ingest(placement(2, recovery_id='r1'))
+        self.assertFalse(self.registry.reconcile(dict(self.record, event=dict(event_id='r2', job_id='abc'))))
+        self.assertFalse(self.registry.reconcile(dict(self.record, state='RECOVERED')))
+        self.assertIn('pending_recovery_placement', self.job)
+
+    def test_placement_for_a_lost_recovery_is_rejected_not_deferred(self):
+        self.fence.update(recovery_id='other')
+        self.assertEqual(self.registry.ingest(placement(2, recovery_id='r1')), 'rejected')
+        self.store.defer_recovery_placement.assert_not_called()
+
+    def test_decimal_values_from_dynamodb_are_normalised(self):
+        from decimal import Decimal
+        self.registry.ingest(placement(2, recovery_id='r1'))
+        pending = self.job['pending_recovery_placement']
+        pending['received_at'] = Decimal(pending['received_at'])
+        pending['message'] = dict(pending['message'], generation=Decimal(2), observed_at=Decimal(1000))
+        self.fence.update(recovery_phase='NEW_RUN_SUBMITTED', new_jobset_uid='uid-1')
+        self.assertTrue(self.registry.reconcile(self.record))
+        self.store.write_evidence.assert_called_once()
+
+
+class PlacementAgeTests(unittest.TestCase):
+    """E2E blocker: placement is never refreshed, so its age is judged at receipt only."""
+    def test_old_placement_received_promptly_still_completes(self):
+        from recovery.evidence import provenance_error, DEFAULT_POLICY
+        meta = dict(schema_version=1, producer='job-watcher', event_id='p', observed_at=1000, received_at=1010)
+        policy = dict(DEFAULT_POLICY, placement_producers=['job-watcher'])
+        self.assertIsNone(provenance_error(meta, 'placement', 1000 + 3600, policy))
+        self.assertEqual(provenance_error(dict(meta, received_at=1301), 'placement', 1400, policy),
+                         'fresh evidence timestamps required')            # received 301 s late
+        self.assertEqual(provenance_error(dict(meta, observed_at=2000, received_at=2000), 'placement', 1000, policy),
+                         'fresh evidence timestamps required')            # from the future
+        # Progress evidence keeps the rolling max_age check (sidecar refreshes every 60 s).
+        progress = dict(meta, producer='training')
+        self.assertEqual(provenance_error(progress, 'progress', 1000 + 3600, DEFAULT_POLICY),
+                         'fresh evidence timestamps required')
+
+    def test_deferred_receipt_time_is_placement_only_and_not_in_future(self):
+        from recovery.evidence import EvidenceWriter
+        writer = EvidenceWriter(Mock(), dict(placement_producers=['job-watcher']), clock=lambda: 1000)
+        for kind, received in (('progress', 990), ('placement', 1001)):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'deferred receipt'):
+                writer.write(dict(kind=kind), authenticated_producer='job-watcher', received_at=received)

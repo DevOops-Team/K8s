@@ -12,12 +12,17 @@ recovery table `job#<id>` needs:
 A placement of a recovery-made generation (payload recovery_id) is not registration:
 it is placement evidence for COMPLETED and is only accepted when evidence_policy
 placement_producers lists "job-watcher" (the topic carries no producer authentication).
+job-watcher sends it once per cluster/node change, so (a) its age is judged at receipt
+(received_at - observed_at <= max_age), not at every assessment, and (b) one that arrives
+before fencing records relocator's NEW_RUN_SUBMITTED is kept in job#ID
+pending_recovery_placement and projected by the worker loop once fencing is ready.
 
 Malformed or conflicting messages never overwrite stored data. They are logged and
 committed so one bad message cannot stop the shared job.lifecycle consumer.
 """
 import json
 import re
+import time
 from urllib.parse import urlsplit
 
 from integrations.dynamodb import RecoveryBlocked
@@ -94,9 +99,9 @@ def actual_placement(envelope):
 
 
 class JobRegistry:
-    def __init__(self, store, evidence_writer=None, evidence_policy=None):
+    def __init__(self, store, evidence_writer=None, evidence_policy=None, clock=time.time):
         from recovery.evidence import policy_config
-        self.store, self.writer = store, evidence_writer
+        self.store, self.writer, self.clock = store, evidence_writer, clock
         self.policy = policy_config(evidence_policy)
 
     def ingest(self, envelope):
@@ -135,4 +140,47 @@ class JobRegistry:
                        event_id=fields['event_id'], generation=fields['generation'],
                        cluster=fields['cluster'], active_nodes=fields['active_nodes'],
                        observed_at=fields['observed_at'])
-        return 'evidence' if self.writer.write(message, authenticated_producer=WATCHER) else 'stale'
+        received = int(self.clock())
+        try:
+            return 'evidence' if self.project(message, received) else 'stale'
+        except ValueError:
+            if not self.fencing_not_ready(message):
+                raise
+        # job-watcher sends this only once: keep it until fencing has the new JobSet.
+        self.store.defer_recovery_placement(message['job_id'], message, received)
+        return 'deferred'
+
+    def project(self, message, received):
+        return self.writer.write(message, authenticated_producer=WATCHER, received_at=received)
+
+    def fencing_not_ready(self, message):
+        """Same recovery and generation, but relocator's NEW_RUN_SUBMITTED is not projected yet."""
+        fence = self.store.fencing_record(message['job_id'])
+        return (fence.get('recovery_id') == message['recovery_id']
+                and fence.get('generation') == message['generation']
+                and (fence.get('recovery_phase') in ('GENERATION_ADVANCED', 'OLD_RUN_STOPPED')
+                     or not fence.get('new_jobset_uid')))
+
+    def reconcile(self, record):
+        """Retry a deferred recovery placement for this active recovery (worker loop)."""
+        event = record.get('event', {})
+        if (self.writer is None or record.get('state') not in ('REQUESTED', 'SUBMITTED', 'RESUMING')
+                or not event.get('job_id')):
+            return False
+        from integrations.fencing_input import normalise
+        pending = self.store.placement(event['job_id']).get('pending_recovery_placement')
+        if not isinstance(pending, dict) or not isinstance(pending.get('message'), dict):
+            return False
+        pending = normalise(pending)
+        message = pending['message']
+        if message.get('recovery_id') != event.get('event_id'):
+            return False  # Belongs to another recovery; that recovery's loop handles it.
+        try:
+            self.project(message, pending['received_at'])
+        except (ValueError, RecoveryBlocked) as exc:
+            if self.fencing_not_ready(message):
+                return False
+            _log(event_id=message.get('event_id'), type='job.placement', result='rejected',
+                 error_type=type(exc).__name__, reason=str(exc)[:256])
+        self.store.clear_recovery_placement(event['job_id'], message['event_id'])
+        return True
