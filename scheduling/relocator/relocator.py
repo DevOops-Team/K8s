@@ -29,9 +29,11 @@ JobSet 생성도 같은 이름으로 다시 해도 결과가 같아서(409 -> �
 
 시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
   옛 실행 종료: spec.stopDeadline(없으면 요청 생성 + 15분) -> 넘으면 Held, 확인 어노테이션으로만 재개
-    워커 API에 접속이 안 되면 EC2 인스턴스 상태를 종료 증거로 쓴다 (ec2_evidence.py, 기본 off)
+    워커 API에 접속이 안 되면 컨트롤러가 확인한 사이드카 자기 펜싱 기록(devoops/self-fence-verified,
+    SELF_FENCE_EVIDENCE) 또는 EC2 인스턴스 상태(ec2_evidence.py)를 종료 증거로 쓴다 (둘 다 기본 off)
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -57,6 +59,8 @@ STOP_HOLD_SECONDS = int(os.getenv("STOP_HOLD_SECONDS", "900"))
 # 재제출 잡이 이 시간 안에 입장 못 하면 AdmitDelayed로 알리고 계속 기다린다 (JobSet은 그대로 둠).
 # 복구 성공·실패 판단은 복구 컨트롤러 몫 (복원·학습 진행 확인 30분 뒤 HOLD)
 ADMIT_TIMEOUT_SECONDS = int(os.getenv("ADMIT_TIMEOUT_SECONDS", "900"))
+# 워커 API에 닿지 않을 때 컨트롤러가 넘긴 자기 펜싱 확인(ADR-49)을 그 워커의 종료 증거로 쓸지 (GPU-255). 시험 통과 전 off
+SELF_FENCE_EVIDENCE = os.getenv("SELF_FENCE_EVIDENCE", "off").strip().lower() == "on"
 # EKS마다 따로 만든 relocator SA 토큰 kubeconfig (노드 권한을 MultiKueue와 나눔). 없으면 MultiKueue Secret
 OWN_SECRET = os.getenv("RELOCATOR_KUBECONFIG_SECRET", "{name}-relocator-kubeconfig")
 
@@ -263,9 +267,13 @@ def old_gone_on_worker(x: Ctx, ns, name):
     for src in places:
         gone, why = gone_on(x, src, ns, name)
         kind = "automatic"
-        if not gone and isinstance(why, Unreachable):   # 닿지 않는 워커는 그 워커의 EC2 증거로만 대신한다
-            gone, why = ec2_stop_evidence(x, why, src)
-            kind = "ec2"
+        if not gone and isinstance(why, Unreachable):   # 닿지 않는 워커는 자기 펜싱 확인 또는 EC2 증거로만 대신한다
+            sf_ok, sf_why = self_fence_stop_evidence(x, why, src)
+            if sf_ok:
+                gone, why, kind = True, sf_why, "self_fence"
+            else:
+                gone, why = ec2_stop_evidence(x, sf_why, src)
+                kind = "ec2"
         if not gone:
             return False, why
         x.stop_evidence.append({"cluster": src, "kind": kind, "detail": str(why)})
@@ -356,7 +364,7 @@ def stop_old(x: Ctx):
         evidence = {
             "generation": x.old_gen(), "namespace": ns, "jobset_name": name,
             "clusters": sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c}),
-            "kind": "manual" if confirmed else ("ec2" if any(c["kind"] == "ec2" for c in checks) else "automatic"),
+            "kind": "manual" if confirmed else stop_kind(checks),
             "checks": checks, "confirmed_at": stopped_at,
             "confirmed_by": "unknown (RR annotation)" if confirmed else "relocator",
             "recorded_by": os.getenv("POD_NAME") or f"{socket.gethostname()}-{os.getpid()}",
@@ -382,6 +390,92 @@ def stop_old(x: Ctx):
                f"이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
         log.warning("%s: %s", x.name, msg)
         x.save(phase="WaitingForStop", message=msg)
+
+
+def stop_kind(checks):
+    """워커별 근거 -> 전체 kind. 간접 증거가 하나라도 섞이면 그쪽 (ec2 > self_fence > automatic)"""
+    kinds = {c["kind"] for c in checks}
+    return next((k for k in ("ec2", "self_fence") if k in kinds), "automatic")
+
+
+def no_recreate_pods(js):
+    """복구 원본 JobSet이 한 세대 안에서 Pod를 다시 만들지 않는 모양이면 (Pod 수 N, ""), 아니면 (None, 이유).
+    자기 펜싱은 "Pod 번호 0~N-1이 하나씩 다 기록 = 옛 Pod 전원 종료"로 보는데, 같은 번호 Pod가 다시 생기지
+    않을 때만 맞다. podReplacementPolicy: Failed는 노드 단절·강제 삭제 때 대체 Pod를 막는 jobspec 설정 (ADR-49 남은 구멍 2)"""
+    spec = (js or {}).get("spec") or {}
+    if ((spec.get("failurePolicy") or {}).get("maxRestarts") or 0) != 0:
+        return None, "JobSet maxRestarts가 0이 아님"
+    rjs = spec.get("replicatedJobs") or []
+    if len(rjs) != 1 or rjs[0].get("replicas", 1) != 1:
+        return None, "replicatedJob이 하나(replicas 1)가 아님 (Pod 번호가 겹칠 수 있음)"
+    job = (rjs[0].get("template") or {}).get("spec") or {}
+    if job.get("completionMode") != "Indexed":
+        return None, "completionMode가 Indexed가 아님"
+    if job.get("backoffLimit") != 0:
+        return None, "backoffLimit가 0이 아님"
+    if job.get("podReplacementPolicy") != "Failed":
+        return None, "podReplacementPolicy가 Failed가 아님 (같은 번호 대체 Pod가 뜰 수 있음)"
+    if ((job.get("template") or {}).get("spec") or {}).get("restartPolicy") != "Never":
+        return None, "restartPolicy가 Never가 아님"
+    n = job.get("parallelism", 1)
+    if type(n) is not int or n < 1 or job.get("completions", n) != n:
+        return None, "parallelism·completions가 같은 양수가 아님"
+    return n, ""
+
+
+def _index_set(values):
+    """[0, 1, ...] -> 번호 집합. 정수가 아니거나 중복이면 None"""
+    if not isinstance(values, list) or any(type(v) is not int for v in values) or len(set(values)) != len(values):
+        return None
+    return set(values)
+
+
+def self_fence_stop_evidence(x: Ctx, why, src):
+    """워커 src에 닿지 못할 때, 복구 컨트롤러가 펜싱 표 self_fence_*를 읽고 넘긴 확인(devoops/self-fence-verified)으로
+    종료 확인. (멈춤확인, 이유). relocator는 펜싱 표를 읽지 않는다 (ADR-50).
+    값(JSON): {"requestId", "generation", "cluster", "worldSize", "ranks": [0..], "pods": ["<번호>:<pod uid>", ..],
+              "recordedAt"}
+    이 요청·옛 세대·그 워커와 맞고, 복구 원본(spec.jobSet)의 Pod 수 N과 맞고, 번호가 정확히 0~N-1이며
+    번호마다 Pod UID가 정확히 하나일 때만 인정. 하나라도 어긋나면 그대로 기다린다 (다음은 EC2 증거·Held)"""
+    if not SELF_FENCE_EVIDENCE:
+        return False, why
+    raw = x.ann(K.ANN_SELF_FENCE)
+    if not raw:
+        return False, f"{why}; 자기 펜싱 확인 없음"
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return False, f"{why}; 자기 펜싱 확인이 JSON이 아님"
+    if not isinstance(rec, dict):
+        return False, f"{why}; 자기 펜싱 확인 형식 오류"
+    n, bad = no_recreate_pods(x.original())
+    if n is None:
+        return False, f"{why}; 자기 펜싱 확인 안 씀: {bad}"
+    old_gen = x.old_gen()
+    if rec.get("requestId") != x.spec["requestId"]:
+        return False, f"{why}; 자기 펜싱 확인의 requestId {rec.get('requestId')!r}가 이 요청이 아님"
+    if type(rec.get("generation")) is not int or rec["generation"] != old_gen:
+        return False, f"{why}; 자기 펜싱 확인은 {rec.get('generation')!r}세대 (옛 세대 {old_gen} 아님)"
+    if rec.get("cluster") != src:
+        return False, f"{why}; 자기 펜싱 확인 클러스터 {rec.get('cluster')!r} (워커 {src} 아님)"
+    if type(rec.get("worldSize")) is not int or rec["worldSize"] != n:
+        return False, f"{why}; 자기 펜싱 worldSize {rec.get('worldSize')!r} != 복구 원본 Pod 수 {n}"
+    if not isinstance(rec.get("recordedAt"), str) or not rec["recordedAt"]:
+        return False, f"{why}; 자기 펜싱 기록 시각 없음"
+    ranks = _index_set(rec.get("ranks"))
+    if ranks != set(range(n)):
+        got = sorted(ranks) if ranks is not None else "형식 오류"
+        return False, f"{why}; 자기 펜싱 Pod 번호 {got} (0~{n - 1} 전부 아님)"
+    pods = rec.get("pods")
+    uids = {}
+    for p in pods if isinstance(pods, list) else [None]:
+        idx, _, uid = p.partition(":") if isinstance(p, str) else ("", "", "")
+        if not idx.isdigit() or not uid.strip():
+            return False, f"{why}; 자기 펜싱 pods 형식 오류 ({p!r})"
+        uids.setdefault(int(idx), set()).add(uid)
+    if set(uids) != set(range(n)) or any(len(u) != 1 for u in uids.values()):
+        return False, f"{why}; 자기 펜싱 pods가 번호 0~{n - 1}마다 Pod UID 하나가 아님 ({pods})"
+    return True, f"{why}; 자기 펜싱 확인: {old_gen}세대 {src} Pod 0~{n - 1} 전원 종료 ({rec['recordedAt']})"
 
 
 def ec2_stop_evidence(x: Ctx, why, src=None):
