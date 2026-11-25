@@ -65,7 +65,8 @@ class RelocationStatusInput:
             if not self.allow_self_fence:
                 raise RecoveryBlocked('self fence input is disabled')
             from integrations.self_fence import validate_status
-            validate_status(event, request, evidence, self.clock())
+            validate_status(event, request, evidence, self.clock(),
+                            self.store.fencing_record(event['job_id']))
         try:
             confirmed = datetime.fromisoformat(evidence['confirmed_at'].replace('Z', '+00:00'))
             created = datetime.fromisoformat(request['metadata']['creationTimestamp'].replace('Z', '+00:00'))
