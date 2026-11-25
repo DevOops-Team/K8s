@@ -119,7 +119,7 @@ kubectl get multikueuecluster eks-a -o jsonpath='{.metadata.annotations.devoops/
 - 라벨을 떼도 ack는 지우지 않는다. 다음 OFF에서는 새 T와 비교하니 옛 ack는 통과하지 못한다.
 - 리더가 바뀌는 순간 옛 리더가 돌던 루프는 이 ack로 덮이지 않는다. 그래서 ack 뒤에도 OFF 전 확인을 한 번 더 돌린다.
 
-## 쿼터 단계 예약 (GPU-251, 로컬 검증)
+## 쿼터 단계 예약 (GPU-251)
 
 `dispatcher/quota_hold.py`는 워커 지명·찜보다 먼저 관리 Workload를 확인한다.
 Light 2장 잡 또는 복구 몫이 부족한 큰 복구 잡이 기다리는 동안, 늦게 온 학습 잡이 서로 다른 Workload로
@@ -134,9 +134,8 @@ Light는 같은 ClusterQueue의 뒤 Light 잡만, 복구는 같은 cohort의 Hea
 - 단일 GPU flavor, 같은 평면 cohort의 현행 큐 구성을 대상으로 한다. CQ/LQ 설정은 수정하지 않는다.
 - 폴링 사이에 제출·완료되어 사라진 잡은 집계하지 못할 수 있다. 새 잡이 다음 루프 전에 쿼터를 받는 틈도 있어 N은 실시간 하드 제한이 아니다.
 
-현재는 ADR-41 제안의 로컬 구현으로 **기본 꺼짐**이다. 2026-11-22 VirtualBox Ubuntu VM의 kind/KWOK에서
-Light 2장·복구 4장 꺼짐/켜짐 비교, 리더 재시작·보류 해제·워커 입장을 모두 확인했다.
-운영 활성화는 Gitops 담당자가 `QUOTA_HOLD_ENABLED=true`를 반영하는 별도 배포 단계다.
+ADR-41 구현으로 **기본 켜짐**이다. kind/KWOK에서 Light 2장·복구 4장 꺼짐/켜짐 비교,
+리더 재시작·보류 해제·워커 입장을 확인한 뒤 기본값을 켰다. 끄려면 `QUOTA_HOLD_ENABLED=false`를 준다.
 Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patch`, ClusterQueue·LocalQueue `get/list` 권한 확인.
 추가 파드·Secret·CRD·이미지 실행 명령 변경은 없다. 운영 매니페스트·CI workflow는 이 작업에서 변경하지 않는다.
 잡 투입기는 보류된 JobSet을 계속 대기 중으로 취급하므로 실험 종료를 앞당기지 않는다.
@@ -145,7 +144,7 @@ Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patc
 
 | 변수 | 기본 | 뜻 |
 |---|---|---|
-| `QUOTA_HOLD_ENABLED` | false | GPU-251 / ADR-41 제안의 로컬 검증용 쿼터 예약. 켜면 뒤 잡이 3번 먼저 쿼터를 받은 Light 2장 잡·학습 몫을 빌려야 하는 복구 잡을 보호한다. 끄면 디스패처가 남긴 보류부터 해제 |
+| `QUOTA_HOLD_ENABLED` | true | GPU-251 / ADR-41 쿼터 예약. 켜면 뒤 잡이 3번 먼저 쿼터를 받은 Light 2장 잡·학습 몫을 빌려야 하는 복구 잡을 보호한다. 끄면 디스패처가 남긴 보류부터 해제 |
 | `QUOTA_HOLD_BYPASS_LIGHT` / `QUOTA_HOLD_BYPASS_RECOVERY` | 3 / 3 | 새치기한 서로 다른 Workload 수. 폴링 횟수가 아니며, 복구 기준도 3회로 통일(2026-11-22 사용자 지시) |
 | `RENOMINATE_SECONDS` | 60 | 지명했는데 이 시간 안에 워커 입장 못 하면 다른 곳으로 |
 | `RELOCATION_HOLD_SECONDS` | 300 | 진행 중인 재배치의 원래 클러스터를 재제출 잡 몫으로 지키는 최대 시간 (격리 시각, 옛 실행 종료 뒤엔 그 시각부터) |
