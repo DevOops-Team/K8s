@@ -48,7 +48,7 @@ from pathlib import Path
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend.platform.svc:8000")
 BACKEND_TIMEOUT = float(os.getenv("BACKEND_TIMEOUT", "600"))   # 파일을 올릴 땐 모델 폴더까지 올리므로 넉넉히
 FIXED_DATASET_ID = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")   # Backend validName, '-' 1개 이상 따로 확인
-STORE_NS = "scheduling-local-store"   # kind: 복구 원본·펜싱 기록 ConfigMap 자리 (controllers/recovery_store.py)
+STORE_NS = "scheduling-local-store"   # kind: 복구 원본·펜싱 기록 ConfigMap 자리 (e2e 하네스의 복구 컨트롤러 흉내가 읽음)
 HEAVY_MIN_GPUS, MAX_JOB_GPUS = 3, 4   # 백엔드 공용 함수와 같은 규칙 (스케줄링 문서): 3장↑ heavy, 5장↑ 거부
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "172.30.0.40:9092")   # 온프레미스 Kafka VM, 인증 없음
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "job.lifecycle")

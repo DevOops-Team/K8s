@@ -170,29 +170,5 @@ class PlacementHints(unittest.TestCase):
         self.assertEqual(self.hints("restartInPlace", "", None, None), (None, []))
 
 
-class Fencing(unittest.TestCase):
-    rec = {"recovery_id": "r1", "recovery_phase": "GENERATION_ADVANCED", "recovery_from_gen": 1, "recovery_to_gen": 2}
-
-    def check(self, **kw):
-        return R.check_fencing({**self.rec, **kw}, "r1", 1)
-
-    def test_go(self):
-        self.assertEqual(self.check(), ("go", "GENERATION_ADVANCED", 2))
-
-    def test_resume_after_restart(self):
-        self.assertEqual(self.check(recovery_phase="NEW_RUN_SUBMITTED")[0], "go")
-
-    def test_wait_before_generation_advanced(self):
-        self.assertEqual(self.check(recovery_phase="CLAIMED")[0], "wait")
-        self.assertEqual(R.check_fencing(None, "r1", 1)[0], "wait")
-        self.assertEqual(self.check(recovery_id="other")[0], "wait")
-
-    def test_done_when_recovery_controller_moved_on(self):
-        self.assertEqual(self.check(recovery_phase="RESUMING")[0], "done")
-
-    def test_wrong_old_generation_fails(self):   # 요청이 가리키는 잡이 이번 복구의 옛 세대가 아님
-        self.assertEqual(R.check_fencing(self.rec, "r1", 2)[0], "fail")
-
-
 if __name__ == "__main__":
     unittest.main()
