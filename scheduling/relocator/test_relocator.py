@@ -108,7 +108,7 @@ class Render(unittest.TestCase):
              [f"exec torchrun --master-addr {updated} --log-dir=/{old}"]),
             ([f'--master-addr="{address}" --log-dir=/{old}'],
              [f'--master-addr="{updated}" --log-dir=/{old}']),
-            (["--master-addr-extra", address], ["--master-addr-extra", address]),
+            (["--master-addr-extra", address], ["--master-addr-extra", updated]),
         ]
         for field in ("command", "args"):
             for values, expected in cases:
@@ -122,6 +122,43 @@ class Render(unittest.TestCase):
                     actual = rendered["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
                     self.assertEqual(actual[field], expected)
                     self.assertEqual(orig, snapshot)
+
+    def test_wait_line_address_follows_new_generation(self):
+        """getent hosts 대기 줄처럼 --master-addr 밖의 Pod 주소도 새 세대로 (11/25 eks-a 실측 형태)"""
+        old = "job-df6827fc-g0001"
+        new = "job-df6827fc-g0002"
+        script = (f'until getent hosts {old}-workers-0-0.{old} >/dev/null; do '
+                  f'echo "waiting for {old}-workers-0-0.{old}"; sleep 2; done; '
+                  f'exec torchrun --master-addr={old}-workers-0-0.{old}.training.svc.cluster.local '
+                  f'--log-dir=/{old} --tag x{old}-workers-0-0.{old}')
+        expected = (f'until getent hosts {new}-workers-0-0.{new} >/dev/null; do '
+                    f'echo "waiting for {new}-workers-0-0.{new}"; sleep 2; done; '
+                    f'exec torchrun --master-addr={new}-workers-0-0.{new}.training.svc.cluster.local '
+                    f'--log-dir=/{old} --tag x{old}-workers-0-0.{old}')
+        orig = copy.deepcopy(ORIG)
+        trainer = orig["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        trainer.update(command=["sh", "-c"], args=[script],
+                       env=[{"name": "GENERATION", "value": "1"},
+                            {"name": "MASTER_ADDR", "value": f"{old}-workers-0-0.{old}"},
+                            {"name": "LOG_DIR", "value": f"/ckpt/{old}"},
+                            {"name": "OTHER_JOB", "value": "job-aaaa0000-g0001-workers-0-0.job-aaaa0000-g0001"}])
+        rendered = R.render(orig, "df6827fc", 2, "r", None, [])
+        actual = rendered["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(actual["command"], ["sh", "-c"])
+        self.assertEqual(actual["args"], [expected])
+        self.assertEqual({e["name"]: e["value"] for e in actual["env"]}, {
+            "GENERATION": "2", "MASTER_ADDR": f"{new}-workers-0-0.{new}", "LOG_DIR": f"/ckpt/{old}",
+            "OTHER_JOB": "job-aaaa0000-g0001-workers-0-0.job-aaaa0000-g0001"})
+
+    def test_address_needs_matching_subdomain(self):
+        """앞뒤 세대가 다른 문자열은 Pod 주소가 아니므로 그대로"""
+        odd = "job-3f9a1c2e-g0001-workers-0-0.job-3f9a1c2e-g0005"
+        orig = copy.deepcopy(ORIG)
+        trainer = orig["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        trainer.update(args=[f"echo {odd}"])
+        rendered = R.render(orig, "3f9a1c2e", 2, "r", None, [])
+        actual = rendered["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(actual["args"], [f"echo {odd}"])
 
     def test_master_address_split_across_command_and_args(self):
         orig = copy.deepcopy(ORIG)
