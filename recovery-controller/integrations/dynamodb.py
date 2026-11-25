@@ -25,6 +25,24 @@ def dynamo_value(value):
     return value
 
 
+def inbox_record(item):
+    """Restore the integer event fields used by the workflow and Kubernetes API."""
+    event = item.get('event')
+    if not isinstance(event, dict):
+        return item
+    event = dict(event)
+    if isinstance(event.get('generation'), Decimal) and whole(event['generation']):
+        event['generation'] = int(event['generation'])
+    facts = event.get('straggler_evidence')
+    if isinstance(facts, dict):
+        facts = dict(facts)
+        for key in ('duration_seconds', 'estimated_gain_seconds'):
+            if isinstance(facts.get(key), Decimal) and whole(facts[key]):
+                facts[key] = int(facts[key])
+        event['straggler_evidence'] = facts
+    return {**item, 'event': event}
+
+
 class RecoveryBlocked(ValueError):
     """A decision that needs review, not an endlessly retried write."""
 
@@ -57,7 +75,7 @@ class Store:
                 raise ValueError('event_id reused with different content') from exc
 
     def get(self, rid):
-        return self.table.get_item(Key={'pk':'event#'+rid}, ConsistentRead=True)['Item']
+        return inbox_record(self.table.get_item(Key={'pk':'event#'+rid}, ConsistentRead=True)['Item'])
 
     def save(self, rid, **values):
         values['updated_at'] = int(time.time())
@@ -74,8 +92,8 @@ class Store:
                 from runtime.metrics import record_hold, record_rejected
                 record = record_hold if state == 'HOLD' else record_rejected
                 record(previous['event'].get('job_id'), values.get('reason'))
-            return {**previous, **values}
-        return previous
+            return inbox_record({**previous, **values})
+        return inbox_record(previous)
 
     def context(self, event, recovering=False):
         item = self.table.get_item(Key={'pk':'job#'+event['job_id']}, ConsistentRead=True).get('Item')
@@ -388,7 +406,7 @@ class Store:
             response = self.table.scan(**args)
             for item in response.get('Items', []):
                 if item.get('kind') == 'event':
-                    yield item
+                    yield inbox_record(item)
             if not response.get('LastEvaluatedKey'):
                 break
             args['ExclusiveStartKey'] = response['LastEvaluatedKey']
