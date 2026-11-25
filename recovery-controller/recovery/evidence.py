@@ -40,10 +40,20 @@ def provenance_error(meta, producer_kind, now, policy):
         return 'unapproved evidence producer'
     if not isinstance(meta.get('event_id'), str) or not meta['event_id']:
         return 'evidence event_id required'
-    for key in ('observed_at', 'received_at'):
-        value = meta.get(key)
-        if not whole(value) or not now - policy['max_age_seconds'] <= value <= now + policy['future_skew_seconds']:
+    if producer_kind == 'placement':
+        # job.placement is edge-triggered: job-watcher sends it once per cluster/node change
+        # and never refreshes it (GPU-275). Freshness is judged at receipt, not at every
+        # assessment, otherwise a restore longer than max_age could never complete.
+        for key in ('observed_at', 'received_at'):
+            if not whole(meta.get(key)) or meta[key] > now + policy['future_skew_seconds']:
+                return 'fresh evidence timestamps required'
+        if meta['received_at'] - meta['observed_at'] > policy['max_age_seconds']:
             return 'fresh evidence timestamps required'
+    else:
+        for key in ('observed_at', 'received_at'):
+            value = meta.get(key)
+            if not whole(value) or not now - policy['max_age_seconds'] <= value <= now + policy['future_skew_seconds']:
+                return 'fresh evidence timestamps required'
     if meta['observed_at'] > meta['received_at'] + policy['future_skew_seconds']:
         return 'evidence clock order invalid'
     return None
@@ -93,14 +103,18 @@ class EvidenceWriter:
     def __init__(self, store, policy=None, clock=time.time):
         self.store, self.policy, self.clock = store, policy_config(policy), clock
 
-    def write(self, message, *, authenticated_producer):
+    def write(self, message, *, authenticated_producer, received_at=None):
+        """received_at: the ingestion's own receipt time when projection is retried later."""
         kind = message.get('kind')
         if kind not in ('placement', 'progress'):
             raise ValueError('evidence kind must be placement or progress')
         if 'producer' in message or 'received_at' in message:
             raise ValueError('producer and receipt time must come from authenticated ingestion')
         now = int(self.clock())
-        body = dict(message, producer=authenticated_producer, received_at=now)
+        if received_at is not None and (kind != 'placement' or not whole(received_at) or received_at > now):
+            raise ValueError('deferred receipt time is only for placement evidence')
+        body = dict(message, producer=authenticated_producer,
+                    received_at=now if received_at is None else int(received_at))
         error = provenance_error(body, kind, now, self.policy)
         if error:
             raise ValueError(error)

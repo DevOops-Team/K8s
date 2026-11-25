@@ -165,3 +165,16 @@ class ControllerEvidenceTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class EdgeTriggeredPlacementCompletes(unittest.TestCase):
+    """A restore longer than max_age must still complete: placement is not re-sent (GPU-275)."""
+    def test_completion_long_after_placement(self):
+        store, requests = MemoryStore(), Requests()
+        flow = Workflow(store, requests, True, clock=lambda: NOW + 3600)
+        flow.accept(EVENT)
+        flow.tick(store.get('e1'))
+        store.fence.update(recovery_phase='NEW_RUN_SUBMITTED', owner='eks-a')
+        store.nodes['placement_evidence'].update(observed_at=NOW, received_at=NOW + 5)
+        store.nodes['progress'].update(observed_at=NOW + 3590, received_at=NOW + 3595)
+        self.assertEqual(flow.tick(store.get('e1'))['state'], 'RECOVERED')
