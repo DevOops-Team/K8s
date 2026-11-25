@@ -180,3 +180,30 @@ class IntakeTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             accept_message(consumer, Mock(), self.message(placement()), registry)
         consumer.commit.assert_not_called()
+
+
+class ConsumerPathTests(unittest.TestCase):
+    """Review P2: malformed active_nodes through the real Kafka consumer path must commit, not wedge."""
+    def run_message(self, envelope):
+        table = Mock()
+        registry = JobRegistry(Store(table, Mock()), Mock())
+        consumer = Mock()
+        msg = IntakeTests.message(None, envelope)
+        self.assertFalse(accept_message(consumer, Mock(), msg, registry))
+        consumer.commit.assert_called_once_with(message=msg, asynchronous=False)
+        return table
+
+    def test_unhashable_active_nodes_are_rejected_and_committed(self):
+        for nodes in ([{'name': 'n1'}, 'n2'], [['n1']], ['n1', None], 'n1'):
+            with self.subTest(nodes=nodes):
+                self.run_message(placement(active_nodes=nodes)).update_item.assert_not_called()
+
+    def test_wrong_payload_shapes_are_rejected_and_committed(self):
+        for envelope in (dict(placement(), payload=['x']), dict(placement(), generation='1'),
+                         dict(submitted(), payload=dict(submitted()['payload'], gpus=[2]))):
+            with self.subTest(envelope=envelope):
+                self.run_message(envelope).update_item.assert_not_called()
+
+    def test_valid_placement_reaches_dynamodb(self):
+        table = self.run_message(placement())
+        self.assertEqual(table.update_item.call_args.kwargs['Key'], {'pk': 'job#abc'})

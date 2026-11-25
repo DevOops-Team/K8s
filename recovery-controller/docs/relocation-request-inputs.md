@@ -27,7 +27,8 @@ relocator 쪽 계약 원문은 `scheduling/relocator/RECOVERY_CONTRACT.md`다.
 
 - 두 주석 모두 `resourceVersion` 조건 merge-patch다. 이미 같은 값이면 PATCH하지 않는다.
 - Cancelled·Duplicate RR에는 확인·취소를 다시 붙이지 않는다.
-- 권한을 잃으면 사건은 `HOLD`(`recovery authority changed`)로 끝난다. 상태 투영 중 다른 이유의
+- 권한을 잃으면(Runner의 종료 대기 검사·workflow 검사·상태 투영 어느 쪽이든) 사건은 `HOLD`(`recovery authority changed`)로 끝나고,
+  `relocation_cancelled=false`를 먼저 저장한 뒤 취소 주석을 붙인다. 실패하면 HOLD 폴링이 5초부터 최대 300초 간격으로 다시 붙이고, 성공하면 `true`로 바꾼다. 상태 투영 중 다른 이유의
   RecoveryBlocked(증거 형식 등)는 취소가 아니며 기존 Runner 재시도·HOLD 정책을 따른다.
 
 ## 3. 결과 (relocator → 컨트롤러, RR status)

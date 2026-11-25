@@ -192,3 +192,53 @@ class CancelTests(unittest.TestCase):
         with self.assertRaises(RecoveryBlocked):
             flow.tick(store.get('e1'))
         requests.cancel.assert_not_called()
+
+
+class RunnerCancelTests(unittest.TestCase):
+    """Review P1: the Runner's own authority check must cancel too, and a failed cancel is retried."""
+    def setUp(self):
+        from recovery.workflow import Workflow
+        from recovery.retry_policy import Runner
+        from test_workflow import MemoryStore, Requests, EVENT as fault
+        self.store, self.requests = MemoryStore(), Requests()
+        self.requests.cancel = Mock()
+        self.flow = Workflow(self.store, self.requests, execute=True, clock=lambda: 0)
+        self.flow.accept(fault)
+        self.runner = Runner(self.store, self.flow, None, 'result')
+        self.assertEqual(self.runner.operation(self.store.get('e1'), 0, False)['state'], 'REQUESTED')
+        self.store.fence['recovery_id'] = 'someone-else'
+
+    def test_runner_stop_wait_check_cancels(self):
+        result = self.runner.operation(self.store.get('e1'), 5, False)
+        self.assertEqual((result['state'], result['reason']), ('HOLD', 'recovery authority changed'))
+        self.requests.cancel.assert_called_once_with(self.store.get('e1')['event'], 'recovery-stable',
+                                                     'recovery authority changed')
+        self.assertIs(self.store.get('e1')['relocation_cancelled'], True)
+
+    def test_failed_cancel_is_retried_until_done_and_never_releases_hold(self):
+        self.requests.cancel.side_effect = [TimeoutError(), ConnectionError(), None]
+        result = self.runner.operation(self.store.get('e1'), 5, False)
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertIs(self.store.get('e1')['relocation_cancelled'], False)
+        self.assertEqual(self.store.get('e1')['relocation_cancel_next_at'], 5)  # clock 0 + 5s backoff
+        self.runner.operation(self.store.get('e1'), 4, False)                   # backoff: not yet
+        self.assertEqual(self.requests.cancel.call_count, 1)
+        self.runner.operation(self.store.get('e1'), 5, False)                   # second failure
+        self.assertEqual(self.store.get('e1')['relocation_cancel_errors'], 2)
+        record = self.runner.operation(self.store.get('e1'), 15, False)         # third try succeeds
+        self.assertEqual(self.requests.cancel.call_count, 3)
+        self.assertIs(record['relocation_cancelled'], True)
+        self.assertEqual(record['state'], 'HOLD')
+        self.runner.operation(self.store.get('e1'), 100, False)                 # no duplicate cancel
+        self.assertEqual(self.requests.cancel.call_count, 3)
+
+    def test_workflow_path_failure_is_also_retried(self):
+        self.requests.cancel.side_effect = [TimeoutError(), None]
+        # Past the stop wait the Runner skips its check; the tick's own authority check fires.
+        self.store.events['e1'].update(state='SUBMITTED', waiting_phase='NEW_RUN_SUBMITTED')
+        result = self.runner.operation(self.store.get('e1'), 5, False)
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertIs(self.store.get('e1')['relocation_cancelled'], False)
+        self.runner.operation(self.store.get('e1'), 20, False)
+        self.assertIs(self.store.get('e1')['relocation_cancelled'], True)
+        self.assertEqual(self.requests.cancel.call_count, 2)

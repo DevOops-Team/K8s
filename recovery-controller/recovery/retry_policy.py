@@ -21,7 +21,18 @@ class Runner:
         return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason,
                                stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])))
 
+    def lost_authority(self, record, reason='recovery authority changed'):
+        """HOLD and withdraw relocator's new JobSet (ADR-50 devoops/recovery-cancel)."""
+        held = self.hold(record, reason)
+        request = getattr(self.workflow, 'request_cancel', None)
+        return request(held, reason) if request else held
+
     def poll_held(self, record, now, monitoring_hold):
+        # A pending cancel is retried first: a missed one would leave relocator's
+        # new JobSet running without fencing authority.
+        retry = getattr(self.workflow, 'retry_cancel', None)
+        if retry and record.get('relocation_cancelled') is False:
+            record = retry(record, now)
         # Polling is read-only and continues after HOLD. Failed reads back off;
         # they neither release HOLD nor reset an execution/API retry budget.
         if monitoring_hold or now < int(record.get('hold_poll_next_at', 0)):
@@ -101,7 +112,7 @@ class Runner:
                 from recovery.evidence import whole
                 fence = self.store.fencing_record(record['event']['job_id'])
                 if fence.get('recovery_id') != rid or fence.get('generation') != record.get('generation'):
-                    return self.hold(record, 'recovery authority changed')
+                    return self.lost_authority(record)
                 if fence.get('recovery_phase') not in ('OLD_RUN_STOPPED', 'NEW_RUN_SUBMITTED', 'RESUMING'):
                     if any(key in source for source in (fence, record)
                            for key in ('stop_wait_started_at', 'stop_wait_deadline')):
