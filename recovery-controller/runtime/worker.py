@@ -58,6 +58,12 @@ def run(config, stop, health):
                     if stop.is_set(): break
                     try:
                         if execute:
+                            try:
+                                registry.reconcile(record)
+                            except Exception as exc:  # Never block this record's recovery step.
+                                print(json.dumps({'event_id': record['event']['event_id'],
+                                                  'component': 'job-registration',
+                                                  'error_type': type(exc).__name__}), flush=True)
                             record = evidence_input.reconcile(record, int(time.time()))
                         record = runner.operation(record, int(time.time()), monitoring_hold)
                         runner.deliver(record, int(time.time()))

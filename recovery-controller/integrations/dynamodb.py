@@ -364,6 +364,23 @@ class Store:
                     raise
         return False  # Older generation, older observation, or a recovery-owned placement.
 
+    def defer_recovery_placement(self, job_id, message, received_at):
+        """Keep a recovery job.placement that arrived before fencing recorded the new JobSet."""
+        self.table.update_item(Key={'pk': 'job#' + job_id},
+            UpdateExpression='SET pending_recovery_placement = :p',
+            ConditionExpression='attribute_exists(pk)',
+            ExpressionAttributeValues={':p': dynamo_value(dict(message=message, received_at=received_at))})
+
+    def clear_recovery_placement(self, job_id, event_id):
+        try:
+            self.table.update_item(Key={'pk': 'job#' + job_id},
+                UpdateExpression='REMOVE pending_recovery_placement',
+                ConditionExpression='pending_recovery_placement.message.event_id = :e',
+                ExpressionAttributeValues={':e': event_id})
+        except Exception as exc:
+            if not self._conditional_failed(exc):
+                raise  # A newer deferred placement replaced it: keep that one.
+
     def records(self):
         # Foundation-scale scan; replace with a pending/outbox GSI for larger workloads.
         args = {'ConsistentRead':True}
