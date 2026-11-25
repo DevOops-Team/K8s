@@ -102,7 +102,7 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 - **사람 확인 경로**: relocator는 `devoops/old-execution-stopped=true`를 받으면 `kind: manual`, `checks: []` 증거를 쓴다. 지금 컨트롤러 계약은 manual을 받지 않아 펜싱 표에 기록되지 않고 HOLD로 남는다. 워커가 끊겨 EC2 증거도 없을 때 사람이 풀 경로가 따로 필요하다.
 - **워커에 보내지기 전 잡**: 옛 잡이 어느 워커에도 안 보내졌으면 `clusters`가 빈 목록이다. 컨트롤러 계약은 빈 목록과 사건 클러스터가 빠진 목록을 거부한다.
 - **확인 주석 대기 시간**: relocator는 확인 주석을 기한 없이 기다린다. 기한 판단과 HOLD는 컨트롤러 몫이다.
-- **자기 펜싱 증거 kind**: 컨트롤러 `relocation_status.py`는 지금 kind `automatic`·`ec2`만 받는다. `SELF_FENCE_EVIDENCE`를 켜기 전에 컨트롤러가 `self_fence`를 받고 `devoops/self-fence-verified`를 붙이는 쪽을 구현해야 한다. 그 전에는 켜도 컨트롤러가 HOLD한다.
+- **자기 펜싱 연결**: 컨트롤러 `self_fence_input`이 펜싱 기록을 검증해 `devoops/self-fence-verified`를 붙이고, `relocation_status.py`가 해당 주석과 일치하는 `self_fence` 결과만 받는다. 기본 off이며 `relocation_status_input`·execute와 생산자 계약 확인이 필요하다. relocator `SELF_FENCE_EVIDENCE`도 별도 off다. jobspec·사이드카 보강 및 EKS 시험 통과 전에는 켜지 않는다. 상세: `recovery-controller/docs/self-fence-input.md`.
 
 ## 6. 배포 담당(Gitops·인프라)에 전달할 변경
 

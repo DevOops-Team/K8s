@@ -51,5 +51,9 @@
   "relocation_status_input": {
     "enabled": false,
     "producer_contract_confirmed": false
+  },
+  "self_fence_input": {
+    "enabled": false,
+    "producer_contract_confirmed": false
   }
 }

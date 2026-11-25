@@ -19,8 +19,9 @@ def status_config(value=None):
 
 
 class RelocationStatusInput:
-    def __init__(self, store, namespace, clock=time.time):
+    def __init__(self, store, namespace, clock=time.time, allow_self_fence=False):
         self.store, self.namespace, self.clock = store, namespace, clock
+        self.allow_self_fence = allow_self_fence
 
     def __call__(self, event, request):
         """No field inference from phase/message/timestamps in the old status format."""
@@ -48,18 +49,23 @@ class RelocationStatusInput:
                 or evidence['generation'] != event['generation']
                 or evidence.get('namespace') != self.namespace
                 or evidence.get('jobset_name') != old_name
-                or evidence.get('kind') not in ('automatic', 'ec2')
+                or evidence.get('kind') not in ('automatic', 'ec2', 'self_fence')
                 or not isinstance(evidence.get('clusters'), list)
                 or not evidence['clusters']
                 or any(not isinstance(c, str) or not c for c in evidence['clusters'])
                 or event['cluster'] not in evidence['clusters']
                 or not isinstance(evidence.get('checks'), list) or not evidence['checks']
                 or any(not isinstance(c, dict) or c.get('cluster') not in evidence['clusters']
-                       or c.get('kind') not in ('automatic', 'ec2')
+                       or c.get('kind') not in ('automatic', 'ec2', 'self_fence')
                        or not isinstance(c.get('detail'), str) or not c['detail']
                        for c in evidence['checks'])
                 or set(c['cluster'] for c in evidence['checks']) != set(evidence['clusters'])):
             raise RecoveryBlocked('complete old-run stop evidence required')
+        if evidence['kind'] == 'self_fence' or any(c['kind'] == 'self_fence' for c in evidence['checks']):
+            if not self.allow_self_fence:
+                raise RecoveryBlocked('self fence input is disabled')
+            from integrations.self_fence import validate_status
+            validate_status(event, request, evidence, self.clock())
         try:
             confirmed = datetime.fromisoformat(evidence['confirmed_at'].replace('Z', '+00:00'))
             created = datetime.fromisoformat(request['metadata']['creationTimestamp'].replace('Z', '+00:00'))
