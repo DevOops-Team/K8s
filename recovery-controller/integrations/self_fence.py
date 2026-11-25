@@ -36,7 +36,16 @@ def pod_count(request):
     return n
 
 
-def proof(event, request, value, now):
+def check_authority(event, fence):
+    if (not all(whole(fence.get(k)) for k in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
+            or fence['generation'] != event['generation'] + 1
+            or fence['recovery_from_gen'] != event['generation']
+            or fence['recovery_to_gen'] != event['generation'] + 1
+            or fence.get('recovery_id') != event['event_id']):
+        raise RecoveryBlocked('self fence lost recovery authority')
+
+
+def proof(event, request, value, now, started_at):
     """Validate the exact RR annotation contract, including all Pod indexes and time."""
     n = pod_count(request)
     if (not isinstance(value, dict) or value.get('requestId') != event['event_id']
@@ -61,9 +70,10 @@ def proof(event, request, value, now):
     if indexes != set(range(n)) or len(uids) != n:
         raise ValueError('duplicate self fence Pod identity')
     recorded = datetime.fromisoformat(value['recordedAt'].replace('Z', '+00:00'))
-    created = datetime.fromisoformat(request['metadata']['creationTimestamp'].replace('Z', '+00:00'))
-    if recorded.tzinfo is None or created.tzinfo is None or not created.timestamp() - 30 <= recorded.timestamp() <= now + 30:
-        raise ValueError('self fence time outside request lifetime')
+    if not whole(started_at) or not 0 < started_at <= now + 30:
+        raise ValueError('invalid fencing stop_wait_started_at')
+    if recorded.tzinfo is None or not int(started_at) - 30 <= recorded.timestamp() <= now + 30:
+        raise ValueError('self fence time outside recovery window')
     return value
 
 
@@ -73,12 +83,7 @@ class SelfFenceInput:
 
     def __call__(self, event, request):
         fence = self.store.fencing_record(event['job_id'])  # Store uses ConsistentRead.
-        if (not all(whole(fence.get(k)) for k in ('generation', 'recovery_from_gen', 'recovery_to_gen'))
-                or fence['generation'] != event['generation'] + 1
-                or fence['recovery_from_gen'] != event['generation']
-                or fence['recovery_to_gen'] != event['generation'] + 1
-                or fence.get('recovery_id') != event['event_id']):
-            raise RecoveryBlocked('self fence lost recovery authority')
+        check_authority(event, fence)
         if fence.get('recovery_phase') != 'GENERATION_ADVANCED':
             return None
         try:
@@ -93,14 +98,14 @@ class SelfFenceInput:
             value = dict(requestId=fence['recovery_id'], generation=int(fence['self_fence_gen']),
                          cluster=fence['self_fence_cluster'], worldSize=int(size),
                          ranks=sorted(int(v) for v in ranks), pods=sorted(pods), recordedAt=fence['self_fence_at'])
-            proof(event, request, value, self.clock())
+            proof(event, request, value, self.clock(), fence.get('stop_wait_started_at'))
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return None  # Partial/invalid reports never grant stop permission; normal stop deadline remains.
         # Once complete, keep the attestation stable across duplicate late Pod reports.
         existing = (request.get('metadata', {}).get('annotations') or {}).get(ANNOTATION)
         if existing:
             try:
-                old = proof(event, request, json.loads(existing), self.clock())
+                old = proof(event, request, json.loads(existing), self.clock(), fence.get('stop_wait_started_at'))
                 if all(old[k] == value[k] for k in value if k != 'recordedAt'):
                     return existing
             except (ValueError, TypeError, KeyError, AttributeError):
@@ -109,11 +114,12 @@ class SelfFenceInput:
         return json.dumps(value, sort_keys=True, separators=(',', ':'))
 
 
-def validate_status(event, request, evidence, now):
+def validate_status(event, request, evidence, now, fence):
     """A status kind alone cannot authorize self-fence: require our matching RR proof."""
+    check_authority(event, fence)
     try:
         value = json.loads(request['metadata']['annotations'][ANNOTATION])
-        proof(event, request, value, now)
+        proof(event, request, value, now, fence.get('stop_wait_started_at'))
         checks = evidence['checks']
         if (not any(c['kind'] == 'self_fence' for c in checks)
                 or any(c['cluster'] != value['cluster'] for c in checks if c['kind'] == 'self_fence')
