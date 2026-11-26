@@ -464,28 +464,13 @@ def self_fence_stop_evidence(x: Ctx, why, src):
 
 def ec2_stop_evidence(x: Ctx, why, src=None):
     """워커 src에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
-    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (기록한 옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
-    src를 안 주면 입장했던 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다.
-    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 복구 컨트롤러가 준 옛 노드(spec.nodes[].instanceId)만
-    한 번 내린다 (옛 실행을 끊는 용도). 그 노드는 spec.sourceCluster의 것이라, 내리기는 src가 spec.sourceCluster일 때만"""
+    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
+    src를 안 주면 원래 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다. 인스턴스는 내리지 않는다"""
     ec2 = getattr(x, "ec2", None)
     src = src or x.st.get("sourceCluster")
     if ec2 is None or not src:
         return False, why
-    spec = getattr(x, "spec", None) or {}
-    is_source = bool(spec.get("sourceCluster")) and src == spec["sourceCluster"]
-    old_ids = sorted({n["instanceId"] for n in spec.get("nodes") or []
-                      if isinstance(n, dict) and isinstance(n.get("instanceId"), str) and n["instanceId"]}) if is_source else []
     ok, ev, _ = ec2.check(src)
-    if (not ok and old_ids and ec2.can_terminate and not x.st.get("ec2TerminatedAt")
-            and kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS):
-        try:
-            done = ec2.terminate(src, old_ids)
-            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=done)
-            ev += f" -> 옛 노드 강제 종료 요청 {done}"
-        except Exception as e:  # noqa: BLE001  권한 없음·태그 불일치 등. 사람 확인 경로로 남음
-            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=[], ec2TerminateError=str(e))
-            ev += f" -> 강제 종료 실패 ({type(e).__name__}: {e})"
     return ok, f"{why}; {ev}"
 
 
@@ -695,8 +680,7 @@ def main():
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
     ec2 = ec2_evidence.from_env()
-    log.info("시작: interval=%ss ec2=%s", INTERVAL,
-             "off" if ec2 is None else ("terminate" if ec2.can_terminate else "describe"))
+    log.info("시작: interval=%ss ec2=%s", INTERVAL, "off" if ec2 is None else "describe")
     while True:
         if not elector.is_leader():
             time.sleep(1)
