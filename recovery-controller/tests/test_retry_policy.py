@@ -34,6 +34,19 @@ class RetryTests(unittest.TestCase):
         self.store=Store();self.flow=Workflow(self.store);self.producer=Producer()
         self.runner=Runner(self.store,self.flow,self.producer,'result')
     def step(self, now): return self.runner.operation(copy.deepcopy(self.store.record),now,False)
+    def test_observe_cancels_existing_request_without_advancing_recovery(self):
+        from unittest.mock import Mock
+
+        self.flow.execute = False
+        self.flow.retry_cancel = Mock(side_effect=lambda record, now: record)
+        self.store.record['relocation_request'] = 'rr'
+        result = self.step(0)
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(result['relocation_cancel_reason'], 'observe_mode_cancel')
+        self.assertFalse(result['relocation_cancelled'])
+        self.assertEqual(self.flow.calls, 0)
+        self.flow.retry_cancel.assert_called_once_with(result, 0)
+
     def test_three_attempts_survive_runner_restart(self):
         self.flow.fail=True
         self.step(0);self.step(5)

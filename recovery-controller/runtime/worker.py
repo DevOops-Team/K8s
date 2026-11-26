@@ -33,12 +33,11 @@ def run(config, stop, health):
     self_fence_enabled = self_fence_config(config.get('self_fence_input'))['enabled']
     status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'), allow_self_fence=self_fence_enabled)
                     if status_config(config.get('relocation_status_input'))['enabled'] else None)
-    executor = (RelocationClient(config.get('job_namespace', 'training'),
+    executor = RelocationClient(config.get('job_namespace', 'training'),
                 status_input=status_input,
                 self_fence_input=SelfFenceInput(store) if self_fence_enabled else None,
                 inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
-                    config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))))
-                if execute else None)
+                    config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))) if execute else None)
     capacity = (DispatcherCapacity(config.get('dispatcher_capacity_url'))
                 if execute and config.get('straggler_auto_migration_enabled', False) else None)
     workflow = Workflow(store, executor, execute, evidence_policy=config.get('evidence_policy'),
