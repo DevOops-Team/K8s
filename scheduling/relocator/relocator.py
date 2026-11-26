@@ -5,7 +5,9 @@
 바꾸는 것: 워커 노드 cordon·taint / MultiKueueCluster 펜싱 라벨 / 잡 내리기·재제출 / 요청 status
 
 action:
-  restartInPlace   노드 격리 없이 재제출, 원래 클러스터 우선·부족하면 다른 곳 (ADR-38)
+  restartInPlace   노드 격리 없이 재제출. spec.nodes가 있으면 그 노드·spec.sourceCluster에만 다시 띄움 (제자리 재시작,
+                   GPU-280). 노드·클러스터는 복구 컨트롤러가 정해서 준다. relocator는 조회·판단하지 않는다.
+                   spec.nodes가 없으면(복구 컨트롤러 계약 반영 전) 원래 클러스터 우선 (ADR-38)
   moveToSpare      고장 노드 cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
   evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
@@ -140,7 +142,7 @@ def accept(x: Ctx, all_rrs):
                acceptedAt=kube.now_rfc3339())
         return False
     to_gen = x.to_gen()      # 형식이 틀린 요청은 PermissionError -> Failed
-    x.original()
+    pin_spec(x, x.original())   # 실행할 수 없는 제자리 재시작도 옛 잡을 내리기 전에 Failed
     wl = kube.workload_for_jobset(x.mgr, ns, name)
     if not wl:
         x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
@@ -503,6 +505,24 @@ def ec2_stop_evidence(x: Ctx, why, src=None):
     return ok, f"{why}; {ev}"
 
 
+def pin_spec(x: Ctx, orig):
+    """restartInPlace 재제출본을 고정할 (클러스터, 노드 목록). 복구 컨트롤러가 spec.sourceCluster·spec.nodes로 준 값만 쓴다.
+    spec.nodes가 없으면 (None, None) = 고정 안 함. 받은 값으로 실행할 수 없으면 판단하지 않고 PermissionError -> Failed
+    (Pod 하나가 노드 하나를 쓰므로 노드가 Pod보다 적으면 남는 Pod가 영영 못 뜬다)"""
+    if x.spec["action"] != "restartInPlace" or not x.spec.get("nodes"):
+        return None, None
+    nodes = sorted({n.get("name") for n in x.spec["nodes"] if isinstance(n, dict) and n.get("name")})
+    cluster = x.spec.get("sourceCluster")
+    if not cluster:
+        raise PermissionError("restartInPlace spec.nodes가 있는데 spec.sourceCluster가 없음")
+    if len(nodes) != len(x.spec["nodes"]):
+        raise PermissionError("spec.nodes에 name 없는 항목이나 중복이 있음")
+    needed = R.pod_count(orig)
+    if len(nodes) < needed:
+        raise PermissionError(f"spec.nodes {len(nodes)}개 < Pod {needed}개 - 제자리 재시작 불가")
+    return cluster, nodes
+
+
 def build_new(x: Ctx):
     target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
                                         x.st.get("oldExclude"), x.spec.get("excludeClusters"))
@@ -515,7 +535,13 @@ def build_new(x: Ctx):
     if oid and oid != x.job_id():
         raise PermissionError(f"복구 원본 {K.LABEL_JOB_ID}={oid} != 요청 잡 {x.job_id()}")
     preferred = x.st.get("sourceCluster") if x.spec["action"] in R.PREFER_SOURCE else None
-    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude, preferred=preferred)
+    cluster, pin = pin_spec(x, orig)
+    if pin:   # 복구 컨트롤러가 준 노드·클러스터에 고정 (다른 클러스터엔 그 노드가 없음)
+        target, preferred = cluster, None
+        log.info("%s: restartInPlace %s/%s에 고정", x.name, cluster, ",".join(pin))
+    x.st["pinnedNodes"] = pin or []   # 재제출 기록(save)과 함께 status에 남는다
+    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude, preferred=preferred,
+                   pin_nodes=pin)
     new["metadata"]["namespace"] = x.ns
     return new
 

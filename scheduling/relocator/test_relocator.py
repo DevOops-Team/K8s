@@ -178,6 +178,60 @@ class Render(unittest.TestCase):
         self.assertNotIn("devoops/exclude-clusters", new["metadata"]["annotations"])
 
 
+def pod_spec(js):
+    return js["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+
+
+def required_terms(spec):
+    return (((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
+        "requiredDuringSchedulingIgnoredDuringExecution") or {}).get("nodeSelectorTerms")
+
+
+PIN = {"key": "kubernetes.io/hostname", "operator": "In", "values": ["node-1", "node-2"]}
+
+
+class PinNodes(unittest.TestCase):
+    """restartInPlace 재제출본은 옛 노드에만 뜬다 (GPU-280)"""
+
+    def test_pins_old_nodes(self):
+        spec = pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", "worker1", [], pin_nodes=["node-2", "node-1"]))
+        self.assertEqual(required_terms(spec), [{"matchExpressions": [PIN]}])
+        self.assertIn(R.SPARE_TOLERATION, spec["tolerations"])
+
+    def test_no_pin_leaves_affinity_alone(self):
+        self.assertNotIn("affinity", pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", None, [])))
+
+    def test_and_with_original_terms_and_keep_other_affinity(self):
+        orig = copy.deepcopy(ORIG)
+        gpu = {"key": "devoops/gpu", "operator": "In", "values": ["true"]}
+        zone = {"key": "zone", "operator": "In", "values": ["a"]}
+        pod_spec(orig)["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [{"matchExpressions": [gpu]}, {"matchExpressions": [zone]}]},
+            "preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 1, "preference": {}}]},
+            "podAntiAffinity": {"x": 1}}
+        once = R.render(orig, "3f9a1c2e", 2, "r", "worker1", [], pin_nodes=["node-1", "node-2"])
+        twice = R.render(once, "3f9a1c2e", 3, "r2", "worker1", [], pin_nodes=["node-1", "node-2"])
+        spec = pod_spec(twice)
+        self.assertEqual(required_terms(spec), [{"matchExpressions": [gpu, PIN]}, {"matchExpressions": [zone, PIN]}])
+        self.assertEqual(spec["affinity"]["podAntiAffinity"], {"x": 1})
+        self.assertEqual(len(spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]), 1)
+        # 다음 세대가 다른 action(고정 없음)이면 hostname 고정만 빠지고 원래 조건은 남는다
+        moved = pod_spec(R.render(twice, "3f9a1c2e", 4, "r3", None, []))
+        self.assertEqual(required_terms(moved), [{"matchExpressions": [gpu]}, {"matchExpressions": [zone]}])
+        self.assertEqual(pod_spec(orig)["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+            "nodeSelectorTerms"], [{"matchExpressions": [gpu]}, {"matchExpressions": [zone]}])
+
+    def test_strip_pin_only_term(self):
+        pinned = R.render(ORIG, "3f9a1c2e", 2, "r", "worker1", [], pin_nodes=["node-1"])
+        self.assertNotIn("affinity", pod_spec(R.render(pinned, "3f9a1c2e", 3, "r2", None, [])))
+
+    def test_pod_count(self):
+        js = {"spec": {"replicatedJobs": [{"replicas": 2, "template": {"spec": {"parallelism": 2}}},
+                                          {"template": {"spec": {}}}]}}
+        self.assertEqual(R.pod_count(js), 5)
+        self.assertEqual(R.pod_count(ORIG), 4)   # replicas 1 x parallelism 4
+
+
 class Names(unittest.TestCase):
     def test_roundtrip(self):
         self.assertEqual(R.jobset_name("3f9a1c2e", 12), "job-3f9a1c2e-g0012")
