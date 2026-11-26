@@ -196,3 +196,9 @@ Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preempt
 relocator 2.0.0은 펜싱 표를 쓰지 않으므로 execute 배포는 `relocation_status_input`을 켜야 합니다.
 컨트롤러가 RR status의 종료·재제출 결과를 펜싱 표에 조건부 기록한 뒤 `devoops/recovery-stop-recorded`
 주석을 붙이고, 권한을 잃으면 `devoops/recovery-cancel`을 붙입니다. [계약](docs/relocation-request-inputs.md)
+
+## 일반 Pod/Node 재시작과 GPU 이전
+
+일반 Pod/Node 신호는 restartInPlace, GPU/드라이버 격리 및 Spot은 moveToSpare로 분리한다.
+Node 소실은 옛 노드 고정을 생략하고 원래 클러스터를 선호한다. Pod 재시작은 기존 노드 고정을 유지한다.
+site 대피·OOM 거절·HOLD·straggler 조건은 유지한다. [상세 정책과 인계](docs/action-routing.md).

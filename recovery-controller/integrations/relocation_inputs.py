@@ -64,6 +64,18 @@ class RelocationInputs:
                 'sourceCluster': cluster,
                 'nodes': [{'name': node} for node in sorted(nodes)]}
 
+    def prepare_native_restart(self, event):
+        """Node loss is a restart, but must belong to the old registered placement."""
+        metadata = self.store.placement(event['job_id'])
+        nodes, count = metadata.get('active_nodes'), metadata.get('gpu_count')
+        if (metadata.get('cluster') != event['cluster']
+                or metadata.get('placement_generation') != event['generation']
+                or not whole(count) or not 1 <= count <= 4
+                or not isinstance(nodes, list) or len(nodes) != count
+                or any(not isinstance(n, str) or not n.strip() for n in nodes)
+                or len(set(nodes)) != len(nodes) or event.get('node') not in nodes):
+            raise RecoveryBlocked('native node fault outside matching old placement')
+
     def prepare_failed_nodes(self, event):
         """Validate the old node placement and persist exclusions before fencing."""
         metadata = self.store.placement(event['job_id'])
