@@ -249,6 +249,108 @@ class FencedAck(unittest.TestCase):
         ack.assert_not_called()
 
 
+OLD_ID, NEW_ID = "uid-train-1,uid-rec-1", "uid-train-2,uid-rec-2"
+
+
+def fenced_cluster(by=K.FENCED_BY_EKS_OFF, seen=None, worker=NEW_ID, fenced=True, active=True, spare=1):
+    """worker: 지금 워커 ClusterQueue UID ("train,recovery"), None이면 ClusterQueue 없음"""
+    ann = {k: v for k, v in ((K.ANN_FENCED_BY, by), (K.ANN_FENCED_WORKER, seen)) if v}
+    queues = dict(zip(("train-cq", "recovery-cq"), worker.split(","))) if worker else {}
+    return cl("eks-a", 4, fenced=fenced, active=active, meta={"name": "eks-a", "resourceVersion": "7", "annotations": ann},
+              queues=queues, spare_total=spare)
+
+
+class AutoUnfence(unittest.TestCase):
+    """GPU-277: EKS OFF 펜싱만 워커가 다시 만들어지면 푼다. relocator 펜싱·겹친 펜싱은 남긴다"""
+
+    def setUp(self):
+        D._unfence_wait.clear()
+
+    def run_once(self, c, error=None):
+        co = mock.Mock()
+        if error:
+            co.patch_cluster_custom_object.side_effect = error
+        with mock.patch.object(D.kube, "kueue", return_value=co):
+            D.auto_unfence(None, [c])
+        return [call.args[4]["metadata"] for call in co.patch_cluster_custom_object.call_args_list]
+
+    def test_records_worker_while_still_up(self):
+        self.assertEqual(self.run_once(fenced_cluster(worker=OLD_ID)),
+                         [{"annotations": {K.ANN_FENCED_WORKER: OLD_ID}, "resourceVersion": "7"}])
+
+    def test_same_worker_keeps_fence(self):
+        # 펜싱 뒤 EKS를 내리기 전이거나 잠깐 끊겼다 돌아온 같은 워커
+        self.assertEqual(self.run_once(fenced_cluster(seen=OLD_ID, worker=OLD_ID)), [])
+
+    def test_down_worker_waits(self):
+        for c in (fenced_cluster(seen=OLD_ID, active=False), fenced_cluster(seen=OLD_ID, worker=None)):
+            self.assertEqual(self.run_once(c), [])
+
+    def test_recreated_worker_unfences(self):
+        self.assertEqual(self.run_once(fenced_cluster(seen=OLD_ID)), [{
+            "labels": {K.LABEL_FENCED: None},
+            "annotations": {K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}, "resourceVersion": "7"}])
+
+    def test_recreated_without_spare_waits_and_warns_once(self):
+        with self.assertLogs("dispatcher", "WARNING") as logs:
+            self.assertEqual(self.run_once(fenced_cluster(seen=OLD_ID, spare=0)), [])
+            self.assertEqual(self.run_once(fenced_cluster(seen=OLD_ID, spare=0)), [])
+            D.log.warning("끝")
+        self.assertEqual(sum("자동 해제 대기" in line for line in logs.output), 1)
+
+    def test_relocator_and_unmarked_fences_are_never_touched(self):
+        # 겹친 경우: OFF 표시 뒤 relocator가 "relocator"로 덮어씀 -> 워커가 다시 만들어져도 남는다
+        for by in (K.FENCED_BY_RELOCATOR, None):
+            self.assertEqual(self.run_once(fenced_cluster(by=by, seen=OLD_ID)), [])
+
+    def test_stale_marks_cleared_after_manual_unfence(self):
+        self.assertEqual(self.run_once(fenced_cluster(fenced=False, seen=OLD_ID)), [{
+            "annotations": {K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}, "resourceVersion": "7"}])
+        self.assertEqual(self.run_once(fenced_cluster(by=None, fenced=False)), [])
+
+    def test_conflict_is_left_for_next_loop(self):
+        self.run_once(fenced_cluster(seen=OLD_ID), error=client.ApiException(status=409))   # 예외 없이 끝남
+
+    def test_reconcile_runs_it_and_survives_failure(self):
+        with mock.patch.object(D, "cluster_state", return_value=[]), \
+                mock.patch.object(D.kube, "list_workloads", return_value=[]), \
+                mock.patch.object(D, "relocation_holds", return_value={}), \
+                mock.patch.object(D, "auto_unfence", side_effect=RuntimeError("boom")) as run:
+            D.reconcile(None, None)
+        run.assert_called_once()
+
+    def test_disabled(self):
+        with mock.patch.object(D, "AUTO_UNFENCE", False), mock.patch.object(D, "cluster_state", return_value=[]), \
+                mock.patch.object(D.kube, "list_workloads", return_value=[]), \
+                mock.patch.object(D, "relocation_holds", return_value={}), \
+                mock.patch.object(D, "auto_unfence") as run:
+            D.reconcile(None, None)
+        run.assert_not_called()
+
+    def test_capacity_fill_records_queue_uids_and_spare(self):
+        def node(name, spare):
+            n = mock.Mock()
+            n.metadata.name = name
+            n.status.conditions = [mock.Mock(type="Ready", status="True")]
+            n.status.allocatable = {K.GPU: "1"}
+            n.spec.unschedulable = False
+            n.spec.taints = [mock.Mock(key=K.TAINT_SPARE)] if spare else []
+            return n
+        api = mock.Mock()
+        api.list_cluster_custom_object.return_value = {"items": [
+            {"metadata": {"name": "train-cq", "uid": "u1"}, "spec": {}},
+            {"metadata": {"name": "recovery-cq", "uid": "u2"}, "spec": {}}]}
+        core = mock.Mock()
+        core.list_pod_for_all_namespaces.return_value.items = []
+        core.list_node.return_value.items = [node("n1", False), node("n2", True)]
+        c = Cluster("eks-a")
+        with mock.patch.object(D.kube, "kueue", return_value=api), \
+                mock.patch.object(D.client, "CoreV1Api", return_value=core):
+            D.fill_capacity(c, None)
+        self.assertEqual(D.worker_identity(c), "u1,u2")
+        self.assertEqual(c.spare_total, 1)
+
+
 def rr(action="moveToSpare", phase="Executing", **st):
     status = {"phase": phase, "sourceCluster": "worker1", "jobId": "a", "toGeneration": 2,
               "isolatedAt": D.kube.now_rfc3339(), **st}

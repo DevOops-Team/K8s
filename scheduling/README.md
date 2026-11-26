@@ -125,6 +125,14 @@ kubectl get multikueuecluster eks-a -o jsonpath='{.metadata.annotations.devoops/
 - 비교는 `ack > T`(같으면 안 됨). 둘 다 초를 버리므로 같은 초 안에서 라벨보다 먼저 시작한 루프는 통과하지 못한다.
 - 라벨을 떼도 ack는 지우지 않는다. 다음 OFF에서는 새 T와 비교하니 옛 ack는 통과하지 못한다.
 - 리더가 바뀌는 순간 옛 리더가 돌던 루프는 이 ack로 덮이지 않는다. 그래서 ack 뒤에도 OFF 전 확인을 한 번 더 돌린다.
+- 위처럼 손으로 붙인 라벨은 표시가 없어서 ON 때 자동으로 풀리지 않는다. 실제 OFF는 `ops/eks_gate.py fence`를 쓴다.
+
+## EKS OFF 펜싱 자동 해제 (GPU-277)
+
+`eks_gate fence`는 라벨과 함께 `devoops/fenced-by=eks-off`를 붙이고, relocator는 격리할 때 `devoops/fenced-by=relocator`를 쓴다.
+디스패처는 `eks-off` 펜싱만 푼다. 펜싱 직후 워커 ClusterQueue UID를 `devoops/fenced-worker-id`에 남기고,
+EKS를 다시 만들어 UID가 바뀌고 예비 GPU가 보이면 라벨과 표시를 지운다. 같은 워커가 잠깐 끊겼다 돌아온 경우는 풀지 않는다.
+relocator 펜싱, 표시 없는 라벨, 둘이 겹친 경우(relocator가 표시를 덮어씀)는 그대로 둔다. 자세한 표는 `ops/README.md`.
 
 ## 쿼터 단계 예약 (GPU-251)
 

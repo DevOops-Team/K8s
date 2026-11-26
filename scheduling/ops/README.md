@@ -19,12 +19,40 @@ python scheduling/ops/eks_gate.py off-check eks-a --manager-context <관리-cont
 `fence`는 UTC 기준 시각을 기록하고 라벨을 붙인 뒤, 그 시각보다 큰 ACK를 기다린다.
 기본 대기는 60초이며 `--ack-timeout 120`으로 바꾼다. 실패해도 라벨은 유지한다.
 OFF를 취소할 때는 `kubectl --context <관리-context> label multikueuecluster eks-a devoops/fenced-`로 지운다.
+남은 펜싱 표시는 디스패처가 지운다.
+
+`fence`는 라벨과 함께 `devoops/fenced-by=eks-off` 표시를 붙인다. 이미 relocator가 펜싱했거나 표시 없는 라벨이 있으면
+표시를 붙이지 않고 그대로 둔다. 이런 펜싱은 ON 때 자동으로 풀리지 않는다.
+ACK를 받으면 디스패처가 지금 워커의 식별값(`devoops/fenced-worker-id`)을 남겼는지 출력한다.
 
 ## ON
 
 IaC 담당자가 EKS를 다시 만든다. Gitops·Argo 담당자가 아래 인터페이스에 맞는 구성요소를 복원한다.
 새 API 주소·CA·토큰에 맞게 Argo 클러스터 등록, 관리 클러스터의 MultiKueue 및 relocator 접속 Secret도 갱신한다.
 Git에서 예비 Pod replicas를 1로 복원하고 Argo sync한 뒤 실행한다.
+
+### 자동 해제 (GPU-277)
+
+`fence`가 붙인 EKS OFF 펜싱은 디스패처가 스스로 푼다. 사람이 아래 `--unfence`를 빠뜨려도 잡이 막히지 않는다.
+
+| 상황 | 디스패처 동작 |
+|---|---|
+| 펜싱 직후, 워커가 아직 켜져 있음 | 워커 ClusterQueue `train-cq`·`recovery-cq`의 UID를 `devoops/fenced-worker-id`에 기록 |
+| 같은 워커 (OFF 전, 잠깐 끊겼다 돌아옴) | 펜싱 유지 |
+| 워커가 꺼짐 (Active 아님·접속 실패·ClusterQueue 없음) | 기다림 |
+| 다시 만든 워커 (UID가 바뀜), 예비 GPU 있음 | 라벨과 표시를 지움. 다음 루프부터 새 잡 지명·복구 용량 조회에 포함 |
+| 다시 만든 워커인데 예비 GPU 없음 | 기다리면서 경고 로그 (5분마다) |
+| `devoops/fenced-by=relocator` 또는 표시 없는 라벨 | 건드리지 않음 (장애복구 담당이 판단) |
+
+EKS OFF 중에 relocator가 같은 클러스터를 펜싱하면 표시가 `relocator`로 바뀌어 자동 해제되지 않는다.
+patch에는 읽을 때의 `resourceVersion`을 붙이므로, 디스패처가 읽은 뒤 relocator가 펜싱하면 해제가 실패하고 다음 루프에서 다시 본다.
+
+디스패처가 보는 준비 항목은 MultiKueueCluster Active, 워커 접속, ClusterQueue 두 개, 예비 GPU다.
+Deployment·LocalQueue·클러스터 이름 ConfigMap·relocator ServiceAccount는 디스패처 워커 권한 밖이라 보지 않는다.
+이 항목까지 확인하려면 아래 `on-check`를 실행한다. `--unfence` 수동 경로는 그대로 쓸 수 있다.
+
+디스패처 환경변수: `AUTO_UNFENCE_ENABLED`(기본 `true`, 끄면 표시만 남고 사람이 지운다),
+`AUTO_UNFENCE_QUEUES`(기본 `train-cq,recovery-cq`).
 
 ```sh
 python scheduling/ops/eks_spare.py eks-a on --worker-context <워커-context>
@@ -34,8 +62,9 @@ python scheduling/ops/eks_gate.py on-check eks-a --manager-context <관리-conte
 컨트롤러·큐·클러스터 이름·예비·relocator ServiceAccount·Active 연결을 모두 확인한 뒤 라벨을 지운다.
 ACK 어노테이션은 남긴다. 예비 확인을 생략하려면 `--no-spare`를 쓴다.
 
-**라벨을 지우기 전까지 디스패처는 그 클러스터로 새 잡을 보내지 않는다.** EKS를 다시 만들고 허브에 등록해도
-OFF 때 붙인 `devoops/fenced=true`는 남는다. 이 단계를 빠뜨리면 잡이 쿼터만 받고 지명되지 않는다 (2026-11-20, 68분 대기).
+**라벨을 지우기 전까지 디스패처는 그 클러스터로 새 잡을 보내지 않는다.** 예전에는 EKS를 다시 만들고 허브에 등록해도
+OFF 때 붙인 `devoops/fenced=true`가 남아서, 이 단계를 빠뜨리면 잡이 쿼터만 받고 지명되지 않았다 (2026-11-20 68분 대기, 11/25 재발).
+지금은 위 자동 해제가 맡는다. 표시 없이 붙은 라벨(이 변경 전 `fence`, 손으로 붙인 라벨)은 여전히 이 단계가 필요하다.
 
 ### EKS (GPU-236)
 
@@ -93,7 +122,9 @@ MultiKueue가 JobSet을 복사할 수 있는 워커 접속 권한과 학습/복�
 예비 Pod는 GPU를 요청하고 낮은 우선순위로 복구 잡에 선점돼야 한다. 실제 EKS에는 KWOK 설정을 넣지 않는다.
 ServiceAccount 존재 확인만으로 RBAC 전체와 토큰 유효성을 검증하지는 않는다. 권한과 접속 Secret은 배포 담당자가 검증한다.
 
-관리 디스패처는 MultiKueueCluster get/list/patch 권한이 필요하다.
+관리 디스패처는 MultiKueueCluster get/list/patch 권한이 필요하다 (자동 해제도 같은 권한, 추가 없음).
+relocator는 펜싱할 때 같은 patch에 `devoops/fenced-by=relocator` 어노테이션을 함께 쓴다.
+MultiKueueCluster patch를 라벨로만 제한하는 입장 정책이 있다면 이 어노테이션을 허용해야 한다.
 `devoops/fenced=true`를 본 루프가 끝나면 `devoops/fenced-ack`에 그 루프 시작 UTC 시각을 쓴다.
 `fence`는 `ack > T`일 때만 통과시키고, ACK 이후 남은 Workload·RR을 다시 검사한다.
 기존 ACK 구현을 사용하며, 루프 실패·patch 실패·펜싱된 클러스터 선택은 단위 테스트로 검증한다.

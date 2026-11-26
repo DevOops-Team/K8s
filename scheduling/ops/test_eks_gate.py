@@ -123,8 +123,56 @@ class GateTests(unittest.TestCase):
             self.assertEqual(self.gate.fence("worker3", 1), 2)
         calls = self.manager.patch_cluster_custom_object.call_args_list
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].args[4], {"metadata": {"labels": {G.K.LABEL_FENCED: "true"}}})
+        self.assertEqual(calls[0].args[4], {"metadata": {"labels": {G.K.LABEL_FENCED: "true"}, "annotations": {
+            G.K.ANN_FENCED_BY: G.K.FENCED_BY_EKS_OFF, G.K.ANN_FENCED_WORKER: None}}})
         self.assertIn("디스패처 로그 확인", self.output.getvalue())
+
+    def test_fence_marks_eks_off_with_resource_version_and_retries_conflict(self):
+        # GPU-277: 읽은 뒤 relocator가 펜싱하면 409 -> 다시 읽고, relocator 펜싱이면 표시하지 않는다
+        self.manager.get_cluster_custom_object.side_effect = [
+            {"metadata": {"resourceVersion": "5"}},
+            {"metadata": {"resourceVersion": "6", "labels": {G.K.LABEL_FENCED: "true"},
+                          "annotations": {G.K.ANN_FENCED_BY: G.K.FENCED_BY_RELOCATOR}}}]
+        self.manager.patch_cluster_custom_object.side_effect = client.ApiException(status=409)
+        self.gate.mark_eks_off("worker3")
+        calls = self.manager.patch_cluster_custom_object.call_args_list
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args[4]["metadata"]["resourceVersion"], "5")
+        self.assertIn("이미 펜싱됨 (relocator)", self.output.getvalue())
+
+    def test_fence_keeps_existing_marks(self):
+        for ann, text in (({G.K.ANN_FENCED_BY: G.K.FENCED_BY_EKS_OFF}, None), ({}, "붙인 쪽 표시 없음")):
+            with self.subTest(ann=ann):
+                self.manager.get_cluster_custom_object.return_value = {
+                    "metadata": {"labels": {G.K.LABEL_FENCED: "true"}, "annotations": ann}}
+                self.output.seek(0)
+                self.output.truncate(0)
+                self.gate.mark_eks_off("worker3")
+                self.manager.patch_cluster_custom_object.assert_not_called()
+                if text:
+                    self.assertIn(text, self.output.getvalue())
+                else:
+                    self.assertEqual(self.output.getvalue(), "")
+
+    def test_fence_conflict_gives_up_after_attempts(self):
+        self.manager.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "5"}}
+        self.manager.patch_cluster_custom_object.side_effect = client.ApiException(status=409)
+        with self.assertRaises(client.ApiException):
+            self.gate.mark_eks_off("worker3")
+        self.assertEqual(self.manager.patch_cluster_custom_object.call_count, 3)
+
+    def test_report_auto_unfence(self):
+        for ann, text in (({G.K.ANN_FENCED_BY: G.K.FENCED_BY_EKS_OFF, G.K.ANN_FENCED_WORKER: "u"}, "자동 해제 기준 기록됨"),
+                          ({G.K.ANN_FENCED_BY: G.K.FENCED_BY_EKS_OFF}, "on-check --unfence로 지운다"),
+                          ({G.K.ANN_FENCED_BY: G.K.FENCED_BY_RELOCATOR}, "")):
+            with self.subTest(ann=ann):
+                self.output.seek(0)
+                self.output.truncate(0)
+                G.Gate.report_auto_unfence({"metadata": {"annotations": ann}})
+                if text:
+                    self.assertIn(text, self.output.getvalue())
+                else:
+                    self.assertEqual(self.output.getvalue(), "")
 
     def test_fence_bad_ack_waits(self):
         result, sleep, _ = self.fence_run(["bad", "2026-11-11T00:00:01Z"])
@@ -140,7 +188,8 @@ class GateTests(unittest.TestCase):
     def test_on_success_unfence(self):
         self.assertEqual(self.gate.on_check("worker3", unfence=True), 0)
         self.assertEqual(self.manager.patch_cluster_custom_object.call_args.args[4],
-                         {"metadata": {"labels": {G.K.LABEL_FENCED: None}}})
+                         {"metadata": {"labels": {G.K.LABEL_FENCED: None},
+                                       "annotations": {G.K.ANN_FENCED_BY: None, G.K.ANN_FENCED_WORKER: None}}})
 
     def test_on_success_without_unfence(self):
         self.assertEqual(self.gate.on_check("worker3"), 0)

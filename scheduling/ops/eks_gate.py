@@ -45,10 +45,48 @@ class Gate:
         return self.manager.get_cluster_custom_object(
             K.KUEUE_GROUP, K.KUEUE_VERSION, MKC, cluster, _request_timeout=REQUEST_TIMEOUT)
 
-    def label(self, cluster, value):
+    def patch_mkc(self, cluster, metadata):
         self.manager.patch_cluster_custom_object(
-            K.KUEUE_GROUP, K.KUEUE_VERSION, MKC, cluster,
-            {"metadata": {"labels": {K.LABEL_FENCED: value}}}, _request_timeout=REQUEST_TIMEOUT)
+            K.KUEUE_GROUP, K.KUEUE_VERSION, MKC, cluster, {"metadata": metadata}, _request_timeout=REQUEST_TIMEOUT)
+
+    def unfence(self, cluster):
+        """라벨과 붙인 쪽 표시를 함께 지운다 (수동 해제, 펜싱한 쪽과 관계없이)"""
+        self.patch_mkc(cluster, {"labels": {K.LABEL_FENCED: None},
+                                 "annotations": {K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}})
+
+    def mark_eks_off(self, cluster, attempts=3):
+        """라벨과 'EKS OFF 펜싱' 표시를 함께 붙인다 (GPU-277). 디스패처는 이 표시가 있는 펜싱만 자동으로 푼다.
+        이미 relocator(또는 표시 없는 옛 라벨)가 펜싱했으면 표시하지 않는다: 장애복구 펜싱은 자동으로 풀면 안 된다.
+        읽은 뒤 relocator가 펜싱하면 그 표시를 덮지 않도록 resourceVersion을 붙이고, 충돌(409)이면 다시 읽는다"""
+        for attempt in range(attempts):
+            meta = self.mkc(cluster).get("metadata", {})
+            labels, ann = meta.get("labels") or {}, meta.get("annotations") or {}
+            if labels.get(K.LABEL_FENCED) == "true":
+                if ann.get(K.ANN_FENCED_BY) != K.FENCED_BY_EKS_OFF:
+                    print(f"이미 펜싱됨 ({ann.get(K.ANN_FENCED_BY) or '붙인 쪽 표시 없음'}): EKS OFF 표시를 붙이지 않는다. "
+                          "ON 때 자동 해제되지 않으므로 장애복구 담당 확인 뒤 on-check --unfence로 지운다")
+                return
+            body = {"labels": {K.LABEL_FENCED: "true"},
+                    "annotations": {K.ANN_FENCED_BY: K.FENCED_BY_EKS_OFF, K.ANN_FENCED_WORKER: None}}
+            if meta.get("resourceVersion"):
+                body["resourceVersion"] = meta["resourceVersion"]
+            try:
+                self.patch_mkc(cluster, body)
+                return
+            except client.ApiException as e:
+                if e.status != 409 or attempt == attempts - 1:
+                    raise
+
+    @staticmethod
+    def report_auto_unfence(m):
+        ann = (m.get("metadata") or {}).get("annotations") or {}
+        if ann.get(K.ANN_FENCED_BY) != K.FENCED_BY_EKS_OFF:
+            return
+        if ann.get(K.ANN_FENCED_WORKER):
+            print("자동 해제 기준 기록됨: EKS를 다시 만들면 디스패처가 준비 확인 뒤 라벨을 지운다")
+        else:
+            print("워커 식별값이 기록되지 않음 (워커 끊김·ClusterQueue 없음·자동 해제 꺼짐): "
+                  "ON 때 on-check --unfence로 지운다")
 
     def objects(self, plural, group=K.KUEUE_GROUP, version=K.KUEUE_VERSION):
         """페이지가 나뉘어도 빠짐없이 읽는다."""
@@ -90,13 +128,13 @@ class Gate:
         started = datetime.now(timezone.utc).replace(microsecond=0)
         print(f"펜싱 기준 시각: {started.isoformat().replace('+00:00', 'Z')}")
         end = time.monotonic() + timeout
-        m = self.mkc(cluster)
-        if (m.get("metadata", {}).get("labels") or {}).get(K.LABEL_FENCED) != "true":
-            self.label(cluster, "true")
+        self.mark_eks_off(cluster)
         try:
             while True:
-                ack = parse_ack((self.mkc(cluster).get("metadata", {}).get("annotations") or {}).get(K.ANN_FENCED_ACK))
+                m = self.mkc(cluster)
+                ack = parse_ack((m.get("metadata", {}).get("annotations") or {}).get(K.ANN_FENCED_ACK))
                 if ack is not None and ack > started:
+                    self.report_auto_unfence(m)
                     return self.off_check(cluster)
                 print(f"fenced-ack: {ack.isoformat() if ack else '아직 없음'}")
                 remaining = end - time.monotonic()
@@ -159,7 +197,7 @@ class Gate:
         if failures:
             return verdict(failures, "")
         if unfence:
-            self.label(cluster, None)
+            self.unfence(cluster)
         print(f"ON 가능: {cluster}")
         return 0
 

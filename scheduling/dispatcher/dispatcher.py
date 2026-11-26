@@ -21,6 +21,8 @@
     지우지 않으므로 장애 직전 배치가 남고, Backend 복구 조회 API가 읽는다 (GPU-268, PLACEMENT.md).
   - fenced ACK: 루프를 끝까지 돌면 그 루프에서 fenced로 본 MultiKueueCluster에 devoops/fenced-ack=<루프 시작 시각>.
     라벨 붙인 시각보다 뒤면, 라벨을 모르던 루프는 다 끝났다는 뜻 (EKS OFF 절차, GPU-125).
+  - EKS OFF 펜싱 자동 해제: eks_gate fence가 붙인 펜싱(devoops/fenced-by=eks-off)만, 워커가 다시 만들어지고
+    (ClusterQueue UID가 바뀜) 예비가 있으면 푼다. relocator 펜싱은 풀지 않는다 (GPU-277, auto_unfence).
 """
 import json
 import os
@@ -53,11 +55,17 @@ UNPLACED_LOG_SECONDS = int(os.getenv("UNPLACED_LOG_SECONDS", "300"))
 # 복구 컨트롤러는 관측 시각이 max_age_seconds(기본 300)보다 오래되면 거절한다. PLACEMENT.md의 신선도 절 참고
 PLACEMENT_REFRESH_SECONDS = int(os.getenv("PLACEMENT_REFRESH_SECONDS", "60"))
 IN_PLACE = {"restartInPlace", "moveToSpare"}   # 재제출 잡이 원래 클러스터로 돌아오는 action
+# EKS OFF 펜싱 자동 해제 (GPU-277). 끄면 표시만 남고 사람이 on-check --unfence로 지운다
+AUTO_UNFENCE = os.getenv("AUTO_UNFENCE_ENABLED", "true").strip().lower() not in ("0", "false", "off", "no")
+# 워커 식별값과 준비 확인에 쓰는 워커 ClusterQueue (eks_gate on-check와 같은 이름)
+UNFENCE_QUEUES = tuple(x.strip() for x in os.getenv("AUTO_UNFENCE_QUEUES", "train-cq,recovery-cq").split(",")
+                       if x.strip())
 RR_FINAL = {"Done", "Failed", "Duplicate"}
 
 kube.setup_logging("dispatcher")
 log = kube.logging.getLogger("dispatcher")
 _unplaced = {}   # Workload 이름 -> (이유, 마지막으로 남긴 시각). 갈 곳 없는 잡 경고의 반복 방지
+_unfence_wait = {}   # 클러스터 이름 -> (못 푸는 이유, 마지막으로 남긴 시각). 자동 해제 대기 경고의 반복 방지
 
 
 def cluster_state(mgr, workers) -> list:
@@ -67,7 +75,8 @@ def cluster_state(mgr, workers) -> list:
         name = mkc["metadata"]["name"]
         c = Cluster(name=name,
                     active=kube.is_true(mkc, "Active"),
-                    fenced=(mkc["metadata"].get("labels") or {}).get(K.LABEL_FENCED) == "true")
+                    fenced=(mkc["metadata"].get("labels") or {}).get(K.LABEL_FENCED) == "true",
+                    meta=mkc["metadata"])
         api = workers.get().get(name)
         if c.active and api is not None:
             try:
@@ -91,8 +100,12 @@ def fill_capacity(c: Cluster, api):
     # 1) 쿼터: 워커 ClusterQueue마다 nominalQuota - 예약량
     #    lendingLimit 0인 CQ(복구 전용)는 복구 잡만 쓸 수 있는 몫으로 따로 셈.
     #    복구 CQ가 학습 몫을 빌려 쓰고 있으면(예약 > nominal) 그만큼 학습 몫에서 뺌
+    c.queues = {}
     for cq in kube.kueue(api).list_cluster_custom_object(
             K.KUEUE_GROUP, K.KUEUE_VERSION, "clusterqueues", _request_timeout=kube.TIMEOUT)["items"]:
+        meta = cq.get("metadata") or {}
+        if meta.get("name"):
+            c.queues[meta["name"]] = meta.get("uid")
         nominal, private = 0, False
         for rg in cq["spec"].get("resourceGroups", []):
             for fl in rg["flavors"]:
@@ -158,7 +171,9 @@ def fill_node_capacity(c, api, excluded_node=None, released_job=None, running=No
         alloc = int((n.status.allocatable or {}).get(K.GPU, 0))
         if any(t.key == K.TAINT_SPARE for t in (n.spec.taints or [])):
             c.spare_free += max(alloc - used.get(n.metadata.name, 0), 0)
+            c.spare_total += alloc
             continue
+        c.spare_total += held.get(n.metadata.name, 0)
         free = alloc - used.get(n.metadata.name, 0) - held.get(n.metadata.name, 0)
         c.node_total = (c.node_total or 0) + max(alloc - held.get(n.metadata.name, 0), 0)
         c.node_free += max(free, 0)
@@ -320,6 +335,78 @@ def ack_fenced(mgr, clusters, started):
             log.warning("%s fenced-ack 못 씀: %s", c.name, e)
 
 
+def worker_identity(c):
+    """지금 연결된 워커의 식별값: 정해 둔 워커 ClusterQueue들의 UID. EKS를 다시 만들면 바뀐다.
+    워커에 못 닿았거나 ClusterQueue가 하나라도 없으면 None"""
+    if not c.active:
+        return None
+    ids = [c.queues.get(q) for q in UNFENCE_QUEUES]
+    return ",".join(ids) if ids and all(ids) else None
+
+
+def unfence_blockers(c):
+    """eks_gate on-check 항목 중 디스패처가 워커 접속 권한(nodes·pods list, clusterqueues list)으로 보는 것.
+    Active 연결·ClusterQueue는 worker_identity가 이미 확인한다. Deployment·LocalQueue·ConfigMap·relocator SA는
+    디스패처 권한 밖이라 보지 않는다 (사람이 확인하려면 on-check)"""
+    return [] if c.spare_total > 0 else ["예비 GPU 없음 (Ready 예비 taint 노드 또는 자리 표시 Pod)"]
+
+
+def patch_fence(mgr, c, metadata):
+    """읽은 때의 resourceVersion을 붙인다: 그 사이 relocator가 펜싱했으면 409로 실패하고 다음 루프에서 다시 본다"""
+    body = dict(metadata)
+    if c.meta.get("resourceVersion"):
+        body["resourceVersion"] = c.meta["resourceVersion"]
+    kube.kueue(mgr).patch_cluster_custom_object(
+        K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", c.name, {"metadata": body})
+
+
+def auto_unfence(mgr, clusters):
+    """EKS OFF 때 eks_gate fence가 붙인 펜싱만 EKS를 다시 만들면 푼다 (GPU-277).
+
+    - 펜싱 직후 워커가 아직 살아 있을 때 워커 식별값을 남긴다 (fence는 이 루프의 ACK를 기다린다).
+    - 같은 워커가 그대로면(OFF 전, 잠깐 끊김) 풀지 않는다. 식별값이 바뀌고 준비 확인을 통과하면 라벨과 표시를 지운다.
+    - relocator 펜싱(표시 relocator)과 표시 없는 옛 라벨은 건드리지 않는다. 겹치면 relocator가 표시를 덮어써서 남는다.
+    - 사람이 라벨만 지웠으면 남은 표시를 지운다 (나중에 다른 쪽이 붙인 라벨을 EKS OFF 펜싱으로 오해하지 않게)."""
+    for c in clusters:
+        ann = c.meta.get("annotations") or {}
+        by, seen = ann.get(K.ANN_FENCED_BY), ann.get(K.ANN_FENCED_WORKER)
+        try:
+            if not c.fenced:
+                _unfence_wait.pop(c.name, None)
+                if by or seen:
+                    patch_fence(mgr, c, {"annotations": {K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}})
+                    log.info("%s: 펜싱 라벨 없음 -> 남은 펜싱 표시 지움", c.name)
+                continue
+            if by != K.FENCED_BY_EKS_OFF:
+                continue
+            now_id = worker_identity(c)
+            if now_id is None:   # 꺼져 있거나 아직 준비 중. 다시 만들어질 때까지 기다린다
+                continue
+            if not seen:
+                patch_fence(mgr, c, {"annotations": {K.ANN_FENCED_WORKER: now_id}})
+                log.info("%s: EKS OFF 펜싱 확인 -> 지금 워커 식별값 기록 (다시 만들어지면 자동 해제)", c.name)
+                continue
+            if seen == now_id:
+                continue
+            blockers = unfence_blockers(c)
+            if blockers:
+                reason = ", ".join(blockers)
+                last = _unfence_wait.get(c.name)
+                if not last or last[0] != reason or time.time() - last[1] >= UNPLACED_LOG_SECONDS:
+                    _unfence_wait[c.name] = (reason, time.time())
+                    log.warning("%s: EKS 다시 만들어짐, 자동 해제 대기 [%s]", c.name, reason)
+                continue
+            patch_fence(mgr, c, {"labels": {K.LABEL_FENCED: None},
+                                 "annotations": {K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}})
+            _unfence_wait.pop(c.name, None)
+            log.info("%s: EKS 다시 만들어짐 (워커 식별값 바뀜), 준비 확인 통과 -> EKS OFF 펜싱 해제", c.name)
+        except client.ApiException as e:
+            if e.status in (404, 409):
+                log.info("%s: 펜싱 자동 해제 중 바뀜 (%s), 다음 루프에서 다시 봄", c.name, e.status)
+            else:
+                log.warning("%s: 펜싱 자동 해제 patch 실패: %s %s", c.name, e.status, e.reason)
+
+
 def reconcile(mgr, workers):
     """한 바퀴. 끝까지 돌면 이번 루프가 본 클러스터 목록을 돌려준다 (fenced-ack용)"""
     all_wls = kube.list_workloads(mgr)
@@ -328,6 +415,11 @@ def reconcile(mgr, workers):
     except Exception:  # 추가 큐 권한·일시적인 조회 실패가 기존 워커 지명까지 막지 않게
         log.exception("쿼터 예약 실패, 다음 루프에서 재시도")
     clusters = cluster_state(mgr, workers)
+    if AUTO_UNFENCE:
+        try:   # 이번 루프는 읽은 펜싱 그대로 지명한다. 푼 클러스터는 다음 루프부터 쓴다
+            auto_unfence(mgr, clusters)
+        except Exception:  # noqa: BLE001  자동 해제 문제로 지명을 멈추지 않는다
+            log.exception("펜싱 자동 해제 실패, 지명은 계속")
     if clusters and not any(c.active for c in clusters):
         log.warning("워커 %d개 전부 끊김 -> 지명 중단 (네트워크 쪽 장애일 수 있음)", len(clusters))
         return clusters
@@ -609,6 +701,7 @@ def main():
     elector = leader.Elector(kube.manager_client(), "dispatcher")
     workers = kube.Workers(mgr)
     log.info("시작: interval=%ss renominate=%ss", INTERVAL, RENOMINATE_SECONDS)
+    log.info("EKS OFF 펜싱 자동 해제: enabled=%s queues=%s", AUTO_UNFENCE, ",".join(UNFENCE_QUEUES))
     log.info("쿼터 예약: enabled=%s bypass_light=%d bypass_recovery=%d", quota_hold.ENABLED,
              quota_hold.LIGHT_N, quota_hold.RECOVERY_N)
     while True:
