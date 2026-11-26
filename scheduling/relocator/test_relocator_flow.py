@@ -9,6 +9,7 @@ from kubernetes import client
 import relocator
 
 K = relocator.K
+R = relocator.R
 
 
 class FakeCO:
@@ -142,6 +143,69 @@ class Resubmit(unittest.TestCase):
         orig["metadata"]["labels"][K.LABEL_JOB_ID] = "zzz"
         with self.assertRaises(PermissionError):
             relocator.build_new(ctx(FakeCO(), spec={"jobSet": orig}, sourceCluster="worker1"))
+
+
+class PinNodes(unittest.TestCase):
+    """restartInPlace는 복구 컨트롤러가 spec으로 준 노드·클러스터에만 고정한다. relocator는 조회하지 않는다 (GPU-280)"""
+
+    @staticmethod
+    def orig(pods=2):
+        o = original()
+        o["spec"] = {"replicatedJobs": [{"name": "workers", "replicas": pods, "template": {"spec": {"template": {
+            "spec": {"containers": [{"name": "trainer"}]}}}}}]}
+        return o
+
+    def build(self, action="restartInPlace", pods=2, **spec):
+        x = ctx(FakeCO(), action=action, spec={"jobSet": self.orig(pods), **spec}, sourceCluster="worker1")
+        x.workers = mock.Mock(get=mock.Mock(side_effect=AssertionError("워커 조회 금지")))
+        with mock.patch.object(relocator.client, "CoreV1Api", side_effect=AssertionError("워커 조회 금지")):
+            new = relocator.build_new(x)
+        spec = new["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+        terms = ((((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
+            "requiredDuringSchedulingIgnoredDuringExecution") or {}).get("nodeSelectorTerms") or [])
+        pins = [e["values"] for t in terms for e in t["matchExpressions"] if e["key"] == R.HOSTNAME]
+        return new["metadata"]["annotations"], pins, x.st["pinnedNodes"]
+
+    NODES = [{"name": "node-2", "instanceId": "i-2"}, {"name": "node-1"}]
+
+    def test_pinned_to_spec_nodes_and_cluster(self):
+        ann, pins, recorded = self.build(nodes=self.NODES, sourceCluster="eks-b")
+        self.assertEqual(pins, [["node-1", "node-2"]])
+        self.assertEqual(recorded, ["node-1", "node-2"])
+        self.assertEqual(ann[K.ANN_TARGET], "eks-b")   # status.sourceCluster(worker1)가 아니라 spec 값
+        self.assertNotIn(K.ANN_PREFERRED, ann)
+
+    def test_no_spec_nodes_keeps_old_behavior(self):
+        ann, pins, recorded = self.build()
+        self.assertEqual((pins, recorded), ([], []))
+        self.assertNotIn(K.ANN_TARGET, ann)
+        self.assertEqual(ann[K.ANN_PREFERRED], "worker1")
+
+    def test_unrunnable_spec_fails(self):
+        cases = {
+            "no cluster": dict(nodes=self.NODES),
+            "too few": dict(nodes=[{"name": "node-1"}], sourceCluster="eks-a"),
+            "no name": dict(nodes=[{"name": "node-1"}, {"instanceId": "i-2"}], sourceCluster="eks-a"),
+            "duplicate": dict(nodes=[{"name": "node-1"}, {"name": "node-1"}], sourceCluster="eks-a"),
+        }
+        for why, spec in cases.items():
+            with self.subTest(why=why):
+                with self.assertRaises(PermissionError):
+                    self.build(**spec)
+
+    def test_other_actions_ignore_nodes(self):
+        for action in ("moveToSpare", "evacuateCluster"):
+            with self.subTest(action=action):
+                _, pins, recorded = self.build(action=action, nodes=self.NODES, sourceCluster="eks-a")
+                self.assertEqual((pins, recorded), ([], []))
+
+    def test_accept_rejects_before_touching_old_job(self):
+        x = ctx(FakeCO(), action="restartInPlace",
+                spec={"jobSet": self.orig(2), "nodes": [{"name": "node-1"}], "sourceCluster": "eks-a"})
+        with mock.patch.object(relocator.kube, "workload_for_jobset",
+                               side_effect=AssertionError("거부할 요청은 Workload도 안 봄")):
+            with self.assertRaises(PermissionError):
+                relocator.accept(x, [x.rr])
 
 
 class Cancel(unittest.TestCase):

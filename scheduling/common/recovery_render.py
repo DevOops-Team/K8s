@@ -13,10 +13,15 @@
 | env GENERATION (모든 컨테이너)                    | 1 -> 2 |
 | 배치 힌트 어노테이션                              | recovery-source-cluster(원래 우선) · exclude-clusters |
 | Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
+| Pod 템플릿 affinity (restartInPlace만)            | + required nodeAffinity kubernetes.io/hostname In [옛 노드] |
 
 예비 노드 toleration을 Kueue ResourceFlavor가 아니라 여기서 넣는 이유: 4장 복구 잡이 학습 노드 3대 + 예비 1대에
 걸쳐 뜨려면 학습 몫을 빌려야 하고(같은 flavor), flavor에 toleration을 두면 그 flavor를 쓰는 학습 잡도 예비에 간다.
 학습 잡이 이 toleration을 달고 오는 것은 관리 클러스터 정책(admission-policy.yaml)이 막는다.
+
+restartInPlace는 노드가 멀쩡하고 Pod만 죽은 경우라, 옛 세대가 쓰던 노드를 그대로 다시 쓴다 (제자리 재시작).
+노드 1·2에서 돌던 잡은 3·4나 예비로 가지 않고 1·2로만 간다. 옛 노드 목록은 relocator가 넘긴다(pin_nodes).
+pin_nodes가 없으면 이 고정을 넣지 않고, 이전 세대 재제출본에서 넣은 hostname 고정도 지운다.
 """
 import copy
 import re
@@ -25,6 +30,7 @@ import keys as K
 
 PREFER_SOURCE = {"restartInPlace", "moveToSpare"}
 SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+HOSTNAME = "kubernetes.io/hostname"
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
 
 
@@ -81,7 +87,51 @@ def _master_addresses(values, old_names, addresses, name):
     return out
 
 
-def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None) -> dict:
+def pod_count(js) -> int:
+    """JobSet이 띄우는 Pod 수 (replicas x parallelism). 노드당 GPU 1개라 필요한 노드 수와 같다"""
+    total = 0
+    for rj in (js.get("spec") or {}).get("replicatedJobs") or []:
+        job = (rj.get("template") or {}).get("spec") or {}
+        total += int(rj.get("replicas", 1)) * int(job.get("parallelism", 1))
+    return total
+
+
+def _is_pin(expr):
+    return expr.get("key") == HOSTNAME and expr.get("operator") == "In"
+
+
+def _set_pin(spec, nodes):
+    """required nodeAffinity의 모든 term에 hostname In [nodes]를 AND로 넣는다. nodes가 없으면 hostname In만 뺀다.
+    term끼리는 OR라서 term마다 넣어야 원래 조건과 함께 걸린다. hostname 외 원래 조건은 건드리지 않는다"""
+    affinity = spec.get("affinity") or {}
+    node = affinity.get("nodeAffinity") or {}
+    required = node.get("requiredDuringSchedulingIgnoredDuringExecution") or {}
+    terms = []
+    for t in required.get("nodeSelectorTerms") or []:
+        t = dict(t)
+        exprs = [e for e in t.get("matchExpressions") or [] if not _is_pin(e)]
+        if exprs:
+            t["matchExpressions"] = exprs
+        else:
+            t.pop("matchExpressions", None)
+        if t:
+            terms.append(t)
+    if nodes:
+        pin = {"key": HOSTNAME, "operator": "In", "values": sorted(nodes)}
+        terms = [{**t, "matchExpressions": (t.get("matchExpressions") or []) + [copy.deepcopy(pin)]} for t in terms]             or [{"matchExpressions": [pin]}]
+    if terms:
+        node["requiredDuringSchedulingIgnoredDuringExecution"] = {**required, "nodeSelectorTerms": terms}
+    else:
+        node.pop("requiredDuringSchedulingIgnoredDuringExecution", None)
+    for parent, key, value in ((affinity, "nodeAffinity", node), (spec, "affinity", affinity)):
+        if value:
+            parent[key] = value
+        else:
+            parent.pop(key, None)
+
+
+def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None,
+           pin_nodes=None) -> dict:
     """원본 jobset.json -> gen 세대 재제출본. orig는 바꾸지 않는다"""
     new = copy.deepcopy(orig)
     new.pop("status", None)
@@ -121,6 +171,7 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
         tols = spec.setdefault("tolerations", [])
         if not any(t.get("key") == K.TAINT_SPARE for t in tols):
             tols.append(dict(SPARE_TOLERATION))
+        _set_pin(spec, pin_nodes)
         for ct in (spec.get("initContainers") or []) + (spec.get("containers") or []):
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:

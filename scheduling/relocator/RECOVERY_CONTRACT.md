@@ -29,6 +29,8 @@ relocator는 4번의 확인 주석이 붙기 전에는 새 세대를 내지 않�
 | **`toGeneration`** | integer | 새 세대. 반드시 `jobRef` 옛 세대 + 1. 아니면 relocator가 `Failed` |
 | **`stopDeadline`** | RFC3339(시간대 필수) 또는 epoch 초 | 옛 실행 종료 마감 = 펜싱 표 `stop_wait_deadline`. 지나면 `Held`. 없으면 RR 생성 + 15분 |
 | **`jobSet`** | object | 해시를 대조한 원본 JobSet 전체 (`kind: JobSet`). 없으면 `Failed` |
+| **`sourceCluster`** | string | 옛 세대가 돌던 클러스터. 지금은 restartInPlace `nodes`와 함께만 쓴다 (GPU-280·GPU-295) |
+| **`nodes`** | array `[{name, instanceId?}]` | 옛 세대가 쓰던 노드. restartInPlace면 재제출본을 이 노드·`sourceCluster`에 고정. 없으면 고정 안 함(원래 클러스터 우선). 있는데 `sourceCluster` 없음·name 없음/중복·Pod 수보다 적음이면 접수 단계 `Failed` |
 
 relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다르거나 `devoops/job-id` 라벨이 요청 잡과 다르면 거부한다.
 
