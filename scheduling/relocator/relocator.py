@@ -8,16 +8,19 @@ action:
   restartInPlace   노드 격리 없이 재제출. spec.nodes가 있으면 그 노드·spec.sourceCluster에만 다시 띄움 (제자리 재시작,
                    GPU-280). 노드·클러스터는 복구 컨트롤러가 정해서 준다. relocator는 조회·판단하지 않는다.
                    spec.nodes가 없으면(복구 컨트롤러 계약 반영 전) 원래 클러스터 우선 (ADR-38)
-  moveToSpare      고장 노드 cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
+  moveToSpare      spec.sourceCluster의 spec.excludeNodes cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
-  evacuateCluster  (AZ·클러스터 장애) 클러스터 펜싱 -> 원래 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
-                   잡이 아직 워커에 안 보내졌으면 펜싱은 건너뛰고 재제출만
+  evacuateCluster  (AZ·클러스터 장애) spec.excludeClusters 펜싱 -> 그 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
+
+대상 클러스터·노드는 복구 컨트롤러가 spec(sourceCluster·nodes·excludeNodes·excludeClusters)으로 준다 (GPU-295).
+relocator는 Workload·워커 Pod를 보고 대상을 정하지 않는다. 받은 값으로 실행할 수 없으면 판단하지 않고 Failed
 
 자리는 정하지 않는다. 재제출한 잡도 디스패처를 다시 거친다.
 
 복구 컨트롤러와 나누는 일 (ADR-50. relocator는 S3·DynamoDB에 가지 않는다):
   복구 컨트롤러  판단 -> 펜싱 표 세대 +1 -> S3 원본 읽기·해시 대조 -> 이 요청 생성
                  spec: requestId · jobRef(옛 세대) · action · excludeNodes/Clusters · toGeneration · stopDeadline · jobSet(원본)
+                       · sourceCluster · nodes(옛 세대 노드 [{name, instanceId?}])
   재배치 실행기  격리 -> 옛 실행이 멈춘 걸 확인하면 status.recoveryProgress(OLD_RUN_STOPPED + 종료 증거)
   복구 컨트롤러  status를 보고 펜싱 표에 OLD_RUN_STOPPED 조건부 기록 -> 요청에 devoops/recovery-stop-recorded=true
   재배치 실행기  spec.jobSet에서 6절 값만 바꿔 job-{id}-g{새 세대 4자리} 제출
@@ -142,12 +145,13 @@ def accept(x: Ctx, all_rrs):
                acceptedAt=kube.now_rfc3339())
         return False
     to_gen = x.to_gen()      # 형식이 틀린 요청은 PermissionError -> Failed
+    check_targets(x)            # 받은 대상으로 실행할 수 없으면 옛 잡을 내리기 전에 Failed
     pin_spec(x, x.original())   # 실행할 수 없는 제자리 재시작도 옛 잡을 내리기 전에 Failed
     wl = kube.workload_for_jobset(x.mgr, ns, name)
     if not wl:
         x.save(phase="Failed", message=f"잡 {ns}/{name}의 Workload를 못 찾음", acceptedAt=kube.now_rfc3339())
         return False
-    source = (wl.get("status") or {}).get("clusterName") or ""
+    source = x.spec.get("sourceCluster") or ""   # 기록용 (디스패처 자리 지키기·EKS 끄기 검사가 읽음). 대상은 spec
     old_exclude = ""
     try:
         old = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
@@ -159,8 +163,8 @@ def accept(x: Ctx, all_rrs):
            oldExclude=old_exclude, acceptedAt=kube.now_rfc3339(), message="접수",
            seenClusters=sorted(set(x.st.get("seenClusters") or []) | copy_clusters(wl)),
            **({"gpus": sum(kube.workload_pods(wl))} if wl.get("spec", {}).get("podSets") else {}))
-    log.info("%s: 접수 %s %s/%s (지금 %s, 세대 %s -> %s)", x.name, x.spec["action"], ns, name,
-             source or "워커 미정", old_gen, to_gen)
+    log.info("%s: 접수 %s %s/%s (원래 클러스터 %s, 세대 %s -> %s)", x.name, x.spec["action"], ns, name,
+             source or "-", old_gen, to_gen)
     return True
 
 
@@ -199,58 +203,36 @@ def cordon_nodes(x: Ctx, src, nodes):
         log.info("%s: %s/%s cordon + taint", x.name, src, node)
 
 
-def record_old_nodes(x: Ctx, src):
-    """옛 잡 Pod가 있던 노드 [{node, instanceId}] = terminate 모드 강제 종료 대상. 워커 접속이 안 되거나 실패하면 빈 목록"""
-    ns, name = x.job()
-    try:
-        api = (x.workers.get() if x.workers else {}).get(src)
-        if api is None:
-            return []
-        core = client.CoreV1Api(api)
-        pods = core.list_namespaced_pod(ns, label_selector=f"jobset.sigs.k8s.io/jobset-name={name}",
-                                        _request_timeout=kube.TIMEOUT).items
-        out = []
-        for node in sorted({p.spec.node_name for p in pods if p.spec.node_name}):
-            n = core.read_node(node, _request_timeout=kube.TIMEOUT)
-            out.append({"node": node, "instanceId": ec2_evidence.instance_id(n.spec.provider_id)})
-        return out
-    except Exception as e:  # noqa: BLE001  기록은 보조 정보라 실패해도 격리는 계속
-        log.warning("%s: %s 옛 노드 기록 실패 (%s) - EC2 강제 종료 대상 없음", x.name, src, type(e).__name__)
-        return []
-
-
-def current_source(x: Ctx):
-    """옛 잡이 지금 보내져 있는 워커 (관리 클러스터 Workload 기준). Workload가 없거나 아직 안 보내졌으면 빈 문자열"""
-    ns, name = x.job()
-    wl = kube.workload_for_jobset(x.mgr, ns, name)
-    return ((wl or {}).get("status") or {}).get("clusterName") or ""
+def check_targets(x: Ctx):
+    """격리 대상이 spec에 있는지. 없거나 형식이 틀리면 PermissionError -> Failed (relocator가 대신 정하지 않는다)"""
+    action = x.spec["action"]
+    if action == "moveToSpare" and x.spec.get("excludeNodes") and not x.spec.get("sourceCluster"):
+        raise PermissionError(f"moveToSpare spec.excludeNodes {x.spec['excludeNodes']}를 격리할 spec.sourceCluster가 없음")
+    if action == "evacuateCluster":
+        clusters = x.spec.get("excludeClusters")
+        if not clusters or not isinstance(clusters, list) or not all(isinstance(c, str) and c for c in clusters):
+            raise PermissionError("evacuateCluster인데 펜싱할 spec.excludeClusters가 없음")
 
 
 def isolate(x: Ctx):
     # 노드 cordon·클러스터 펜싱은 되돌리기 어려운 일이라 status(다른 주체도 쓸 수 있음)를 믿지 않는다:
-    # 대상 클러스터를 Workload에서 다시 구한다. 권한을 잃은 요청은 컨트롤러가 취소 주석으로 멈춘다(step 맨 앞)
+    # 대상은 spec(만든 뒤 바꿀 수 없음)에서만 구한다. 권한을 잃은 요청은 컨트롤러가 취소 주석으로 멈춘다(step 맨 앞)
     x.to_gen()
-    action, src = x.spec["action"], current_source(x)
-    if src != (x.st.get("sourceCluster") or ""):
-        # 접수 뒤 디스패처가 막 보냈거나(빈 값 -> 워커), status가 바뀐 경우. 어느 쪽이든 Workload가 맞다
-        log.warning("%s: status의 sourceCluster=%r 대신 Workload 기준 %r 사용", x.name, x.st.get("sourceCluster"), src)
-        x.save(sourceCluster=src)
-    if src and "oldNodes" not in x.st:
-        # 워커가 아직 살아 있을 때 옛 잡이 돌던 노드·인스턴스를 적어 둔다. 나중에 워커가 끊기면 강제 종료 대상 (증거 아님)
-        x.st["oldNodes"] = record_old_nodes(x, src)
+    check_targets(x)
+    action, src = x.spec["action"], x.spec.get("sourceCluster")
     nodes = x.spec.get("excludeNodes") or []
     if action == "moveToSpare" and nodes:
-        if not src:
-            raise PermissionError(f"잡이 아직 워커에 안 보내져서 {nodes}를 어느 클러스터에서 격리할지 모름")
         cordon_nodes(x, src, nodes)
-    elif action == "evacuateCluster" and not src:
-        # 잡이 아직 워커에 안 보내졌음 -> 어느 클러스터를 펜싱할지 모름. 펜싱은 건너뛰고
-        # 옛 잡 내리기·재제출만 한다 (재제출본은 spec.excludeClusters를 피해서 감)
-        log.warning("%s: 잡이 워커에 보내지기 전이라 펜싱할 클러스터 없음 -> 펜싱 건너뜀", x.name)
     elif action == "evacuateCluster":
-        x.co.patch_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", src,
-                                         {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
-        log.info("%s: %s 펜싱 (새 잡 안 보냄)", x.name, src)
+        for c in sorted(set(x.spec["excludeClusters"])):
+            try:
+                x.co.patch_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", c,
+                                                 {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
+            except client.ApiException as e:
+                if e.status == 404:
+                    raise PermissionError(f"spec.excludeClusters의 {c}가 MultiKueueCluster에 없음") from e
+                raise
+            log.info("%s: %s 펜싱 (새 잡 안 보냄)", x.name, c)
     x.save(phase="Executing", isolatedAt=kube.now_rfc3339())
 
 
@@ -482,26 +464,13 @@ def self_fence_stop_evidence(x: Ctx, why, src):
 
 def ec2_stop_evidence(x: Ctx, why, src=None):
     """워커 src에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
-    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (기록한 옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
-    src를 안 주면 입장했던 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다.
-    terminate 모드면 워커가 STOP_WAIT_SECONDS 넘게 안 닿을 때 기록해 둔 옛 노드만 한 번 내린다 (옛 실행을 끊는 용도).
-    기록한 옛 노드는 입장했던 워커의 것이라, 내리기는 src가 sourceCluster일 때만"""
+    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
+    src를 안 주면 원래 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다. 인스턴스는 내리지 않는다"""
     ec2 = getattr(x, "ec2", None)
     src = src or x.st.get("sourceCluster")
     if ec2 is None or not src:
         return False, why
-    is_source = src == x.st.get("sourceCluster")
-    old_ids = [n["instanceId"] for n in x.st.get("oldNodes") or [] if n.get("instanceId")] if is_source else []
     ok, ev, _ = ec2.check(src)
-    if (not ok and old_ids and ec2.can_terminate and not x.st.get("ec2TerminatedAt")
-            and kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS):
-        try:
-            done = ec2.terminate(src, old_ids)
-            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=done)
-            ev += f" -> 옛 노드 강제 종료 요청 {done}"
-        except Exception as e:  # noqa: BLE001  권한 없음·태그 불일치 등. 사람 확인 경로로 남음
-            x.save(ec2TerminatedAt=kube.now_rfc3339(), ec2Terminated=[], ec2TerminateError=str(e))
-            ev += f" -> 강제 종료 실패 ({type(e).__name__}: {e})"
     return ok, f"{why}; {ev}"
 
 
@@ -524,7 +493,7 @@ def pin_spec(x: Ctx, orig):
 
 
 def build_new(x: Ctx):
-    target, exclude = R.placement_hints(x.spec["action"], x.st.get("sourceCluster"),
+    target, exclude = R.placement_hints(x.spec["action"], x.spec.get("sourceCluster"),
                                         x.st.get("oldExclude"), x.spec.get("excludeClusters"))
     orig = x.original()
     # 복구 원본이 이 요청의 잡 것인지 확인 (컨트롤러가 해시를 대조했지만 네임스페이스·작업 ID를 한 번 더 맞춰 본다)
@@ -534,7 +503,7 @@ def build_new(x: Ctx):
     oid = (ometa.get("labels") or {}).get(K.LABEL_JOB_ID)
     if oid and oid != x.job_id():
         raise PermissionError(f"복구 원본 {K.LABEL_JOB_ID}={oid} != 요청 잡 {x.job_id()}")
-    preferred = x.st.get("sourceCluster") if x.spec["action"] in R.PREFER_SOURCE else None
+    preferred = (x.spec.get("sourceCluster") or None) if x.spec["action"] in R.PREFER_SOURCE else None
     cluster, pin = pin_spec(x, orig)
     if pin:   # 복구 컨트롤러가 준 노드·클러스터에 고정 (다른 클러스터엔 그 노드가 없음)
         target, preferred = cluster, None
@@ -711,8 +680,7 @@ def main():
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
     ec2 = ec2_evidence.from_env()
-    log.info("시작: interval=%ss ec2=%s", INTERVAL,
-             "off" if ec2 is None else ("terminate" if ec2.can_terminate else "describe"))
+    log.info("시작: interval=%ss ec2=%s", INTERVAL, "off" if ec2 is None else "describe")
     while True:
         if not elector.is_leader():
             time.sleep(1)

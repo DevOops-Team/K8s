@@ -53,7 +53,7 @@ def original():
 
 def rr(action="moveToSpare", annotations=None, spec=None, **status):
     s = {"requestId": "r1", "jobRef": "training/job-abc-g0001", "action": action,
-         "excludeNodes": ["gpu-node-1"], "toGeneration": 2, "jobSet": original()}
+         "excludeNodes": ["gpu-node-1"], "toGeneration": 2, "jobSet": original(), "sourceCluster": "worker1"}
     s.update(spec or {})
     return {"metadata": {"name": "rr1", "namespace": "training", "uid": "u1",
                          "creationTimestamp": "2026-11-06T00:00:00Z", "annotations": dict(annotations or {})},
@@ -115,7 +115,8 @@ class Resubmit(unittest.TestCase):
 
     def test_evacuate_excludes_source_without_preference(self):
         co = FakeCO()
-        relocator.resubmit(ctx(co, action="evacuateCluster", annotations=ACK, **stopped()))
+        relocator.resubmit(ctx(co, action="evacuateCluster", annotations=ACK,
+                               spec={"excludeClusters": ["worker1"]}, **stopped()))
         ann = co.created[0]["metadata"]["annotations"]
         self.assertNotIn(K.ANN_PREFERRED, ann)
         self.assertIn("worker1", ann[K.ANN_EXCLUDE].split(','))
@@ -183,7 +184,7 @@ class PinNodes(unittest.TestCase):
 
     def test_unrunnable_spec_fails(self):
         cases = {
-            "no cluster": dict(nodes=self.NODES),
+            "no cluster": dict(nodes=self.NODES, sourceCluster=None),
             "too few": dict(nodes=[{"name": "node-1"}], sourceCluster="eks-a"),
             "no name": dict(nodes=[{"name": "node-1"}, {"instanceId": "i-2"}], sourceCluster="eks-a"),
             "duplicate": dict(nodes=[{"name": "node-1"}, {"name": "node-1"}], sourceCluster="eks-a"),
@@ -276,6 +277,26 @@ class Accept(unittest.TestCase):
             self.assertFalse(relocator.accept(x, [x.rr]))
         self.assertEqual(co.status["phase"], "Failed")
 
+    def test_source_is_recorded_from_spec_not_workload(self):
+        # 대상은 spec. Workload가 다른 곳에 보내져 있으면 그곳은 종료 확인 대상(seenClusters)으로만 남긴다
+        co = FakeCO()
+        x = ctx(co)
+        with on_worker("worker2"):
+            self.assertTrue(relocator.accept(x, [x.rr]))
+        self.assertEqual(co.status["sourceCluster"], "worker1")
+        self.assertEqual(co.status["seenClusters"], ["worker2"])
+
+    def test_targets_missing_from_spec_fail_before_lookup(self):
+        cases = {"moveToSpare": {"sourceCluster": None},
+                 "evacuateCluster": {"excludeClusters": []}}
+        for action, spec in cases.items():
+            with self.subTest(action=action):
+                x = ctx(FakeCO(), action=action, spec=spec)
+                with mock.patch.object(relocator.kube, "workload_for_jobset",
+                                       side_effect=AssertionError("거부할 요청은 Workload도 안 봄")), \
+                        self.assertRaises(PermissionError):
+                    relocator.accept(x, [x.rr])
+
     def test_duplicate_check_ignores_other_namespaces(self):
         co = FakeCO()
         x = ctx(co)
@@ -286,35 +307,78 @@ class Accept(unittest.TestCase):
         self.assertEqual(co.status["phase"], "Accepted")
 
 
+def _node(name):
+    n = mock.Mock()
+    n.metadata.name = name
+    n.spec.taints = []
+    return n
+
+
+class FakeCore:
+    """워커 CoreV1Api 중 cordon이 쓰는 것만"""
+
+    def __init__(self, gpu_nodes):
+        self.gpu_nodes, self.patched = gpu_nodes, []
+
+    def list_node(self, **kw):
+        return mock.Mock(items=[_node(n) for n in self.gpu_nodes])
+
+    def read_node(self, name, **kw):
+        return _node(name)
+
+    def patch_node(self, name, body, **kw):
+        self.patched.append(name)
+
+
 class Isolate(unittest.TestCase):
-    def test_evacuate_without_source_skips_fencing(self):
+    """격리 대상은 spec에서만 (GPU-295). Workload·워커 Pod를 보고 정하지 않는다"""
+
+    def isolate(self, co, action, workers=None, **spec):
+        x = ctx(co, action=action, spec=spec, sourceCluster="worker3")   # status 값은 무시돼야 함
+        x.workers = workers or mock.Mock(get=mock.Mock(side_effect=AssertionError("워커 조회 금지")))
+        with mock.patch.object(relocator.kube, "workload_for_jobset", side_effect=AssertionError("Workload 조회 금지")):
+            relocator.isolate(x)
+        return x
+
+    def test_evacuate_fences_spec_exclude_clusters(self):
         co = FakeCO()
-        with on_worker(""):
-            relocator.isolate(ctx(co, action="evacuateCluster", sourceCluster=""))
-        self.assertEqual(co.cluster_patches, [])
+        self.isolate(co, "evacuateCluster", excludeClusters=["worker2"])
+        self.assertEqual([p[2:] for p in co.cluster_patches],
+                         [("multikueueclusters", "worker2", {"metadata": {"labels": {"devoops/fenced": "true"}}})])
         self.assertEqual(co.status["phase"], "Executing")
         self.assertIn("isolatedAt", co.status)
 
-    def test_evacuate_with_source_fences(self):
+    def test_evacuate_without_exclude_clusters_fails(self):
         co = FakeCO()
-        with on_worker("worker2"):
-            relocator.isolate(ctx(co, action="evacuateCluster", sourceCluster="worker2"))
-        self.assertEqual(co.cluster_patches[0][2:], ("multikueueclusters", "worker2",
-                                                     {"metadata": {"labels": {"devoops/fenced": "true"}}}))
-
-    def test_tampered_status_source_is_ignored(self):
-        # status를 worker3으로 바꿔도 Workload가 worker2에 있으면 worker2를 펜싱
-        co = FakeCO()
-        with on_worker("worker2"):
-            relocator.isolate(ctx(co, action="evacuateCluster", sourceCluster="worker3"))
-        self.assertEqual([p[3] for p in co.cluster_patches], ["worker2"])
-        self.assertEqual(co.status["sourceCluster"], "worker2")
-
-    def test_status_source_without_workload_does_not_fence(self):
-        co = FakeCO()
-        with on_worker(None):
-            relocator.isolate(ctx(co, action="evacuateCluster", sourceCluster="worker3"))
+        for bad in (None, [], [""], "worker2"):
+            with self.subTest(bad=bad), self.assertRaises(PermissionError):
+                self.isolate(co, "evacuateCluster", excludeClusters=bad)
         self.assertEqual(co.cluster_patches, [])
+
+    def test_evacuate_unknown_cluster_fails(self):
+        co = FakeCO()
+        co.patch_cluster_custom_object = mock.Mock(side_effect=client.ApiException(status=404))
+        with self.assertRaises(PermissionError):
+            self.isolate(co, "evacuateCluster", excludeClusters=["nope"])
+
+    def test_move_to_spare_cordons_on_spec_source(self):
+        core = FakeCore(["gpu-node-1"])
+        api = object()
+        workers = mock.Mock(get=mock.Mock(return_value={"worker1": api}))
+        with mock.patch.object(relocator.client, "CoreV1Api", return_value=core) as made:
+            self.isolate(FakeCO(), "moveToSpare", workers=workers, sourceCluster="worker1")
+        made.assert_called_once_with(api)
+        self.assertEqual(core.patched, ["gpu-node-1"])
+
+    def test_move_to_spare_without_source_fails(self):
+        with self.assertRaises(PermissionError):
+            self.isolate(FakeCO(), "moveToSpare", sourceCluster=None)
+
+    def test_restart_in_place_isolates_nothing(self):
+        co = FakeCO()
+        x = self.isolate(co, "restartInPlace")
+        self.assertEqual(co.cluster_patches, [])
+        self.assertNotIn("oldNodes", x.st)   # 워커에서 옛 노드를 찾아 적지 않는다
 
 
 def elapsed(seconds):
