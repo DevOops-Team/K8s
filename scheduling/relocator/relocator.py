@@ -515,8 +515,7 @@ def build_new(x: Ctx):
     if oid and oid != x.job_id():
         raise PermissionError(f"복구 원본 {K.LABEL_JOB_ID}={oid} != 요청 잡 {x.job_id()}")
     preferred = x.st.get("sourceCluster") if x.spec["action"] in R.PREFER_SOURCE else None
-    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude, preferred=preferred,
-                   action=x.spec["action"])
+    new = R.render(orig, x.job_id(), x.to_gen(), x.spec["requestId"], target, exclude, preferred=preferred)
     new["metadata"]["namespace"] = x.ns
     return new
 

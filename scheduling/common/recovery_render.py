@@ -13,15 +13,10 @@
 | env GENERATION (모든 컨테이너)                    | 1 -> 2 |
 | 배치 힌트 어노테이션                              | recovery-source-cluster(원래 우선) · exclude-clusters |
 | Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
-| Pod 템플릿 affinity (restartInPlace만)            | + preferred nodeAffinity devoops/spare NotIn [true] (일반 노드 먼저) |
 
 예비 노드 toleration을 Kueue ResourceFlavor가 아니라 여기서 넣는 이유: 4장 복구 잡이 학습 노드 3대 + 예비 1대에
 걸쳐 뜨려면 학습 몫을 빌려야 하고(같은 flavor), flavor에 toleration을 두면 그 flavor를 쓰는 학습 잡도 예비에 간다.
 학습 잡이 이 toleration을 달고 오는 것은 관리 클러스터 정책(admission-policy.yaml)이 막는다.
-
-restartInPlace는 노드가 멀쩡한 경우라 예비 노드에 갈 이유가 없다. 예비에 뜨면 캐시가 없어 늦고, 뒤이은 실제 노드 고장
-(moveToSpare)이 쓸 예비 자리를 미리 차지한다. 그래서 toleration은 그대로 두고(일반 노드가 모자랄 때만 예비를 쓰도록)
-예비 라벨 노드를 피하는 preferred nodeAffinity를 더한다. 노드 이름은 쓰지 않는다.
 """
 import copy
 import re
@@ -30,9 +25,6 @@ import keys as K
 
 PREFER_SOURCE = {"restartInPlace", "moveToSpare"}
 SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
-AVOID_SPARE_WEIGHT = 100
-AVOID_SPARE_TERM = {"weight": AVOID_SPARE_WEIGHT, "preference": {"matchExpressions": [
-    {"key": K.TAINT_SPARE, "operator": "NotIn", "values": ["true"]}]}}
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
 
 
@@ -89,29 +81,7 @@ def _master_addresses(values, old_names, addresses, name):
     return out
 
 
-def _set_avoid_spare(spec, on):
-    """restartInPlace면 예비 노드 회피 선호를 하나만 넣고, 아니면 우리가 넣은 것만 뺀다. 원래 affinity는 건드리지 않는다"""
-    affinity = spec.get("affinity") or {}
-    node = affinity.get("nodeAffinity") or {}
-    terms = [t for t in node.get("preferredDuringSchedulingIgnoredDuringExecution") or [] if t != AVOID_SPARE_TERM]
-    if on:
-        terms.append(copy.deepcopy(AVOID_SPARE_TERM))
-    if terms:
-        node["preferredDuringSchedulingIgnoredDuringExecution"] = terms
-    else:
-        node.pop("preferredDuringSchedulingIgnoredDuringExecution", None)
-    if node:
-        affinity["nodeAffinity"] = node
-    else:
-        affinity.pop("nodeAffinity", None)
-    if affinity:
-        spec["affinity"] = affinity
-    else:
-        spec.pop("affinity", None)
-
-
-def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None,
-           action=None) -> dict:
+def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None) -> dict:
     """원본 jobset.json -> gen 세대 재제출본. orig는 바꾸지 않는다"""
     new = copy.deepcopy(orig)
     new.pop("status", None)
@@ -151,7 +121,6 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
         tols = spec.setdefault("tolerations", [])
         if not any(t.get("key") == K.TAINT_SPARE for t in tols):
             tols.append(dict(SPARE_TOLERATION))
-        _set_avoid_spare(spec, action == "restartInPlace")
         for ct in (spec.get("initContainers") or []) + (spec.get("containers") or []):
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:
