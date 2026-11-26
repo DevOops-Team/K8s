@@ -12,7 +12,7 @@ ADR-38: `moveToSpare` 재제출본은 `devoops/recovery-source-cluster`로 원�
 | 파일 | 일감 | 보는 것 | 바꾸는 것 |
 |---|---|---|---|
 | `dispatcher.py` | GPU-67 | 쿼터는 잡았고 워커는 미정인 Workload, 진행 중인 `RelocationRequest`(읽기만) | `status.nominatedClusterNames`, 찜 어노테이션 `devoops/reserved-cluster` |
-| `relocator.py` | GPU-68 | `RelocationRequest` + 펜싱 기록(DynamoDB) | 노드 cordon·taint, MultiKueueCluster 펜싱 라벨, 잡 삭제·재제출, 펜싱 기록 `recovery_phase`, 요청 status |
+| `relocator.py` | GPU-68 | 복구 컨트롤러의 `RelocationRequest` 입력·제어 신호 | 노드 cordon·taint, MultiKueueCluster 펜싱 라벨, 잡 삭제·재제출, 요청 status 반환. EC2·S3·DynamoDB 직접 조회 없음 |
 
 - `keys.py`: 다른 파트와 맞물리는 이름(라벨·어노테이션·CRD). 이름 바꿀 땐 여기만.
 - `placement.py`·`recovery_render.py`: 디스패처(빈 패킹)·재배치 실행기 판단만 떼어 낸 순수 함수. `python -m unittest test_*.py`
@@ -46,7 +46,7 @@ For local execution, run `python scheduling/dispatcher/dispatcher.py` or
 ### Layout and tests
 
 - `dispatcher/`: dispatcher, placement, tests and Dockerfile.
-- `relocator/`: relocator, ec2_evidence, tests and Dockerfile.
+- `relocator/`: relocator, controller contract, tests and Dockerfile.
 - `common/`: keys, kube, leader, recovery_render, tests and requirements.txt.
 
 ```bash
@@ -166,10 +166,8 @@ Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patc
 | `LEASE_SECONDS` / `RENEW_SECONDS` | 15 / 5 | 리더가 이만큼 갱신 안 하면 남이 가져감 / 갱신 주기 |
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
 | `STOP_WAIT_SECONDS` | 120 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
-| `STOP_HOLD_SECONDS` | 900 | RR `spec.stopDeadline` 우선. 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 |
-| `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만 (인스턴스를 내리는 모드는 없음, 예전 값 `terminate`는 `describe`로 동작). 필요 IAM: `ec2:DescribeInstances`. 고정 노드그룹은 ASG가 대수를 유지하므로 EC2 증거가 서는 건 사실상 노드그룹을 0대로 내린 경우 |
+| `STOP_HOLD_SECONDS` | 900 | RR `spec.stopDeadline` 우선. 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 복구 컨트롤러와 재개 절차가 필요하며 사람 확인 주석만으로 양쪽 HOLD가 풀리지는 않음 |
 | `SELF_FENCE_EVIDENCE` | off | `on`이면 워커 EKS API에 닿지 않을 때 복구 컨트롤러가 RR에 붙인 `devoops/self-fence-verified`(펜싱 표 `self_fence_*` 확인 결과)를 그 워커의 옛 실행 종료로 인정 (ADR-49). 요청·옛 세대·워커가 맞고, 복구 원본 Pod 수 N과 `worldSize`가 같고, 번호 0~N-1 전부와 번호마다 Pod UID 하나가 있어야 함. 복구 원본이 Pod를 다시 만들지 않는 모양(`maxRestarts` 0, replicas 1, Indexed, `backoffLimit` 0, `podReplacementPolicy: Failed`, `restartPolicy: Never`)일 때만. 증거 kind `self_fence`. ADR-49 남은 구멍 반영·시험 통과 전에는 켜지 않음 |
-| `EC2_CLUSTERS` / `EC2_NODEGROUPS` | `{}` / training,spare | MultiKueueCluster 이름 → EKS 클러스터 이름(JSON, 없으면 같은 이름, `eks:cluster-name` 태그) / 찾을 학습·예비 관리형 노드그룹 이름(`eks:nodegroup-name` 태그, 실제 이름으로 넣을 것) |
 | `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |
 
 ## 아직 없는 것
@@ -180,6 +178,8 @@ Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patc
 
 펜싱 시각은 epoch seconds(숫자/문자열) 또는 시간대가 있는 RFC3339를 읽는다. 잘못된 시각은 오류로 보류하며 RR 시각으로 대체하지 않는다.
 `OLD_RUN_STOPPED` 조건부 갱신에 `old_run_stop_evidence` JSON 문자열을 함께 저장한다(AWS/ConfigMap 동일 형식).
-필드는 `generation`, `namespace`, `jobset_name`, `clusters`, `kind`(`automatic`/`ec2`/`manual`), `checks`(워커별 `cluster`·`kind`·`detail`), `confirmed_at`, `confirmed_by`, `recorded_by`, `detail`이다.
-EC2와 API 확인이 섞이면 전체 `kind`는 `ec2`, 세부 경로는 `checks`로 구분한다. 워커에 보내기 전이면 `clusters`·`checks`는 빈 배열이다.
+필드는 `generation`, `namespace`, `jobset_name`, `clusters`, `kind`(`automatic`/`self_fence`/`manual`), `checks`(워커별 `cluster`·`kind`·`detail`), `confirmed_at`, `confirmed_by`, `recorded_by`, `detail`이다. relocator가 status로 보고하면 복구 컨트롤러가 펜싱 표에 기록한다.
+API 소멸 확인과 컨트롤러의 자기 펜싱 확인이 섞이면 전체 `kind`는 `self_fence`, 세부 경로는 `checks`로 구분한다. 과거 `ec2` 증거가 이미 기록된 RR은 그 증거를 보존하지만 새 EC2 증거를 직접 생산하지 않는다. 워커에 보내기 전이면 `clusters`·`checks`는 빈 배열이다.
 수동 확인은 기존 `devoops/old-execution-stopped=true`를 따른다. 어노테이션만으로 작성자를 알 수 없어 `confirmed_by`는 `unknown (RR annotation)`으로 기록한다. 자동 확인은 `relocator`, `recorded_by`는 `POD_NAME` 또는 호스트명·PID이며 `confirmed_at`은 relocator가 확인한 시각이다.
+
+GPU-297: `EC2_EVIDENCE`·`EC2_CLUSTERS`·`EC2_NODEGROUPS`는 제거됐다. 옛 설정이 남아 있어도 AWS에 접근하지 않는다. 여러 격리 대상 중 Node 객체가 이미 없으면 그 대상의 cordon만 건너뛰고 나머지를 격리한다. Node 없음은 옛 실행 종료 증거가 아니므로, 옛 Pod·JobSet·Workload가 남거나 워커 API에 닿지 못하면 기존 종료 대기를 유지한다. 다중 노드 장애·노드그룹 0대의 일반 종료 증거 전달과 HOLD 재개에 필요한 복구 컨트롤러 요청은 [연계 계약 7절](relocator/RECOVERY_CONTRACT.md#7-gpu-297-복구-컨트롤러에-요청할-연계)에 정리했다.
