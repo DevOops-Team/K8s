@@ -86,8 +86,6 @@ class RelocationInputs:
 
     def _collect_failed_nodes(self, event, placed_nodes):
         """Collect actionable hardware faults once, excluding unrelated events."""
-
-        """Collect hardware faults already recorded for the same old placement."""
         from recovery.policy import plan
         known = {item['name'] for item in placed_nodes}
         primary = event.get('node')
