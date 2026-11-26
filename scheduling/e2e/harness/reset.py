@@ -48,7 +48,8 @@ def reset(kube, timeout=180):
             _ignore_404(core.delete_namespaced_config_map, cm.metadata.name, STORE_NS, _request_timeout=T)
     for w in WORKERS:
         _ignore_404(co.patch_cluster_custom_object, K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", w,
-                    {"metadata": {"labels": {K.LABEL_FENCED: None}}}, _request_timeout=T)
+                    {"metadata": {"labels": {K.LABEL_FENCED: None}, "annotations": {
+                        K.ANN_FENCED_BY: None, K.ANN_FENCED_WORKER: None}}}, _request_timeout=T)
         wcore = kube.wcore(w)
         for n in wcore.list_node(label_selector=GPU_SELECTOR, _request_timeout=T).items:
             taints = [t for t in (n.spec.taints or []) if t.key != K.TAINT_FAULTY]
