@@ -95,6 +95,39 @@ class Store:
             return inbox_record({**previous, **values})
         return inbox_record(previous)
 
+    def snapshot_excluded_nodes(self, event, calculate):
+        """Freeze moveToSpare exclusions in the durable event inbox before RR creation.
+
+        Conditional write protects retries/leader failover; the winning snapshot
+        is returned even if a concurrent worker observed additional faults.
+        """
+        rid = event['event_id']
+        existing = self.get(rid)
+        if 'exclude_nodes_snapshot' in existing:
+            return self._validate_excluded_nodes_snapshot(event, existing['exclude_nodes_snapshot'])
+        proposed = self._validate_excluded_nodes_snapshot(event, calculate())
+        try:
+            self.table.update_item(
+                Key={'pk': 'event#' + rid},
+                UpdateExpression='SET exclude_nodes_snapshot = :nodes',
+                ConditionExpression='attribute_exists(pk) AND attribute_not_exists(exclude_nodes_snapshot)',
+                ExpressionAttributeValues={':nodes': proposed})
+            return proposed
+        except Exception as exc:
+            if not self._conditional_failed(exc):
+                raise
+        return self._validate_excluded_nodes_snapshot(
+            event, self.get(rid).get('exclude_nodes_snapshot'))
+
+    @staticmethod
+    def _validate_excluded_nodes_snapshot(event, nodes):
+        if (not isinstance(nodes, list) or not nodes
+                or any(not isinstance(node, str) or not node.strip() for node in nodes)
+                or len(set(nodes)) != len(nodes) or nodes != sorted(nodes)
+                or event.get('node') not in nodes):
+            raise RecoveryBlocked('invalid durable excluded-nodes snapshot')
+        return list(nodes)
+
     def context(self, event, recovering=False):
         item = self.table.get_item(Key={'pk':'job#'+event['job_id']}, ConsistentRead=True).get('Item')
         if not item:
