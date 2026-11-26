@@ -64,7 +64,12 @@ class RelocationClient:
             if exc.code != 409:
                 raise
             existing = self.transport('GET', path + '/' + name)
-            if existing.get('spec') != spec:
+            existing_spec = existing.get('spec', {})
+            # An in-flight request created before GPU-295 has an immutable legacy spec.
+            if 'sourceCluster' not in existing_spec and 'nodes' not in existing_spec:
+                spec = {key: value for key, value in spec.items()
+                        if key not in ('sourceCluster', 'nodes')}
+            if existing_spec != spec:
                 raise ValueError('RelocationRequest name belongs to a different request') from exc
         return name
 
