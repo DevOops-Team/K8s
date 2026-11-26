@@ -9,6 +9,7 @@ from kubernetes import client
 import relocator
 
 K = relocator.K
+R = relocator.R
 
 
 class FakeCO:
@@ -142,6 +143,22 @@ class Resubmit(unittest.TestCase):
         orig["metadata"]["labels"][K.LABEL_JOB_ID] = "zzz"
         with self.assertRaises(PermissionError):
             relocator.build_new(ctx(FakeCO(), spec={"jobSet": orig}, sourceCluster="worker1"))
+
+
+    def test_action_reaches_render(self):
+        """restartInPlace 요청만 재제출본에 예비 노드 회피 선호가 붙는다 (GPU-280)"""
+        for action, want in (("restartInPlace", True), ("moveToSpare", False), ("evacuateCluster", False)):
+            with self.subTest(action=action):
+                orig = original()
+                orig["spec"] = {"replicatedJobs": [{"name": "workers", "template": {"spec": {"template": {
+                    "spec": {"containers": [{"name": "trainer"}]}}}}}]}
+                new = relocator.build_new(ctx(FakeCO(), action=action, spec={"jobSet": orig},
+                                              sourceCluster="worker1"))
+                for rj in new["spec"]["replicatedJobs"]:
+                    spec = rj["template"]["spec"]["template"]["spec"]
+                    terms = ((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
+                        "preferredDuringSchedulingIgnoredDuringExecution") or []
+                    self.assertEqual(R.AVOID_SPARE_TERM in terms, want)
 
 
 class Cancel(unittest.TestCase):
