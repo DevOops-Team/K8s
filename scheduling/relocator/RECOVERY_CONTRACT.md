@@ -116,7 +116,7 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 
 운영 매니페스트는 이 저장소에서 고치지 않는다. 두 컨트롤러가 같은 계약으로 함께 배포되어야 한다. 한쪽만 바뀌면 relocator가 `Failed`(spec 필드 없음)하거나 컨트롤러가 진행하지 못한다.
 
-GPU-295: 복구 컨트롤러가 `sourceCluster`·`nodes`를 채우기 전에 이 relocator가 배포되면 moveToSpare(`excludeNodes` 있음)는 접수 단계 `Failed`, restartInPlace·moveToSpare는 원래 클러스터 우선 힌트 없이 재제출, EC2 강제 종료는 대상 없음이 된다. CRD에는 두 필드가 이미 있다(Gitops #115).
+GPU-295: 복구 컨트롤러는 옛 세대 등록 배치(`cluster`·`active_nodes`)로 모든 action에 `sourceCluster`·`nodes`를 채운다(`relocation_inputs.py`). 배치 계약에 인스턴스 ID가 없어 `nodes[].instanceId`는 비어 있고, 그동안 EC2 terminate 모드의 강제 종료 대상은 없다(종료 증거 판단은 그대로). 두 필드가 없는 옛 요청(GPU-295 전에 만든 진행 중 RR)은 moveToSpare(`excludeNodes` 있음)면 접수 단계 `Failed`, 나머지는 원래 클러스터 우선 힌트 없이 재제출된다. CRD에는 두 필드가 이미 있다(Gitops #115).
 
 **CRD `crd-relocationrequest.yaml` spec.properties에 추가** (spec은 unknown 필드를 버리므로 필수):
 
