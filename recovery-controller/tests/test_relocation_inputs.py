@@ -19,6 +19,7 @@ class InputTests(unittest.TestCase):
                           recovery_to_gen=2, recovery_phase='GENERATION_ADVANCED',
                           stop_wait_started_at=1000, stop_wait_deadline=1900)
         self.store, self.s3 = Mock(), Mock()
+        self.store.records.return_value = []
         self.store.fencing_record.return_value = self.fence
         self.store.placement.return_value = dict(jobset_uri='s3://code/code/abc/jobset.json',
             jobset_sha256=hashlib.sha256(self.raw).hexdigest(), cluster='eks-a',
@@ -78,6 +79,21 @@ class InputTests(unittest.TestCase):
         self.assertNotIn('annotations', saved['metadata'])
         self.assertEqual(client.submit(EVENT, 'moveToSpare'), name)  # response loss: 409 + same spec
         self.assertEqual([c[0] for c in calls], ['POST', 'POST', 'GET'])
+
+    def test_multiple_fault_nodes(self):
+        self.store.placement.return_value.update(active_nodes=['bad', 'other', 'healthy'], gpu_count=3)
+        fault = dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')
+        self.store.records.return_value = [
+            {'event': fault}, {'event': fault},
+            {'event': dict(fault, node='healthy', generation=2)},
+            {'event': dict(fault, node='healthy', cluster='eks-b')},
+            {'event': dict(fault, node='healthy', job_id='different')},
+            {'event': dict(fault, node='healthy', collector_healthy=False)},
+            {'event': dict(fault, node='healthy', suggested_action='hold')},
+        ]
+        transport = Mock()
+        RelocationClient('training', transport, self.provider).submit(EVENT, 'moveToSpare')
+        self.assertEqual(transport.call_args.args[2]['spec']['excludeNodes'], ['bad', 'other'])
 
     def test_pod_restart_uses_full_placement_when_fault_node_is_unknown(self):
         transport = Mock()
