@@ -63,3 +63,27 @@ class RelocationInputs:
                 'jobSet': original,
                 'sourceCluster': cluster,
                 'nodes': [{'name': node} for node in sorted(nodes)]}
+
+    def failed_nodes(self, event, placed_nodes):
+        """Collect hardware faults already recorded for the same old placement."""
+        from recovery.policy import plan
+        known = {item['name'] for item in placed_nodes}
+        primary = event.get('node')
+        if primary not in known:
+            raise RecoveryBlocked('fault node outside old placement')
+        faults = {primary}
+        for record in self.store.records():
+            other = record.get('event', {})
+            if (other.get('job_id') != event['job_id']
+                    or other.get('generation') != event['generation']
+                    or other.get('cluster') != event['cluster']
+                    or not isinstance(other.get('node'), str)
+                    or other['node'] not in known
+                    or other.get('category') != 'hw'):
+                continue
+            try:
+                if plan(other)['suggested_action'] == 'QUARANTINE_AND_RETRY':
+                    faults.add(other['node'])
+            except ValueError:
+                continue
+        return sorted(faults)
