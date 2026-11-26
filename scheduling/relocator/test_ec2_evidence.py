@@ -15,7 +15,7 @@ class FakeEc2:
 
     def __init__(self, instances, fail=None):
         self.inst = {i: (v if isinstance(v, tuple) else (v, dict(GOOD))) for i, v in instances.items()}
-        self.fail, self.terminated, self.filters = fail, [], []
+        self.fail, self.filters = fail, []
 
     def get_paginator(self, _):
         return self
@@ -39,20 +39,12 @@ class FakeEc2:
     def set(self, i, state):
         self.inst[i] = (state, self.inst[i][1])
 
-    def terminate_instances(self, InstanceIds):
-        self.terminated += InstanceIds
-
 
 def ev(instances, **kw):
-    return E.Ec2Evidence(FakeEc2(instances, **kw), {"worker1": "devoops-eks-a"}, ["training", "spare"], terminate=True)
+    return E.Ec2Evidence(FakeEc2(instances, **kw), {"worker1": "devoops-eks-a"}, ["training", "spare"])
 
 
 class CheckTests(unittest.TestCase):
-    def test_provider_id(self):
-        self.assertEqual(E.instance_id("aws:///us-east-2a/i-0abc"), "i-0abc")
-        self.assertIsNone(E.instance_id("kind://docker/kind/node"))
-        self.assertIsNone(E.instance_id(None))
-
     def test_whole_pool_dead_is_evidence(self):
         self.assertTrue(ev({"i-1": "terminated", "i-2": "stopped"}).check("worker1")[0])
 
@@ -84,26 +76,14 @@ class CheckTests(unittest.TestCase):
         env = {"EC2_EVIDENCE": "describe", "EC2_NODEGROUPS": " gpu-train , gpu-spare ,"}
         with mock.patch.dict("os.environ", env, clear=True), mock.patch.dict("sys.modules", {"boto3": mock.Mock()}):
             e = E.from_env()
-        self.assertEqual((e.nodegroups, e.can_terminate), (["gpu-train", "gpu-spare"], False))
+        self.assertEqual(e.nodegroups, ["gpu-train", "gpu-spare"])
 
-    def test_terminate_only_recorded_live_instances(self):
-        e = ev({"i-1": "running", "i-2": "terminated", "i-3": "running"})
-        self.assertEqual(e.terminate("worker1", ["i-1", "i-2"]), ["i-1"])
-        self.assertEqual(e.ec2.terminated, ["i-1"])
-
-    def test_terminate_looks_up_by_id_only_and_refuses_wrong_tags(self):
-        bad = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "system"}
-        e = ev({"i-1": "running", "i-2": ("running", bad)})
-        with self.assertRaises(PermissionError):
-            e.terminate("worker1", ["i-1", "i-2"])
-        self.assertEqual(e.ec2.terminated, [])
-        self.assertEqual([f["Name"] for f in e.ec2.filters[0]], ["instance-id"])
-
-    def test_terminate_never_cluster_wide_or_in_describe_mode(self):
-        self.assertEqual(ev({"i-1": "running"}).terminate("worker1", []), [])
-        e = ev({"i-1": "running"})
-        e.can_terminate = False
-        self.assertEqual(e.terminate("worker1", ["i-1"]), [])
+    def test_old_terminate_mode_only_describes(self):
+        env = {"EC2_EVIDENCE": "terminate"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch.dict("sys.modules", {"boto3": mock.Mock()}):
+            e = E.from_env()
+        self.assertIsNotNone(e)
+        self.assertFalse(hasattr(e, "terminate"))
 
     def test_from_env_default_off(self):
         with mock.patch.dict("os.environ", {}, clear=True):
@@ -123,45 +103,16 @@ class StopPathTests(unittest.TestCase):
         self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
 
     def test_dead_pool_confirms_stop(self):
-        x, _ = self.ctx(ev({"i-1": "terminated"}), oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, _ = self.ctx(ev({"i-1": "terminated"}))
         ok, why = relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
         self.assertTrue(ok)
         self.assertIn("모두 꺼짐", why)
 
     def test_recorded_nodes_dead_but_other_node_alive_is_not_evidence(self):
         # 망 분리 중 JobSet이 Pod를 기록에 없는 i-2에 다시 띄웠을 수 있음
-        x, _ = self.ctx(ev({"i-1": "terminated", "i-2": "running"}), oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        with mock.patch.object(relocator.kube, "since", return_value=0):
-            self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
-
-    def test_terminates_once_after_wait_then_confirms_when_pool_dead(self):
-        e = ev({"i-1": "running"})
-        x, saved = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
-            self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
-            self.assertEqual(e.ec2.terminated, ["i-1"])
-            self.assertIn("ec2TerminatedAt", saved)
-            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
-            self.assertEqual(e.ec2.terminated, ["i-1"])   # 두 번 안 내림
-        e.ec2.set("i-1", "terminated")
-        self.assertTrue(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
-
-    def test_terminate_refusal_is_recorded_and_not_retried(self):
-        bad = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "system"}
-        e = ev({"i-1": ("running", bad)})
-        x, saved = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
-            self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
-        self.assertIn("ec2TerminateError", saved)
-        self.assertEqual(e.ec2.terminated, [])
-
-    def test_no_terminate_before_wait(self):
-        e = ev({"i-1": "running"})
-        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        for seconds in (0, 110, 120):
-            with mock.patch.object(relocator.kube, "since", return_value=seconds):
-                relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
-        self.assertEqual(e.ec2.terminated, [])
+        x, saved = self.ctx(ev({"i-1": "terminated", "i-2": "running"}))
+        self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
+        self.assertEqual(saved, {})   # 내리지도 기록하지도 않는다
 
     def gone(self, results, ec2_ok, **st):
         """워커별 gone_on 결과(results)와 EC2 판정(ec2_ok: 워커 -> bool)으로 old_gone_on_worker를 돌린다"""
@@ -193,13 +144,6 @@ class StopPathTests(unittest.TestCase):
         res = {"eks-a": (False, relocator.Unreachable("eks-a 접속 안 됨")), "eks-b": (False, "eks-b에 Pod 1개 남아 있음")}
         self.assertFalse(self.gone(res, {"eks-a": True}, seenClusters=["eks-b"])[0])
 
-    def test_no_terminate_on_nominated_only_worker(self):
-        # 기록한 옛 노드(oldNodes)는 입장한 워커 것. 다른 워커 이름으로 내리지 않는다
-        e = ev({"i-1": "running"})
-        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
-        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
-            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"), "worker2")
-        self.assertEqual(e.ec2.terminated, [])
 
 
 if __name__ == "__main__":
