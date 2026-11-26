@@ -81,6 +81,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.fence['approved_gen'],1)
         self.assertEqual(self.store.fence['approved_step'],1000)
         self.assertEqual(self.requests.calls[0][1], 'moveToSpare')
+    def test_bad_primary_node_is_held_before_fencing_claim(self):
+        from integrations.dynamodb import RecoveryBlocked
+        from unittest.mock import Mock
+        inputs = Mock()
+        inputs.prepare_failed_nodes.side_effect = RecoveryBlocked('fault node outside matching old placement')
+        self.requests.inputs = inputs
+        result = self.tick()
+        self.assertEqual((result['state'], result['action']), ('HOLD', 'HOLD'))
+        self.assertEqual(self.store.job['generation'], 1)
+        self.assertEqual(self.requests.calls, [])
+        inputs.prepare_failed_nodes.assert_called_once()
+
+    def test_node_snapshot_is_prepared_before_generation_advance(self):
+        from unittest.mock import Mock
+        inputs = Mock()
+        inputs.prepare_failed_nodes.side_effect = lambda event: self.assertEqual(self.store.job['generation'], 1)
+        self.requests.inputs = inputs
+        self.assertEqual(self.tick()['state'], 'REQUESTED')
+        inputs.prepare_failed_nodes.assert_called_once()
+
+    def test_post_fencing_blocked_submit_is_held_without_rollback(self):
+        from integrations.dynamodb import RecoveryBlocked
+        from unittest.mock import Mock
+        self.requests.inputs = Mock()
+        self.requests.submit = Mock(side_effect=RecoveryBlocked('original JobSet digest mismatch'))
+        result = self.tick()
+        self.assertEqual((result['state'], result['action']), ('HOLD', 'HOLD'))
+        self.assertEqual(result['generation'], 2)
+        self.assertEqual(self.store.job['generation'], 2)
+        self.assertEqual(self.store.fence['recovery_id'], 'e1')
+        self.assertEqual(self.tick()['state'], 'HOLD')
+        self.requests.submit.assert_called_once()
+
     def test_lost_create_response_reuses_id_and_generation(self):
         self.requests.fail = True
         with self.assertRaises(TimeoutError):
