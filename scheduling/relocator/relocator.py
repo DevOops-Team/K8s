@@ -35,7 +35,7 @@ JobSet 생성도 같은 이름으로 다시 해도 결과가 같아서(409 -> �
 시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
   옛 실행 종료: spec.stopDeadline(없으면 요청 생성 + 15분) -> 넘으면 Held, 확인 어노테이션으로만 재개
     워커 API에 접속이 안 되면 컨트롤러가 확인한 사이드카 자기 펜싱 기록(devoops/self-fence-verified,
-    SELF_FENCE_EVIDENCE) 또는 EC2 인스턴스 상태(ec2_evidence.py)를 종료 증거로 쓴다 (둘 다 기본 off)
+    SELF_FENCE_EVIDENCE)를 종료 증거로 쓴다 (기본 off). EC2·S3·DynamoDB는 직접 조회하지 않는다.
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
 import json
@@ -51,7 +51,6 @@ from datetime import datetime
 from kubernetes import client
 
 import keys as K
-import ec2_evidence
 import kube
 import leader
 import recovery_render as R
@@ -77,9 +76,8 @@ PROGRESS_SCHEMA = 1   # status.recoveryProgress 계약 버전 (복구 컨트롤�
 
 
 class Ctx:
-    def __init__(self, mgr, workers, rr, ec2=None):
+    def __init__(self, mgr, workers, rr):
         self.mgr, self.workers, self.rr = mgr, workers, rr
-        self.ec2 = ec2   # ec2_evidence.Ec2Evidence 또는 None (EC2 증거 안 씀)
         self.co = kube.kueue(mgr)
         self.ns = rr["metadata"]["namespace"]
         self.name = rr["metadata"]["name"]
@@ -193,13 +191,28 @@ def cordon_nodes(x: Ctx, src, nodes):
     gpu_nodes = {n.metadata.name for n in core.list_node(
         label_selector=K.GPU_NODE_SELECTOR, _request_timeout=kube.TIMEOUT).items}
     for node in nodes:
+        try:
+            n = core.read_node(node, _request_timeout=kube.TIMEOUT)
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+            # 여러 장애 노드 중 일부는 이미 Node 객체까지 정리됐을 수 있다.
+            # 격리할 객체가 없는 것일 뿐, 옛 프로세스의 종료 증거는 아니다.
+            log.info("%s: %s/%s Node 없음 -> cordon 건너뜀, 옛 실행 종료는 별도 확인", x.name, src, node)
+            continue
         if node not in gpu_nodes:   # GPU 노드가 아닌 것(컨트롤 플레인 등)은 격리하지 않음
             raise PermissionError(f"{node}는 {src}의 GPU 노드({K.GPU_NODE_SELECTOR})가 아님")
-        n = core.read_node(node, _request_timeout=kube.TIMEOUT)
         taints = [t for t in (n.spec.taints or []) if t.key != K.TAINT_FAULTY]
         taints.append(client.V1Taint(key=K.TAINT_FAULTY, value="true", effect="NoSchedule"))
-        core.patch_node(node, {"spec": {"unschedulable": True, "taints": [t.to_dict() for t in taints]}},
-                        _request_timeout=kube.TIMEOUT)
+        try:
+            core.patch_node(node, {"metadata": {"resourceVersion": n.metadata.resource_version},
+                                   "spec": {"unschedulable": True, "taints": [t.to_dict() for t in taints]}},
+                            _request_timeout=kube.TIMEOUT)
+        except client.ApiException as e:
+            if e.status != 404:
+                raise   # 409도 다음 루프에서 읽고 다시 판단한다 (다른 taint·Node 교체 보존).
+            log.info("%s: %s/%s cordon 전에 Node 사라짐 -> 옛 실행 종료는 별도 확인", x.name, src, node)
+            continue
         log.info("%s: %s/%s cordon + taint", x.name, src, node)
 
 
@@ -239,7 +252,7 @@ def isolate(x: Ctx):
 
 
 class Unreachable(str):
-    """워커 API에 닿지 못해서 확인 못 했다는 이유 (EC2 증거로 넘어가도 되는 경우)"""
+    """워커 API에 닿지 못해서 확인 못 했다는 이유 (컨트롤러가 준 종료 근거가 필요)"""
 
 
 def old_gone_on_worker(x: Ctx, ns, name):
@@ -253,13 +266,10 @@ def old_gone_on_worker(x: Ctx, ns, name):
     for src in places:
         gone, why = gone_on(x, src, ns, name)
         kind = "automatic"
-        if not gone and isinstance(why, Unreachable):   # 닿지 않는 워커는 자기 펜싱 확인 또는 EC2 증거로만 대신한다
-            sf_ok, sf_why = self_fence_stop_evidence(x, why, src)
-            if sf_ok:
-                gone, why, kind = True, sf_why, "self_fence"
-            else:
-                gone, why = ec2_stop_evidence(x, sf_why, src)
-                kind = "ec2"
+        if not gone and isinstance(why, Unreachable):
+            # 정보는 복구 컨트롤러에서만 받는다. 없으면 별도 AWS 조회 없이 기다린다.
+            gone, why = self_fence_stop_evidence(x, why, src)
+            kind = "self_fence"
         if not gone:
             return False, why
         x.stop_evidence.append({"cluster": src, "kind": kind, "detail": str(why)})
@@ -365,7 +375,8 @@ def stop_old(x: Ctx):
         # 복구 컨트롤러가 이미 HOLD했을 시간. 뒤늦게 멈춘 게 보여도 혼자 재제출하지 않는다
         if x.st.get("phase") != "Held":
             msg = (f"종료 대기 기한 안에 옛 실행 종료를 확인 못 함 ({why}) -> 멈춤 (복구 컨트롤러 HOLD 시간). "
-                   f"재개하려면 옛 실행이 멈춘 걸 확인하고 이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
+                   "복구 컨트롤러의 종료 증거 검증과 HOLD 재개 처리가 필요함. "
+                   "사람 확인 주석만으로 복구 컨트롤러까지 재개되지는 않음")
             log.warning("%s: %s", x.name, msg)
             x.save(phase="Held", message=msg)
         return
@@ -373,13 +384,13 @@ def stop_old(x: Ctx):
     # 관리 클러스터 Workload는 워커가 끊겨 있어도 지워진다. 워커 쪽에서 사라진 걸 봐야 멈춘 것
     if kube.since(x.st["isolatedAt"]) > STOP_WAIT_SECONDS and x.st.get("phase") != "WaitingForStop":
         msg = (f"옛 실행 종료를 {STOP_WAIT_SECONDS}s 안에 확인 못 함 ({why}) -> 재제출 보류. 옛 실행이 멈춘 걸 확인했으면 "
-               f"이 요청에 {K.ANN_STOP_CONFIRMED}=true 어노테이션을 붙일 것")
+               "복구 컨트롤러를 통한 종료 증거 전달이 필요함 (별도 EC2·저장소 조회 안 함)")
         log.warning("%s: %s", x.name, msg)
         x.save(phase="WaitingForStop", message=msg)
 
 
 def stop_kind(checks):
-    """워커별 근거 -> 전체 kind. 간접 증거가 하나라도 섞이면 그쪽 (ec2 > self_fence > automatic)"""
+    """워커별 근거 -> 전체 kind. 이미 기록된 ec2 증거의 형식은 보존한다."""
     kinds = {c["kind"] for c in checks}
     return next((k for k in ("ec2", "self_fence") if k in kinds), "automatic")
 
@@ -422,7 +433,7 @@ def self_fence_stop_evidence(x: Ctx, why, src):
     값(JSON): {"requestId", "generation", "cluster", "worldSize", "ranks": [0..], "pods": ["<번호>:<pod uid>", ..],
               "recordedAt"}
     이 요청·옛 세대·그 워커와 맞고, 복구 원본(spec.jobSet)의 Pod 수 N과 맞고, 번호가 정확히 0~N-1이며
-    번호마다 Pod UID가 정확히 하나일 때만 인정. 하나라도 어긋나면 그대로 기다린다 (다음은 EC2 증거·Held)"""
+    번호마다 Pod UID가 정확히 하나일 때만 인정. 하나라도 어긋나면 그대로 기다린다."""
     if not SELF_FENCE_EVIDENCE:
         return False, why
     raw = x.ann(K.ANN_SELF_FENCE)
@@ -462,18 +473,6 @@ def self_fence_stop_evidence(x: Ctx, why, src):
     if set(uids) != set(range(n)) or any(len(u) != 1 for u in uids.values()):
         return False, f"{why}; 자기 펜싱 pods가 번호 0~{n - 1}마다 Pod UID 하나가 아님 ({pods})"
     return True, f"{why}; 자기 펜싱 확인: {old_gen}세대 {src} Pod 0~{n - 1} 전원 종료 ({rec['recordedAt']})"
-
-
-def ec2_stop_evidence(x: Ctx, why, src=None):
-    """워커 src에 닿지 못할 때 EC2 인스턴스 상태로 종료 확인. (멈춤확인, 이유)
-    증거는 그 클러스터 학습·예비 인스턴스 전부 꺼짐뿐 (옛 노드만 보면 망 분리 중 다른 노드로 다시 뜬 Pod를 놓침).
-    src를 안 주면 원래 워커(sourceCluster). 지명만 됐던 워커(seenClusters)도 같은 기준으로 본다. 인스턴스는 내리지 않는다"""
-    ec2 = getattr(x, "ec2", None)
-    src = src or x.st.get("sourceCluster")
-    if ec2 is None or not src:
-        return False, why
-    ok, ev, _ = ec2.check(src)
-    return ok, f"{why}; {ev}"
 
 
 def pin_spec(x: Ctx, orig):
@@ -657,13 +656,13 @@ def wanted(rr):
     return phase in ("Done", "Failed") and bool((rr["metadata"].get("annotations") or {}).get(K.ANN_CANCEL))
 
 
-def reconcile(mgr, workers, ec2=None):
+def reconcile(mgr, workers):
     co = kube.kueue(mgr)
     rrs = co.list_cluster_custom_object(K.RR_GROUP, K.RR_VERSION, K.RR_PLURAL)["items"]
     for rr in rrs:
         if not wanted(rr):
             continue
-        x = Ctx(mgr, workers, rr, ec2)
+        x = Ctx(mgr, workers, rr)
         try:
             step(x, rrs)
         except PermissionError as e:   # 규칙 위반 요청은 재시도하지 않고 끝냄
@@ -681,14 +680,13 @@ def main():
     mgr = kube.manager_client()
     elector = leader.Elector(kube.manager_client(), "relocator")
     workers = kube.Workers(mgr, own_secret=OWN_SECRET)
-    ec2 = ec2_evidence.from_env()
-    log.info("시작: interval=%ss ec2=%s", INTERVAL, "off" if ec2 is None else "describe")
+    log.info("시작: interval=%ss (복구 입력은 RR, 외부 저장소·EC2 직접 조회 없음)", INTERVAL)
     while True:
         if not elector.is_leader():
             time.sleep(1)
             continue
         try:
-            reconcile(mgr, workers, ec2)
+            reconcile(mgr, workers)
         except Exception:  # noqa: BLE001
             log.exception("루프 실패")
         time.sleep(INTERVAL)

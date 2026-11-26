@@ -310,6 +310,7 @@ class Accept(unittest.TestCase):
 def _node(name):
     n = mock.Mock()
     n.metadata.name = name
+    n.metadata.resource_version = "1"
     n.spec.taints = []
     return n
 
@@ -421,20 +422,20 @@ class StopOld(unittest.TestCase):
         self.assertEqual(ev["confirmed_by"], "relocator")
         self.assertTrue(ev["recorded_by"])
 
-    def test_mixed_api_and_ec2_evidence(self):
+    def test_mixed_api_and_controller_self_fence_evidence(self):
         co = FakeCO()
         co.delete_namespaced_custom_object = mock.Mock()
         x = ctx(co, sourceCluster="worker1", seenClusters=["worker2"], isolatedAt="t")
         with elapsed(30), on_worker(None), mock.patch.object(
                 relocator, "gone_on", side_effect=[(True, "absent"), (False, relocator.Unreachable("offline"))]), \
-                mock.patch.object(relocator, "ec2_stop_evidence", return_value=(True, "pool stopped")):
+                mock.patch.object(relocator, "self_fence_stop_evidence", return_value=(True, "controller verified stop")):
             relocator.stop_old(x)
         ev = co.status["recoveryProgress"]["oldRunStopEvidence"]
-        self.assertEqual(ev["kind"], "ec2")
+        self.assertEqual(ev["kind"], "self_fence")
         self.assertEqual(ev["clusters"], ["worker1", "worker2"])
         self.assertEqual(ev["checks"], [
             {"cluster": "worker1", "kind": "automatic", "detail": "absent"},
-            {"cluster": "worker2", "kind": "ec2", "detail": "pool stopped"}])
+            {"cluster": "worker2", "kind": "self_fence", "detail": "controller verified stop"}])
 
     def test_spec_deadline_controls_stop_transition(self):
         for deadline, expected in ((2100, "Executing"), (2000, "Held")):

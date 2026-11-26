@@ -103,16 +103,16 @@ class ControllerAcceptsRelocatorStatus(unittest.TestCase):
         self.assertTrue(RelocationStatusInput(rec,'training',lambda:now,allow_self_fence=True)(event,req))
         self.assertEqual(rec.calls[0][0],'OLD_RUN_STOPPED')
 
-    def test_ec2_evidence_is_accepted(self):
+    def test_no_controller_evidence_does_not_report_old_run_stopped(self):
         co = FakeCO()
         x = ctx(co, sourceCluster="worker1", isolatedAt="t")
         co.delete_namespaced_custom_object = mock.Mock()
         with elapsed(30), on_worker(None), \
                 mock.patch.object(relocator, "gone_on", return_value=(False, relocator.Unreachable("끊김"))), \
-                mock.patch.object(relocator, "ec2_stop_evidence", return_value=(True, "인스턴스 전부 꺼짐")):
+                mock.patch.object(relocator, "SELF_FENCE_EVIDENCE", False):
             relocator.stop_old(x)
-        rec, project = self.projector()
-        self.assertTrue(project(EVENT, as_request(x)))
+        self.assertNotIn("stoppedAt", x.st)
+        self.assertNotIn("recoveryProgress", x.st)
 
     def test_manual_confirmation_is_not_accepted_by_controller(self):
         # 사람 확인(devoops/old-execution-stopped)은 relocator가 status에 kind=manual로 쓰지만
