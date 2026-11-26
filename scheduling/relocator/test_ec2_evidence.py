@@ -113,30 +113,33 @@ class CheckTests(unittest.TestCase):
 class StopPathTests(unittest.TestCase):
     """relocator.ec2_stop_evidence: 워커에 닿지 않을 때만, 증거는 클러스터 전체 기준"""
 
-    def ctx(self, ec2, **st):
+    def ctx(self, ec2, nodes=None, source="worker1", **st):
+        """옛 노드는 복구 컨트롤러가 준 spec.nodes (GPU-295). status에 적은 값은 쓰지 않는다"""
         saved = {}
         st = {"sourceCluster": "worker1", "isolatedAt": "t", **st}
-        return SimpleNamespace(ec2=ec2, st=st, save=lambda **kw: (saved.update(kw), st.update(kw))), saved
+        spec = {"sourceCluster": source, "nodes": nodes or []}
+        return SimpleNamespace(ec2=ec2, st=st, spec=spec,
+                               save=lambda **kw: (saved.update(kw), st.update(kw))), saved
 
     def test_off_keeps_unreachable(self):
         x, _ = self.ctx(None)
         self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
 
     def test_dead_pool_confirms_stop(self):
-        x, _ = self.ctx(ev({"i-1": "terminated"}), oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, _ = self.ctx(ev({"i-1": "terminated"}), nodes=[{"name": "n1", "instanceId": "i-1"}])
         ok, why = relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
         self.assertTrue(ok)
         self.assertIn("모두 꺼짐", why)
 
     def test_recorded_nodes_dead_but_other_node_alive_is_not_evidence(self):
         # 망 분리 중 JobSet이 Pod를 기록에 없는 i-2에 다시 띄웠을 수 있음
-        x, _ = self.ctx(ev({"i-1": "terminated", "i-2": "running"}), oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, _ = self.ctx(ev({"i-1": "terminated", "i-2": "running"}), nodes=[{"name": "n1", "instanceId": "i-1"}])
         with mock.patch.object(relocator.kube, "since", return_value=0):
             self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
 
     def test_terminates_once_after_wait_then_confirms_when_pool_dead(self):
         e = ev({"i-1": "running"})
-        x, saved = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, saved = self.ctx(e, nodes=[{"name": "n1", "instanceId": "i-1"}])
         with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
             self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
             self.assertEqual(e.ec2.terminated, ["i-1"])
@@ -149,7 +152,7 @@ class StopPathTests(unittest.TestCase):
     def test_terminate_refusal_is_recorded_and_not_retried(self):
         bad = {"eks:cluster-name": "devoops-eks-a", "eks:nodegroup-name": "system"}
         e = ev({"i-1": ("running", bad)})
-        x, saved = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, saved = self.ctx(e, nodes=[{"name": "n1", "instanceId": "i-1"}])
         with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
             self.assertFalse(relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))[0])
         self.assertIn("ec2TerminateError", saved)
@@ -157,10 +160,25 @@ class StopPathTests(unittest.TestCase):
 
     def test_no_terminate_before_wait(self):
         e = ev({"i-1": "running"})
-        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, _ = self.ctx(e, nodes=[{"name": "n1", "instanceId": "i-1"}])
         for seconds in (0, 110, 120):
             with mock.patch.object(relocator.kube, "since", return_value=seconds):
                 relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
+        self.assertEqual(e.ec2.terminated, [])
+
+    def test_status_old_nodes_are_not_terminated(self):
+        # status는 다른 주체도 쓸 수 있다. spec.nodes가 없으면 status.oldNodes가 있어도 내리지 않는다
+        e = ev({"i-1": "running"})
+        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
+            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
+        self.assertEqual(e.ec2.terminated, [])
+
+    def test_no_terminate_when_spec_source_differs(self):
+        e = ev({"i-1": "running"})
+        x, _ = self.ctx(e, nodes=[{"name": "n1", "instanceId": "i-1"}], source="worker9")
+        with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
+            relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"))
         self.assertEqual(e.ec2.terminated, [])
 
     def gone(self, results, ec2_ok, **st):
@@ -194,9 +212,9 @@ class StopPathTests(unittest.TestCase):
         self.assertFalse(self.gone(res, {"eks-a": True}, seenClusters=["eks-b"])[0])
 
     def test_no_terminate_on_nominated_only_worker(self):
-        # 기록한 옛 노드(oldNodes)는 입장한 워커 것. 다른 워커 이름으로 내리지 않는다
+        # spec.nodes는 spec.sourceCluster 것. 다른 워커 이름으로 내리지 않는다
         e = ev({"i-1": "running"})
-        x, _ = self.ctx(e, oldNodes=[{"node": "n1", "instanceId": "i-1"}])
+        x, _ = self.ctx(e, nodes=[{"name": "n1", "instanceId": "i-1"}])
         with mock.patch.object(relocator.kube, "since", return_value=relocator.STOP_WAIT_SECONDS + 1):
             relocator.ec2_stop_evidence(x, relocator.Unreachable("끊김"), "worker2")
         self.assertEqual(e.ec2.terminated, [])
