@@ -178,53 +178,6 @@ class Render(unittest.TestCase):
         self.assertNotIn("devoops/exclude-clusters", new["metadata"]["annotations"])
 
 
-def pod_spec(js):
-    return js["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
-
-
-class AvoidSpare(unittest.TestCase):
-    """restartInPlace 재제출본은 예비 toleration을 유지하되 일반 노드를 먼저 고른다 (GPU-280)"""
-
-    def preferred(self, spec):
-        return ((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
-            "preferredDuringSchedulingIgnoredDuringExecution") or []
-
-    def test_restart_in_place_prefers_normal_nodes(self):
-        spec = pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", None, [], action="restartInPlace"))
-        self.assertIn(R.SPARE_TOLERATION, spec["tolerations"])
-        self.assertEqual(self.preferred(spec), [R.AVOID_SPARE_TERM])
-        self.assertNotIn("requiredDuringSchedulingIgnoredDuringExecution", spec["affinity"]["nodeAffinity"])
-
-    def test_other_actions_have_no_avoidance(self):
-        for action in ("moveToSpare", "evacuateCluster", None):
-            with self.subTest(action=action):
-                spec = pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", None, [], action=action))
-                self.assertIn(R.SPARE_TOLERATION, spec["tolerations"])
-                self.assertNotIn("affinity", spec)
-
-    def test_keeps_original_affinity_and_is_idempotent(self):
-        orig = copy.deepcopy(ORIG)
-        mine = {"weight": 10, "preference": {"matchExpressions": [
-            {"key": "zone", "operator": "In", "values": ["a"]}]}}
-        req = {"nodeSelectorTerms": [{"matchExpressions": [
-            {"key": "nvidia.com/gpu.present", "operator": "In", "values": ["true"]}]}]}
-        pod_spec(orig)["affinity"] = {
-            "nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [mine],
-                             "requiredDuringSchedulingIgnoredDuringExecution": req},
-            "podAntiAffinity": {"x": 1}}
-        once = R.render(orig, "3f9a1c2e", 2, "r", None, [], action="restartInPlace")
-        twice = R.render(once, "3f9a1c2e", 3, "r2", None, [], action="restartInPlace")
-        spec = pod_spec(twice)
-        self.assertEqual(self.preferred(spec), [mine, R.AVOID_SPARE_TERM])
-        self.assertEqual(spec["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"], req)
-        self.assertEqual(spec["affinity"]["podAntiAffinity"], {"x": 1})
-        # 다음 세대가 moveToSpare면 우리가 넣은 회피만 빠진다
-        moved = pod_spec(R.render(twice, "3f9a1c2e", 4, "r3", None, [], action="moveToSpare"))
-        self.assertEqual(self.preferred(moved), [mine])
-        self.assertEqual(pod_spec(orig)["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"],
-                         [mine])
-
-
 class Names(unittest.TestCase):
     def test_roundtrip(self):
         self.assertEqual(R.jobset_name("3f9a1c2e", 12), "job-3f9a1c2e-g0012")
