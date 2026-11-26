@@ -19,6 +19,14 @@ class InputTests(unittest.TestCase):
                           recovery_to_gen=2, recovery_phase='GENERATION_ADVANCED',
                           stop_wait_started_at=1000, stop_wait_deadline=1900)
         self.store, self.s3 = Mock(), Mock()
+        self.store.records.return_value = []
+        self.snapshots = {}
+        def snapshot(event, calculate):
+            rid = event['event_id']
+            if rid not in self.snapshots:
+                self.snapshots[rid] = calculate()
+            return list(self.snapshots[rid])
+        self.store.snapshot_excluded_nodes.side_effect = snapshot
         self.store.fencing_record.return_value = self.fence
         self.store.placement.return_value = dict(jobset_uri='s3://code/code/abc/jobset.json',
             jobset_sha256=hashlib.sha256(self.raw).hexdigest(), cluster='eks-a',
@@ -78,6 +86,53 @@ class InputTests(unittest.TestCase):
         self.assertNotIn('annotations', saved['metadata'])
         self.assertEqual(client.submit(EVENT, 'moveToSpare'), name)  # response loss: 409 + same spec
         self.assertEqual([c[0] for c in calls], ['POST', 'POST', 'GET'])
+
+    def test_multiple_fault_nodes(self):
+        self.store.placement.return_value.update(active_nodes=['bad', 'other', 'healthy'], gpu_count=3)
+        fault = dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')
+        self.store.records.return_value = [
+            {'event': fault}, {'event': fault},
+            {'event': dict(fault, node='healthy', generation=2)},
+            {'event': dict(fault, node='healthy', cluster='eks-b')},
+            {'event': dict(fault, node='healthy', job_id='different')},
+            {'event': dict(fault, node='healthy', collector_healthy=False)},
+            {'event': dict(fault, node='healthy', suggested_action='hold')},
+        ]
+        transport = Mock()
+        RelocationClient('training', transport, self.provider).submit(EVENT, 'moveToSpare')
+        self.assertEqual(transport.call_args.args[2]['spec']['excludeNodes'], ['bad', 'other'])
+
+    def test_late_fault_after_rr_create_does_not_change_retry_spec(self):
+        saved = {}
+        def transport(method, path, document=None):
+            if method == 'POST':
+                if saved:
+                    raise HTTPError(path, 409, 'AlreadyExists', {}, None)
+                saved.update(copy.deepcopy(document))
+                return document
+            return copy.deepcopy(saved)
+        client = RelocationClient('training', transport, self.provider)
+        self.provider.prepare_failed_nodes(EVENT)
+        client.submit(EVENT, 'moveToSpare')
+        self.store.records.return_value = [
+            {'event': dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')}]
+        self.assertEqual(client.submit(EVENT, 'moveToSpare'), 'recovery-' +
+                         hashlib.sha256(EVENT['event_id'].encode()).hexdigest()[:40])
+        self.assertEqual(saved['spec']['excludeNodes'], ['bad'])
+        self.assertEqual(self.snapshots['r1'], ['bad'])
+
+    def test_primary_node_outside_placement_fails_before_snapshot(self):
+        self.store.placement.return_value['active_nodes'] = ['other', 'healthy']
+        with self.assertRaisesRegex(RecoveryBlocked, 'fault node outside matching old placement'):
+            self.provider.prepare_failed_nodes(EVENT)
+        self.store.snapshot_excluded_nodes.assert_not_called()
+
+    def test_subsequent_faults_cannot_replace_frozen_exclusions(self):
+        self.provider.prepare_failed_nodes(EVENT)
+        self.store.records.return_value = [
+            {'event': dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')}]
+        self.assertEqual(self.provider.failed_nodes(EVENT, [{'name': 'bad'}, {'name': 'other'}]), ['bad'])
+        self.assertEqual(self.store.snapshot_excluded_nodes.call_count, 2)
 
     def test_pod_restart_uses_full_placement_when_fault_node_is_unknown(self):
         transport = Mock()
@@ -263,3 +318,40 @@ class RunnerCancelTests(unittest.TestCase):
         self.runner.operation(self.store.get('e1'), 20, False)
         self.assertIs(self.store.get('e1')['relocation_cancelled'], True)
         self.assertEqual(self.requests.cancel.call_count, 2)
+
+
+class DurableSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        from integrations.dynamodb import Store
+        self.item = dict(pk='event#r1', kind='event', event=dict(EVENT), state='RECEIVED')
+        self.table = Mock()
+        self.table.get_item.side_effect = lambda **kw: {'Item': copy.deepcopy(self.item)}
+        self.store = Store(self.table, Mock())
+
+    def test_first_snapshot_persists_without_recomputation(self):
+        self.assertEqual(self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad']), ['bad'])
+        self.assertEqual(self.table.update_item.call_args.kwargs['ConditionExpression'],
+                         'attribute_exists(pk) AND attribute_not_exists(exclude_nodes_snapshot)')
+        self.item['exclude_nodes_snapshot'] = ['bad']
+        self.assertEqual(self.store.snapshot_excluded_nodes(
+            EVENT, lambda: self.fail_if_recalculated()), ['bad'])
+        self.table.update_item.assert_called_once()
+
+    def fail_if_recalculated(self):
+        self.fail('snapshot should not be recalculated after it is durable')
+
+    def test_concurrent_snapshot_writer_wins(self):
+        class ConditionalConflict(Exception):
+            response = {'Error': {'Code': 'ConditionalCheckFailedException'}}
+        def concurrent_writer(**kwargs):
+            self.item['exclude_nodes_snapshot'] = ['bad', 'other']
+            raise ConditionalConflict()
+        self.table.update_item.side_effect = concurrent_writer
+        self.assertEqual(self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad']),
+                         ['bad', 'other'])
+
+    def test_invalid_snapshot_fails_closed(self):
+        self.item['exclude_nodes_snapshot'] = ['other']
+        with self.assertRaisesRegex(RecoveryBlocked, 'invalid durable excluded-nodes snapshot'):
+            self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad'])
+        self.table.update_item.assert_not_called()

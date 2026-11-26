@@ -232,6 +232,17 @@ class Workflow:
         lost = self.refresh_relocation_inputs(record)
         if lost is not None:
             return lost
+        # For node migrations, verify the old placement and freeze exclusions BEFORE
+        # Store.claim may advance the fencing generation. Replays reuse the snapshot.
+        if action == 'QUARANTINE_AND_RETRY' and state in ('RECEIVED', 'CLAIMED', 'FENCED'):
+            inputs = getattr(self.executor, 'inputs', None)
+            prepare = getattr(inputs, 'prepare_failed_nodes', None)
+            if callable(prepare):
+                try:
+                    prepare(e)
+                except RecoveryBlocked as exc:
+                    return self.store.save(rid, state='HOLD', action='HOLD', reason=str(exc),
+                                           retry_count=self.store.fencing_record(e['job_id']).get('retry_count'))
         try:
             job = self.store.claim(e)
         except RetryLimitReached as exc:
@@ -250,7 +261,13 @@ class Workflow:
             return self.store.save(rid, state='CLAIMED', action=action, stage='CLAIMED')
         generation = int(job['generation'])
         if state in ('RECEIVED', 'CLAIMED', 'FENCED'):
-            name = self.executor.submit(e, RELOCATION_ACTIONS[action])
+            try:
+                name = self.executor.submit(e, RELOCATION_ACTIONS[action])
+            except RecoveryBlocked as exc:
+                # The fencing generation may already be advanced. Preserve ownership
+                # and stop retrying rather than rolling back or repeatedly submitting.
+                return self.store.save(rid, state='HOLD', action='HOLD', reason=str(exc),
+                                       generation=generation, retry_count=job.get('retry_count'))
             return self.store.save(rid, state='REQUESTED', action=action, stage='GENERATION_ADVANCED',
                                    generation=generation, relocation_request=name)
         if state not in ('REQUESTED', 'SUBMITTED', 'RESUMING'):

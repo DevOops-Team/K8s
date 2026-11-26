@@ -63,3 +63,47 @@ class RelocationInputs:
                 'jobSet': original,
                 'sourceCluster': cluster,
                 'nodes': [{'name': node} for node in sorted(nodes)]}
+
+    def prepare_failed_nodes(self, event):
+        """Validate the old node placement and persist exclusions before fencing."""
+        metadata = self.store.placement(event['job_id'])
+        nodes = metadata.get('active_nodes')
+        if (metadata.get('cluster') != event['cluster']
+                or metadata.get('placement_generation') != event['generation']
+                or not isinstance(nodes, list) or not nodes
+                or any(not isinstance(node, str) or not node.strip() for node in nodes)
+                or len(set(nodes)) != len(nodes)
+                or event.get('node') not in nodes):
+            raise RecoveryBlocked('fault node outside matching old placement')
+        placed = [{'name': node} for node in nodes]
+        return self.store.snapshot_excluded_nodes(
+            event, lambda: self._collect_failed_nodes(event, placed))
+
+    def failed_nodes(self, event, placed_nodes):
+        """Use the durable snapshot, never recompute on 409/retry."""
+        return self.store.snapshot_excluded_nodes(
+            event, lambda: self._collect_failed_nodes(event, placed_nodes))
+
+    def _collect_failed_nodes(self, event, placed_nodes):
+        """Collect actionable hardware faults once, excluding unrelated events."""
+        from recovery.policy import plan
+        known = {item['name'] for item in placed_nodes}
+        primary = event.get('node')
+        if primary not in known:
+            raise RecoveryBlocked('fault node outside old placement')
+        faults = {primary}
+        for record in self.store.records():
+            other = record.get('event', {})
+            if (other.get('job_id') != event['job_id']
+                    or other.get('generation') != event['generation']
+                    or other.get('cluster') != event['cluster']
+                    or not isinstance(other.get('node'), str)
+                    or other['node'] not in known
+                    or other.get('category') != 'hw'):
+                continue
+            try:
+                if plan(other)['suggested_action'] == 'QUARANTINE_AND_RETRY':
+                    faults.add(other['node'])
+            except ValueError:
+                continue
+        return sorted(faults)
