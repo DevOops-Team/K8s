@@ -36,6 +36,10 @@ def plan(event):
     if not init and recommendation not in actions:
         raise ValueError('unknown suggested_action')
     action = init['action'] if init else actions[recommendation]
+    if not init and action == 'RETRY_GROUP' and event.get('source') == 'node':
+        # A node-loss signal cannot safely pin the replacement to the old nodes.
+        node = event.get('node')
+        action = 'QUARANTINE_AND_RETRY' if isinstance(node, str) and node.strip() else 'HOLD'
     if is_straggler(event):
         action = 'HOLD'
     if event.get('collector_healthy') is False and event.get('category') != 'site':
