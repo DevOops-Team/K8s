@@ -13,12 +13,13 @@ CANCEL_ANNOTATION = 'devoops/recovery-cancel'
 
 
 class RelocationClient:
-    def __init__(self, namespace, transport=None, inputs=None, status_input=None, self_fence_input=None):
+    def __init__(self, namespace, transport=None, inputs=None, status_input=None, self_fence_input=None, verified_stop_input=None):
         self.namespace = namespace
         self.transport = transport or self._request
         self.inputs = inputs
         self.status_input = status_input
         self.self_fence_input = self_fence_input
+        self.verified_stop_input = verified_stop_input
 
     def _request(self, method, path, document=None):
         token = (SERVICE_ACCOUNT / 'token').read_text().strip()
@@ -105,6 +106,14 @@ class RelocationClient:
         if (existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate')
                 or annotations.get(CANCEL_ANNOTATION)):
             return
+        if self.verified_stop_input:
+            from integrations.stop_evidence import ANNOTATION
+            value = self.verified_stop_input(event, existing)
+            if value and self._annotate(path, existing, ANNOTATION, value):
+                _, existing = self._owned(event, name)
+                annotations = existing.get('metadata', {}).get('annotations') or {}
+                if annotations.get(CANCEL_ANNOTATION) or existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate'):
+                    return
         if self.self_fence_input:
             from integrations.self_fence import ANNOTATION
             value = self.self_fence_input(event, existing)

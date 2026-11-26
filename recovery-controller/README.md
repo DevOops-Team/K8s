@@ -196,3 +196,9 @@ Kafka 이벤트에는 `category: straggler`, `suggested_action: evacuate_preempt
 relocator 2.0.0은 펜싱 표를 쓰지 않으므로 execute 배포는 `relocation_status_input`을 켜야 합니다.
 컨트롤러가 RR status의 종료·재제출 결과를 펜싱 표에 조건부 기록한 뒤 `devoops/recovery-stop-recorded`
 주석을 붙이고, 권한을 잃으면 `devoops/recovery-cancel`을 붙입니다. [계약](docs/relocation-request-inputs.md)
+
+## GPU-304 일반 종료 증거 입력 (제안, 기본 off)
+
+서명된 전체 실행 범위·재생성 차단 attestation과 선택적인 EC2 조회를 결합해 RR annotation으로 전달한다.
+동일 증거가 status로 반환된 뒤에만 펜싱/ACK를 기록한다. IAM·KMS·성모 담당 수신부 연계 전에는 활성화하지 않는다.
+[계약과 운영 도구](docs/verified-stop-evidence.md). 서버 종료·강제 Pod 삭제·완전 자동 재생성 차단은 하지 않는다.

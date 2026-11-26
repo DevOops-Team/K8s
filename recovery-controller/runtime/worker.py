@@ -31,10 +31,19 @@ def run(config, stop, health):
     from integrations.relocation_status import RelocationStatusInput, status_config
     from integrations.self_fence import SelfFenceInput, self_fence_config
     self_fence_enabled = self_fence_config(config.get('self_fence_input'))['enabled']
-    status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'), allow_self_fence=self_fence_enabled)
+    from integrations.stop_evidence import VerifiedStopInput, S3StopApprovals, stop_config
+    stop_cfg = stop_config(config.get('verified_stop_input'))
+    aws_config = Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10)
+    verified_stop = (VerifiedStopInput(store,
+        lambda region: boto3.client('kms', region_name=region, config=aws_config),
+        lambda region: boto3.client('ec2', region_name=region, config=aws_config), stop_cfg,
+        approval_source=S3StopApprovals(
+            boto3.client('s3', region_name=config['aws_region'], config=aws_config), stop_cfg['approval_bucket']))
+        if stop_cfg['enabled'] else None)
+    status_input = (RelocationStatusInput(store, config.get('job_namespace', 'training'), allow_self_fence=self_fence_enabled, verified_stop_input=verified_stop)
                     if status_config(config.get('relocation_status_input'))['enabled'] else None)
     executor = RelocationClient(config.get('job_namespace', 'training'),
-                status_input=status_input,
+                status_input=status_input, verified_stop_input=verified_stop,
                 self_fence_input=SelfFenceInput(store) if self_fence_enabled else None,
                 inputs=RelocationInputs(store, boto3.client('s3', region_name=config['aws_region'],
                     config=Config(retries={'total_max_attempts': 1}, connect_timeout=5, read_timeout=10))) if execute else None)
