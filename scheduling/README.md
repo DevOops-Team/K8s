@@ -101,8 +101,8 @@ CI는 저장소 루트 `.github/workflows/ci.yml` 하나다 (GPU-127, 담당 노
   `RELOCATION_HOLD_SECONDS`가 지나면 푼다. 디스패처는 `RelocationRequest`를 읽기만 한다.
   - 관리 클러스터 쿼터는 따로 지킨다: `cq-recovery`를 잡 최대 크기 4로 둬서 4장 복구 잡도 학습 몫을 안 빌리고
     바로 쿼터를 받는다 (11/10, 정본 R10. 3일 땐 Heavy 대기 잡이 옛 잡 몫을 먼저 가져갔음 = 시나리오 11).
-- **격리 대상 (재배치 실행기)**: cordon 클러스터는 RR `spec.sourceCluster`, 펜싱 클러스터는 `spec.excludeClusters`,
-  EC2 강제 종료 노드는 `spec.nodes[].instanceId`다. Workload·워커 Pod를 보고 정하지 않는다(GPU-295). 없으면 `Failed`.
+- **격리 대상 (재배치 실행기)**: cordon 클러스터는 RR `spec.sourceCluster`, 펜싱 클러스터는 `spec.excludeClusters`다.
+  Workload·워커 Pod를 보고 정하지 않는다(GPU-295). 없으면 `Failed`.
 - **종료 확인 범위 (재배치 실행기)**: 옛 실행이 멈췄는지는 원래 워커(`spec.sourceCluster`)뿐 아니라 디스패처가 지명·입장시켰던
   워커(`status.seenClusters`, 관리 클러스터 Workload에서 모음)에서도 확인한다. 지명만 된 상태에서도 워커에 복사본·Pod가 있을 수 있다.
 - **디스패처가 읽는 어노테이션**(`devoops/target-cluster`·`exclude-clusters`·`manual-dispatch`)은 재배치 실행기와
@@ -159,7 +159,7 @@ Gitops 담당자 인계: 디스패처 환경변수 3개와 관리 Workload `patc
 | `LEADER_ELECTION` | 1 | 0이면 리더 선출 끔 |
 | `STOP_WAIT_SECONDS` | 120 | 옛 잡이 이 시간 안에 안 내려가면 `WaitingForStop` (계속 기다림) |
 | `STOP_HOLD_SECONDS` | 900 | RR `spec.stopDeadline` 우선. 없으면 RR 생성부터 이 시간을 넘기면 `Held`. 이후엔 `devoops/old-execution-stopped=true` 어노테이션으로만 재개 |
-| `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만, `terminate` = 워커가 `STOP_WAIT_SECONDS` 넘게 안 닿으면 RR `spec.nodes[].instanceId` 인스턴스만 한 번 강제 종료(ID로 조회 후 태그 확인, 증거는 여전히 클러스터 전체 기준). 필요 IAM: `ec2:DescribeInstances`(+`ec2:TerminateInstances`, `eks:nodegroup-name` 태그 조건). 고정 노드그룹은 ASG가 대체 인스턴스를 띄우므로 강제 종료 뒤에도 보통 사람 확인으로 넘어감 |
+| `EC2_EVIDENCE` | off | 워커 EKS API에 닿지 않을 때 그 클러스터 학습·예비 인스턴스가 전부 stopped/terminated면 옛 실행 종료로 인정 (`ec2_evidence.py`, 옛 노드만 보지 않음 — 망 분리 중 다른 노드로 다시 뜬 Pod). `describe` = 조회만 (인스턴스를 내리는 모드는 없음, 예전 값 `terminate`는 `describe`로 동작). 필요 IAM: `ec2:DescribeInstances`. 고정 노드그룹은 ASG가 대수를 유지하므로 EC2 증거가 서는 건 사실상 노드그룹을 0대로 내린 경우 |
 | `SELF_FENCE_EVIDENCE` | off | `on`이면 워커 EKS API에 닿지 않을 때 복구 컨트롤러가 RR에 붙인 `devoops/self-fence-verified`(펜싱 표 `self_fence_*` 확인 결과)를 그 워커의 옛 실행 종료로 인정 (ADR-49). 요청·옛 세대·워커가 맞고, 복구 원본 Pod 수 N과 `worldSize`가 같고, 번호 0~N-1 전부와 번호마다 Pod UID 하나가 있어야 함. 복구 원본이 Pod를 다시 만들지 않는 모양(`maxRestarts` 0, replicas 1, Indexed, `backoffLimit` 0, `podReplacementPolicy: Failed`, `restartPolicy: Never`)일 때만. 증거 kind `self_fence`. ADR-49 남은 구멍 반영·시험 통과 전에는 켜지 않음 |
 | `EC2_CLUSTERS` / `EC2_NODEGROUPS` | `{}` / training,spare | MultiKueueCluster 이름 → EKS 클러스터 이름(JSON, 없으면 같은 이름, `eks:cluster-name` 태그) / 찾을 학습·예비 관리형 노드그룹 이름(`eks:nodegroup-name` 태그, 실제 이름으로 넣을 것) |
 | `ADMIT_TIMEOUT_SECONDS` | 900 | 재제출 잡이 이 시간 안에 입장 못 하면 `AdmitDelayed`. JobSet은 그대로 두고 계속 기다림 (실패 판단은 복구 컨트롤러) |

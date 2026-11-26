@@ -31,8 +31,8 @@ relocator는 4번의 확인 주석이 붙기 전에는 새 세대를 내지 않�
 | **`toGeneration`** | integer | 새 세대. 반드시 `jobRef` 옛 세대 + 1. 아니면 relocator가 `Failed` |
 | **`stopDeadline`** | RFC3339(시간대 필수) 또는 epoch 초 | 옛 실행 종료 마감 = 펜싱 표 `stop_wait_deadline`. 지나면 `Held`. 없으면 RR 생성 + 15분 |
 | **`jobSet`** | object | 해시를 대조한 원본 JobSet 전체 (`kind: JobSet`). 없으면 `Failed` |
-| **`sourceCluster`** | string | 옛 세대가 돌던 클러스터 (모든 action). moveToSpare cordon 클러스터, restartInPlace·moveToSpare 원래 클러스터 우선 힌트, EC2 강제 종료 클러스터. moveToSpare인데 `excludeNodes`가 있고 이 값이 없으면 접수 단계 `Failed`. status `sourceCluster`에 그대로 기록한다(디스패처 자리 지키기·EKS 끄기 검사가 읽음) |
-| **`nodes`** | array `[{name, instanceId?}]` | 옛 세대가 쓰던 노드 (모든 action). restartInPlace면 재제출본을 이 노드·`sourceCluster`에 고정. 없으면 고정 안 함(원래 클러스터 우선). 있는데 `sourceCluster` 없음·name 없음/중복·Pod 수보다 적음이면 접수 단계 `Failed`. `instanceId`는 워커가 끊겼을 때 EC2 강제 종료 대상(terminate 모드) |
+| **`sourceCluster`** | string | 옛 세대가 돌던 클러스터 (모든 action). moveToSpare cordon 클러스터, restartInPlace·moveToSpare 원래 클러스터 우선 힌트. moveToSpare인데 `excludeNodes`가 있고 이 값이 없으면 접수 단계 `Failed`. status `sourceCluster`에 그대로 기록한다(디스패처 자리 지키기·EKS 끄기 검사가 읽음) |
+| **`nodes`** | array `[{name, instanceId?}]` | 옛 세대가 쓰던 노드 (모든 action). restartInPlace면 재제출본을 이 노드·`sourceCluster`에 고정. 없으면 고정 안 함(원래 클러스터 우선). 있는데 `sourceCluster` 없음·name 없음/중복·Pod 수보다 적음이면 접수 단계 `Failed`. `instanceId`는 relocator가 쓰지 않는다 |
 
 relocator는 대상 클러스터·노드를 스스로 조회해서 정하지 않는다 (GPU-295). 관리 클러스터 Workload `status.clusterName`·
 `nominatedClusterNames`는 옛 실행 종료 확인을 할 워커(`status.seenClusters`)를 모으는 데만 쓰고, 워커 Pod로 옛 노드를 찾아
@@ -116,7 +116,7 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 
 운영 매니페스트는 이 저장소에서 고치지 않는다. 두 컨트롤러가 같은 계약으로 함께 배포되어야 한다. 한쪽만 바뀌면 relocator가 `Failed`(spec 필드 없음)하거나 컨트롤러가 진행하지 못한다.
 
-GPU-295: 복구 컨트롤러는 옛 세대 등록 배치(`cluster`·`active_nodes`)로 모든 action에 `sourceCluster`·`nodes`를 채운다(`relocation_inputs.py`). 배치 계약에 인스턴스 ID가 없어 `nodes[].instanceId`는 비어 있고, 그동안 EC2 terminate 모드의 강제 종료 대상은 없다(종료 증거 판단은 그대로). 두 필드가 없는 옛 요청(GPU-295 전에 만든 진행 중 RR)은 moveToSpare(`excludeNodes` 있음)면 접수 단계 `Failed`, 나머지는 원래 클러스터 우선 힌트 없이 재제출된다. CRD에는 두 필드가 이미 있다(Gitops #115).
+GPU-295: 복구 컨트롤러는 옛 세대 등록 배치(`cluster`·`active_nodes`)로 모든 action에 `sourceCluster`·`nodes`를 채운다(`relocation_inputs.py`). 두 필드가 없는 옛 요청(GPU-295 전에 만든 진행 중 RR)은 moveToSpare(`excludeNodes` 있음)면 접수 단계 `Failed`, 나머지는 원래 클러스터 우선 힌트 없이 재제출된다. CRD에는 두 필드가 이미 있다(Gitops #115).
 
 **CRD `crd-relocationrequest.yaml` spec.properties에 추가** (spec은 unknown 필드를 버리므로 필수):
 
@@ -140,7 +140,7 @@ jobSet:
 **relocator Deployment env 제거**: `RECOVERY_STORE`, `FENCING_TABLE`, `CKPT_BUCKET`, `FENCING_WAIT_SECONDS`(있다면). `AWS_REGION`과 자격 증명은 EC2 종료 증거에 계속 필요하다.
 
 **IAM**
-- relocator: S3 `GetObject`, DynamoDB `GetItem`·`UpdateItem` 제거. EC2 `DescribeInstances`(종료 모드면 `TerminateInstances`)는 유지.
+- relocator: S3 `GetObject`, DynamoDB `GetItem`·`UpdateItem` 제거. EC2 `DescribeInstances`는 유지(`EC2_EVIDENCE=describe`일 때). `TerminateInstances`는 필요 없다.
 - 복구 컨트롤러: S3 `code/*/jobset.json` `GetObject` (컨트롤러 담당 문서와 같음).
 
 **RBAC**
