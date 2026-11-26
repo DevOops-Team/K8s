@@ -25,6 +25,10 @@ class Cluster:
     # 배치 기록용 (GPU-268): (namespace, JobSet 이름) -> Running GPU Pod가 올라간 노드 목록, 그 Pod 목록을 읽은 시각
     running: dict = field(default_factory=dict, repr=False)
     observed_at: int | None = None
+    # EKS OFF 펜싱 자동 해제용 (GPU-277): MultiKueueCluster metadata, 워커 ClusterQueue 이름 -> UID, 예비 GPU 총량
+    meta: dict = field(default_factory=dict, repr=False)
+    queues: dict = field(default_factory=dict, repr=False)
+    spare_total: int = 0
 
     def nodes_for(self, recovery: bool) -> int:
         return self.node_free + (self.spare_free if recovery else 0)

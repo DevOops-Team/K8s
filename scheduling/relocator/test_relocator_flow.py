@@ -344,7 +344,8 @@ class Isolate(unittest.TestCase):
         co = FakeCO()
         self.isolate(co, "evacuateCluster", excludeClusters=["worker2"])
         self.assertEqual([p[2:] for p in co.cluster_patches],
-                         [("multikueueclusters", "worker2", {"metadata": {"labels": {"devoops/fenced": "true"}}})])
+                         [("multikueueclusters", "worker2", {"metadata": {"labels": {"devoops/fenced": "true"},
+                                                                           "annotations": {"devoops/fenced-by": "relocator"}}})])
         self.assertEqual(co.status["phase"], "Executing")
         self.assertIn("isolatedAt", co.status)
 

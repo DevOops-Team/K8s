@@ -226,8 +226,10 @@ def isolate(x: Ctx):
     elif action == "evacuateCluster":
         for c in sorted(set(x.spec["excludeClusters"])):
             try:
+                # 붙인 쪽을 relocator로 남긴다. EKS OFF 펜싱과 겹쳐도 디스패처가 자동으로 풀지 않는다 (GPU-277)
                 x.co.patch_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters", c,
-                                                 {"metadata": {"labels": {K.LABEL_FENCED: "true"}}})
+                                                 {"metadata": {"labels": {K.LABEL_FENCED: "true"},
+                                                               "annotations": {K.ANN_FENCED_BY: K.FENCED_BY_RELOCATOR}}})
             except client.ApiException as e:
                 if e.status == 404:
                     raise PermissionError(f"spec.excludeClusters의 {c}가 MultiKueueCluster에 없음") from e
