@@ -430,3 +430,14 @@ Kafka source 문자열을 인증으로 간주하지 않는다. 이 입력은 학
 
 이 안전망은 실패 사건이 도착한 경우에만 동작한다. EKS 상태 전달까지 끊겨
 job.failed 자체가 오지 않는 모든 네트워크 장애를 감지한다고 가정하지 않는다.
+
+## GPU-297: 다중 노드 장애 RR 멱등성
+
+노드 재배치 `excludeNodes`는 복구 컨트롤러가 옛 세대 placement의 primary 노드 소속을
+`Store.claim` 이전에 확인한 뒤, 동일 event_id의 DynamoDB inbox
+`exclude_nodes_snapshot`에 조건부 최초 저장한다. 같은 복구 요청을 재시도하거나
+컨트롤러가 교체되어도 저장된 목록을 다시 사용한다. 따라서 RR spec 409 비교에서
+나중에 도착한 장애 노드 때문에 기존 불변 spec이 달라지지 않는다.
+옛 배치와 사건이 불일치하면 세대 증가 전 HOLD한다. 세대 증가 이후에도
+`RecoveryBlocked`가 발생하면 펜싱 세대를 되돌리지 않고 HOLD로 남긴다.
+RR 생성 후 추가 장애는 이 RR의 spec을 변경하지 않으며 별도 후속 처리가 필요하다.

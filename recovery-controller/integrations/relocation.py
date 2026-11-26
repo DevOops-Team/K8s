@@ -55,6 +55,10 @@ class RelocationClient:
         if self.inputs:
             # ADR-50: fixed at creation (spec is immutable); relocator reads nothing else.
             spec.update(self.inputs(event))
+            if action == 'moveToSpare' and callable(getattr(self.inputs, 'failed_nodes', None)):
+                # Snapshot other confirmed node-scoped faults of this same job/generation
+                # before immutable RR creation. Relocator already accepts string arrays.
+                spec['excludeNodes'] = self.inputs.failed_nodes(event, spec['nodes'])
         document = {'apiVersion': 'scheduling.devoops.site/v1alpha1',
                     'kind': 'RelocationRequest',
                     'metadata': {'name': name, 'namespace': self.namespace}, 'spec': spec}
