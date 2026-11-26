@@ -116,6 +116,13 @@ class FencingTests(unittest.TestCase):
         self.assertIsNone(self.advance());self.assertEqual(self.fence.calls,[])
     def test_unrelated_node_no_write(self):
         self.assertIsNone(self.store.claim(EVENT|{'node':'other'}));self.assertEqual(self.fence.calls,[])
+    def test_pod_restart_accepts_diagnostic_node_outside_placement(self):
+        event = dict(EVENT, source='pod', category='app',
+                     suggested_action='restart_in_place', node='other')
+        self.assertIsNone(self.store.context(dict(event, cluster='eks-b')))
+        self.assertIsNotNone(self.store.claim(event))
+        self.assertEqual(self.store.claim(event)['generation'], 2)
+
     def test_incomplete_or_explicitly_disallowed_missing_approval_blocks(self):
         self.fence.item.pop('approved_step')
         with self.assertRaises(RecoveryBlocked):self.advance()

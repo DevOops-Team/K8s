@@ -21,14 +21,15 @@ class InputTests(unittest.TestCase):
         self.store, self.s3 = Mock(), Mock()
         self.store.fencing_record.return_value = self.fence
         self.store.placement.return_value = dict(jobset_uri='s3://code/code/abc/jobset.json',
-            jobset_sha256=hashlib.sha256(self.raw).hexdigest())
+            jobset_sha256=hashlib.sha256(self.raw).hexdigest(), cluster='eks-a',
+            placement_generation=1, active_nodes=['bad', 'other'], gpu_count=2)
         self.s3.get_object.side_effect = lambda **kw: {'Body': io.BytesIO(self.raw)}
         self.provider = RelocationInputs(self.store, self.s3)
 
-    def test_spec_carries_only_new_generation_deadline_and_verified_original(self):
+    def test_spec_carries_verified_original_and_old_placement(self):
         self.fence['credential'] = 'not-for-wire'
         fields = self.provider(EVENT)
-        self.assertEqual(set(fields), {'toGeneration', 'stopDeadline', 'jobSet'})
+        self.assertEqual(set(fields), {'toGeneration', 'stopDeadline', 'jobSet', 'sourceCluster', 'nodes'})
         self.assertEqual(fields['toGeneration'], 2)
         self.assertEqual(fields['stopDeadline'], 1900)
         self.assertEqual(fields['jobSet']['metadata']['name'], 'job-abc-g0001')
@@ -77,6 +78,26 @@ class InputTests(unittest.TestCase):
         self.assertNotIn('annotations', saved['metadata'])
         self.assertEqual(client.submit(EVENT, 'moveToSpare'), name)  # response loss: 409 + same spec
         self.assertEqual([c[0] for c in calls], ['POST', 'POST', 'GET'])
+
+    def test_pod_restart_uses_full_placement_when_fault_node_is_unknown(self):
+        transport = Mock()
+        client = RelocationClient('training', transport, self.provider)
+        client.submit(dict(EVENT, node=None, category='app'), 'restartInPlace')
+        spec = transport.call_args.args[2]['spec']
+        self.assertEqual(spec['sourceCluster'], 'eks-a')
+        self.assertEqual(spec['nodes'], [{'name': 'bad'}, {'name': 'other'}])
+        self.assertNotIn('excludeNodes', spec)
+
+    def test_stale_or_incomplete_placement_cannot_create_rr(self):
+        registered = self.store.placement.return_value
+        for changes in ({'placement_generation': 2}, {'cluster': 'eks-b'},
+                        {'active_nodes': ['bad']}, {'active_nodes': ['bad', 'bad']}):
+            with self.subTest(changes=changes):
+                self.store.placement.return_value = dict(registered, **changes)
+                transport = Mock()
+                with self.assertRaisesRegex(RecoveryBlocked, 'old generation'):
+                    RelocationClient('training', transport, self.provider).submit(EVENT, 'restartInPlace')
+                transport.assert_not_called()
 
     def test_retry_with_different_inputs_is_not_adopted(self):
         existing = {'spec': {'requestId': 'r1', 'jobRef': 'training/job-abc-g0001',
