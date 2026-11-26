@@ -20,6 +20,13 @@ class InputTests(unittest.TestCase):
                           stop_wait_started_at=1000, stop_wait_deadline=1900)
         self.store, self.s3 = Mock(), Mock()
         self.store.records.return_value = []
+        self.snapshots = {}
+        def snapshot(event, calculate):
+            rid = event['event_id']
+            if rid not in self.snapshots:
+                self.snapshots[rid] = calculate()
+            return list(self.snapshots[rid])
+        self.store.snapshot_excluded_nodes.side_effect = snapshot
         self.store.fencing_record.return_value = self.fence
         self.store.placement.return_value = dict(jobset_uri='s3://code/code/abc/jobset.json',
             jobset_sha256=hashlib.sha256(self.raw).hexdigest(), cluster='eks-a',
@@ -94,6 +101,38 @@ class InputTests(unittest.TestCase):
         transport = Mock()
         RelocationClient('training', transport, self.provider).submit(EVENT, 'moveToSpare')
         self.assertEqual(transport.call_args.args[2]['spec']['excludeNodes'], ['bad', 'other'])
+
+    def test_late_fault_after_rr_create_does_not_change_retry_spec(self):
+        saved = {}
+        def transport(method, path, document=None):
+            if method == 'POST':
+                if saved:
+                    raise HTTPError(path, 409, 'AlreadyExists', {}, None)
+                saved.update(copy.deepcopy(document))
+                return document
+            return copy.deepcopy(saved)
+        client = RelocationClient('training', transport, self.provider)
+        self.provider.prepare_failed_nodes(EVENT)
+        client.submit(EVENT, 'moveToSpare')
+        self.store.records.return_value = [
+            {'event': dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')}]
+        self.assertEqual(client.submit(EVENT, 'moveToSpare'), 'recovery-' +
+                         hashlib.sha256(EVENT['event_id'].encode()).hexdigest()[:40])
+        self.assertEqual(saved['spec']['excludeNodes'], ['bad'])
+        self.assertEqual(self.snapshots['r1'], ['bad'])
+
+    def test_primary_node_outside_placement_fails_before_snapshot(self):
+        self.store.placement.return_value['active_nodes'] = ['other', 'healthy']
+        with self.assertRaisesRegex(RecoveryBlocked, 'fault node outside matching old placement'):
+            self.provider.prepare_failed_nodes(EVENT)
+        self.store.snapshot_excluded_nodes.assert_not_called()
+
+    def test_subsequent_faults_cannot_replace_frozen_exclusions(self):
+        self.provider.prepare_failed_nodes(EVENT)
+        self.store.records.return_value = [
+            {'event': dict(EVENT, event_id='r2', node='other', suggested_action='isolate_migrate')}]
+        self.assertEqual(self.provider.failed_nodes(EVENT, [{'name': 'bad'}, {'name': 'other'}]), ['bad'])
+        self.assertEqual(self.store.snapshot_excluded_nodes.call_count, 2)
 
     def test_pod_restart_uses_full_placement_when_fault_node_is_unknown(self):
         transport = Mock()
