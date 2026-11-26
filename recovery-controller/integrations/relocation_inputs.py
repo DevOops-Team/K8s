@@ -64,7 +64,29 @@ class RelocationInputs:
                 'sourceCluster': cluster,
                 'nodes': [{'name': node} for node in sorted(nodes)]}
 
+    def prepare_failed_nodes(self, event):
+        """Validate the old node placement and persist exclusions before fencing."""
+        metadata = self.store.placement(event['job_id'])
+        nodes = metadata.get('active_nodes')
+        if (metadata.get('cluster') != event['cluster']
+                or metadata.get('placement_generation') != event['generation']
+                or not isinstance(nodes, list) or not nodes
+                or any(not isinstance(node, str) or not node.strip() for node in nodes)
+                or len(set(nodes)) != len(nodes)
+                or event.get('node') not in nodes):
+            raise RecoveryBlocked('fault node outside matching old placement')
+        placed = [{'name': node} for node in nodes]
+        return self.store.snapshot_excluded_nodes(
+            event, lambda: self._collect_failed_nodes(event, placed))
+
     def failed_nodes(self, event, placed_nodes):
+        """Use the durable snapshot, never recompute on 409/retry."""
+        return self.store.snapshot_excluded_nodes(
+            event, lambda: self._collect_failed_nodes(event, placed_nodes))
+
+    def _collect_failed_nodes(self, event, placed_nodes):
+        """Collect actionable hardware faults once, excluding unrelated events."""
+
         """Collect hardware faults already recorded for the same old placement."""
         from recovery.policy import plan
         known = {item['name'] for item in placed_nodes}
