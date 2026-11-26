@@ -318,3 +318,40 @@ class RunnerCancelTests(unittest.TestCase):
         self.runner.operation(self.store.get('e1'), 20, False)
         self.assertIs(self.store.get('e1')['relocation_cancelled'], True)
         self.assertEqual(self.requests.cancel.call_count, 2)
+
+
+class DurableSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        from integrations.dynamodb import Store
+        self.item = dict(pk='event#r1', kind='event', event=dict(EVENT), state='RECEIVED')
+        self.table = Mock()
+        self.table.get_item.side_effect = lambda **kw: {'Item': copy.deepcopy(self.item)}
+        self.store = Store(self.table, Mock())
+
+    def test_first_snapshot_persists_without_recomputation(self):
+        self.assertEqual(self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad']), ['bad'])
+        self.assertEqual(self.table.update_item.call_args.kwargs['ConditionExpression'],
+                         'attribute_exists(pk) AND attribute_not_exists(exclude_nodes_snapshot)')
+        self.item['exclude_nodes_snapshot'] = ['bad']
+        self.assertEqual(self.store.snapshot_excluded_nodes(
+            EVENT, lambda: self.fail_if_recalculated()), ['bad'])
+        self.table.update_item.assert_called_once()
+
+    def fail_if_recalculated(self):
+        self.fail('snapshot should not be recalculated after it is durable')
+
+    def test_concurrent_snapshot_writer_wins(self):
+        class ConditionalConflict(Exception):
+            response = {'Error': {'Code': 'ConditionalCheckFailedException'}}
+        def concurrent_writer(**kwargs):
+            self.item['exclude_nodes_snapshot'] = ['bad', 'other']
+            raise ConditionalConflict()
+        self.table.update_item.side_effect = concurrent_writer
+        self.assertEqual(self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad']),
+                         ['bad', 'other'])
+
+    def test_invalid_snapshot_fails_closed(self):
+        self.item['exclude_nodes_snapshot'] = ['other']
+        with self.assertRaisesRegex(RecoveryBlocked, 'invalid durable excluded-nodes snapshot'):
+            self.store.snapshot_excluded_nodes(EVENT, lambda: ['bad'])
+        self.table.update_item.assert_not_called()
