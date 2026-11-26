@@ -112,35 +112,33 @@ class Judge(unittest.TestCase):
 
 
 class StopPath(unittest.TestCase):
-    """old_gone_on_worker: 닿지 않는 워커만 자기 펜싱 확인 -> 안 되면 EC2 증거"""
+    """old_gone_on_worker: 닿지 않는 워커는 컨트롤러가 준 자기 펜싱 확인만 사용."""
 
-    def gone(self, results, sf_ok, ec2_ok=False, **st):
-        sf_calls, ec2_calls = [], []
+    def gone(self, results, sf_ok, **st):
+        sf_calls = []
         x = SimpleNamespace(st={"sourceCluster": "eks-a", **st})
         with mock.patch.object(relocator, "gone_on", side_effect=lambda _x, src, *_: results[src]), \
                 mock.patch.object(relocator, "self_fence_stop_evidence",
-                                  side_effect=lambda _x, why, src: sf_calls.append(src) or (sf_ok.get(src, False), why)), \
-                mock.patch.object(relocator, "ec2_stop_evidence",
-                                  side_effect=lambda _x, why, src: ec2_calls.append(src) or (ec2_ok, why)):
+                                  side_effect=lambda _x, why, src: sf_calls.append(src) or (sf_ok.get(src, False), why)):
             ok, _ = relocator.old_gone_on_worker(x, "training", "job-j1-g0001")
-        return ok, x, sf_calls, ec2_calls
+        return ok, x, sf_calls
 
     def test_reachable_worker_with_pods_ignores_self_fence(self):
-        ok, _, sf, ec2 = self.gone({"eks-a": (False, "eks-a에 Pod 2개 남아 있음")}, {"eks-a": True})
+        ok, _, sf = self.gone({"eks-a": (False, "eks-a에 Pod 2개 남아 있음")}, {"eks-a": True})
         self.assertFalse(ok)
-        self.assertEqual((sf, ec2), ([], []))
+        self.assertEqual(sf, [])
 
     def test_unreachable_worker_with_self_fence(self):
-        ok, x, sf, ec2 = self.gone({"eks-a": (False, WHY)}, {"eks-a": True})
+        ok, x, sf = self.gone({"eks-a": (False, WHY)}, {"eks-a": True})
         self.assertTrue(ok)
-        self.assertEqual((sf, ec2), (["eks-a"], []))
+        self.assertEqual(sf, ["eks-a"])
         self.assertEqual(x.stop_evidence[0]["kind"], "self_fence")
 
-    def test_falls_back_to_ec2(self):
-        ok, x, sf, ec2 = self.gone({"eks-a": (False, WHY)}, {}, ec2_ok=True)
-        self.assertTrue(ok)
-        self.assertEqual((sf, ec2), (["eks-a"], ["eks-a"]))
-        self.assertEqual(x.stop_evidence[0]["kind"], "ec2")
+    def test_missing_controller_evidence_does_not_find_another_source(self):
+        ok, x, sf = self.gone({"eks-a": (False, WHY)}, {})
+        self.assertFalse(ok)
+        self.assertEqual(sf, ["eks-a"])
+        self.assertEqual(x.stop_evidence, [])
 
     def test_no_evidence_keeps_waiting(self):
         self.assertFalse(self.gone({"eks-a": (False, WHY)}, {})[0])
