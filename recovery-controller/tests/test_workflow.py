@@ -211,6 +211,22 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.flow.accept(dict(EVENT, node=None))
 
+    def test_node_loss_with_restart_recommendation_requests_move_to_spare(self):
+        event = dict(EVENT, event_id='node-loss', source='node',
+                     category='infra', suggested_action='restart_in_place')
+        self.flow.accept(event)
+        self.flow.tick(self.store.events['node-loss'])
+        self.assertEqual(self.requests.calls, [(event, 'moveToSpare')])
+
+    def test_node_loss_without_target_holds_before_claim(self):
+        event = dict(EVENT, event_id='node-loss', source='node', node=None,
+                     category='infra', suggested_action='restart_in_place')
+        self.flow.accept(event)
+        result = self.flow.tick(self.store.events['node-loss'])
+        self.assertEqual(result['state'], 'HOLD')
+        self.assertEqual(self.store.job['generation'], 1)
+        self.assertEqual(self.requests.calls, [])
+
     def test_pod_failure_without_node_requests_group_restart(self):
         event = dict(EVENT, event_id='pod-fault', node=None, source='pod',
                      category='app', suggested_action='restart_in_place')
