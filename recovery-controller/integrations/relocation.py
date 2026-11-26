@@ -10,6 +10,7 @@ SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
 # relocator 2.0.0 control annotations (K8s scheduling/common/keys.py, RECOVERY_CONTRACT.md section 3)
 STOP_RECORDED_ANNOTATION = 'devoops/recovery-stop-recorded'
 CANCEL_ANNOTATION = 'devoops/recovery-cancel'
+PAUSE_ANNOTATION = 'devoops/recovery-pause'
 
 
 class RelocationClient:
@@ -99,7 +100,7 @@ class RelocationClient:
         path, existing = self._owned(event, name)
         annotations = existing.get('metadata', {}).get('annotations') or {}
         if (existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate')
-                or annotations.get(CANCEL_ANNOTATION)):
+                or annotations.get(CANCEL_ANNOTATION) or annotations.get(PAUSE_ANNOTATION) == 'true'):
             return
         if self.self_fence_input:
             from integrations.self_fence import ANNOTATION
@@ -108,13 +109,23 @@ class RelocationClient:
                 # Re-read resourceVersion/status after PATCH before any second mutation.
                 _, existing = self._owned(event, name)
                 annotations = existing.get('metadata', {}).get('annotations') or {}
-                if annotations.get(CANCEL_ANNOTATION) or existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate'):
+                if annotations.get(CANCEL_ANNOTATION) or annotations.get(PAUSE_ANNOTATION) == 'true' or existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate'):
                     return
         if (self.status_input(event, existing)
                 and existing.get('status', {}).get('phase') not in ('Cancelled', 'Duplicate')
                 and not annotations.get(CANCEL_ANNOTATION)):
             # OLD_RUN_STOPPED is now in fencing: relocator may submit the new generation.
             self._annotate(path, existing, STOP_RECORDED_ANNOTATION, 'true')
+
+    def set_paused(self, event, name, paused):
+        """Proposed opt-in contract; PATCH is intent, not acknowledgement."""
+        if type(paused) is not bool:
+            raise ValueError('paused must be boolean')
+        path, existing = self._owned(event, name)
+        annotations = existing.get('metadata', {}).get('annotations') or {}
+        if annotations.get(CANCEL_ANNOTATION) or existing.get('status', {}).get('phase') in ('Duplicate', 'Cancelled', 'Done', 'Failed'):
+            return False
+        return self._annotate(path, existing, PAUSE_ANNOTATION, 'true' if paused else 'false')
 
     def cancel(self, event, name, reason):
         """Lost authority: relocator withdraws its new JobSet and ends Cancelled (Done/Failed too)."""
