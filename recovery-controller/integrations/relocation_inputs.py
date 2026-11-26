@@ -20,7 +20,7 @@ class RelocationInputs:
         self.store, self.s3 = store, s3
 
     def __call__(self, event):
-        """Return the spec fields toGeneration, stopDeadline and jobSet for this recovery."""
+        """Return verified recovery inputs, including the old generation placement."""
         fence = self.store.fencing_record(event['job_id'])
         if (fence.get('recovery_id') != event['event_id']
                 or fence.get('generation') != event['generation'] + 1
@@ -37,6 +37,17 @@ class RelocationInputs:
                 or uri.path != f"/code/{event['job_id']}/jobset.json"
                 or not re.fullmatch('[0-9a-f]{64}', digest)):
             raise RecoveryBlocked('verified original JobSet URI/digest missing')
+        cluster = metadata.get('cluster')
+        nodes = metadata.get('active_nodes')
+        gpu_count = metadata.get('gpu_count')
+        if (cluster not in ('eks-a', 'eks-b', 'eks-c') or cluster != event['cluster']
+                or not whole(metadata.get('placement_generation'))
+                or metadata['placement_generation'] != event['generation']
+                or not whole(gpu_count) or not 1 <= gpu_count <= 4
+                or not isinstance(nodes, list) or len(nodes) != gpu_count
+                or any(not isinstance(node, str) or not node.strip() for node in nodes)
+                or len(set(nodes)) != len(nodes)):
+            raise RecoveryBlocked('complete placement for the old generation required for relocation')
         body = self.s3.get_object(Bucket=uri.netloc, Key=uri.path[1:])['Body']
         try:
             raw = body.read(MAX_BYTES + 1)
@@ -47,7 +58,8 @@ class RelocationInputs:
         original = json.loads(raw)
         if not isinstance(original, dict) or original.get('kind') != 'JobSet':
             raise RecoveryBlocked('original object must be a JobSet')
-        # Only the three fields relocator needs; no fencing snapshot, progress or credentials.
         return {'toGeneration': event['generation'] + 1,
                 'stopDeadline': int(deadline),  # epoch seconds = fencing stop_wait_deadline
-                'jobSet': original}
+                'jobSet': original,
+                'sourceCluster': cluster,
+                'nodes': [{'name': node} for node in sorted(nodes)]}

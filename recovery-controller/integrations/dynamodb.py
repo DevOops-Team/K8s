@@ -101,8 +101,15 @@ class Store:
             raise RecoveryBlocked('registered recovery job metadata missing')
         if item.get('registration_conflict'):
             raise RecoveryBlocked('conflicting job.submitted original registration')
-        if not recovering and (item.get('cluster') != event['cluster'] or (event.get('node') is not None and event['node'] not in item.get('active_nodes',[]))):
-            return None
+        if not recovering:
+            if item.get('cluster') != event['cluster']:
+                return None
+            # A trainer log can identify the first exit without identifying a faulty node.
+            diagnostic_node = (event.get('source') == 'pod'
+                               and event.get('suggested_action') == 'restart_in_place')
+            node = event.get('node')
+            if not diagnostic_node and node is not None and node not in item.get('active_nodes', []):
+                return None
         if not 1 <= int(item.get('gpu_count',0)) <= 4:
             raise RecoveryBlocked('GPU count must be 1..4')
         uri=item.get('jobset_uri','')
