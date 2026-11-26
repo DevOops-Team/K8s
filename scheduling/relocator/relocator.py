@@ -267,9 +267,10 @@ def old_gone_on_worker(x: Ctx, ns, name):
     return True, "; ".join(whys)
 
 
-def gone_on(x: Ctx, src, ns, name):
+def gone_on(x: Ctx, src, ns, name, api=None):
     """워커 src에서 옛 잡이 사라졌는지. 워커에 접속이 안 되면 확인 불가 = 멈췄다고 보지 않는다"""
-    api = x.workers.get().get(src)
+    if api is None:
+        api = x.workers.get().get(src)
     if api is None:
         return False, Unreachable(f"{src} 접속 정보 없음")
     try:
@@ -570,10 +571,47 @@ def withdraw(x: Ctx, ns, name, uid):
     return False
 
 
+def cancel_for_observe(x: Ctx):
+    """Withdraw both generations and wait for their Kubernetes resources to disappear."""
+    ns, old_name = x.job()
+    new_name = R.jobset_name(x.job_id(), x.to_gen())
+    clusters = set(x.workers.get())
+    clusters.update(c for c in (x.spec.get("sourceCluster"), x.st.get("sourceCluster"),
+                               x.st.get("targetCluster"), *(x.st.get("seenClusters") or [])) if c)
+    registered = x.co.list_cluster_custom_object(K.KUEUE_GROUP, K.KUEUE_VERSION, "multikueueclusters")
+    clusters.update(item["metadata"]["name"] for item in registered["items"])
+    for name, generation in ((old_name, x.old_gen()), (new_name, x.to_gen())):
+        try:
+            job = x.co.get_namespaced_custom_object(K.JOBSET_GROUP, K.JOBSET_VERSION, ns, "jobsets", name)
+        except client.ApiException as exc:
+            if exc.status != 404:
+                raise
+            continue
+        meta = job["metadata"]
+        labels = meta.get("labels") or {}
+        owned = (labels.get(K.LABEL_JOB_ID) == x.job_id()
+                 and str(labels.get(K.LABEL_GENERATION)) == str(generation))
+        if name == new_name:
+            owned = owned and (meta.get("annotations") or {}).get(K.ANN_RECOVERY_ID) == x.spec["requestId"]
+        if not owned or not withdraw(x, ns, name, meta["uid"]):
+            x.save(message=f"Observe 취소: {ns}/{name} 소유권 또는 삭제 확인 대기")
+            return
+    for name in (old_name, new_name):
+        checks = [("manager", x.mgr), *((cluster, None) for cluster in sorted(clusters))]
+        for cluster, api in checks:
+            gone, why = gone_on(x, cluster, ns, name, api=api)
+            if not gone:
+                x.save(message=f"Observe 취소: {name} 종료 확인 대기 ({why})")
+                return
+    x.save(phase="Cancelled", cancelledAt=kube.now_rfc3339(), message="Observe 전환: 옛·새 실행 종료 확인")
+
+
 def cancel(x: Ctx):
     """복구 컨트롤러의 취소 신호: 이 요청이 만든 새 세대 JobSet을 철회하고 Cancelled.
     status를 쓰기 전에 죽었을 수 있으니 새 세대 이름으로 찾고, 이 요청의 recovery-id가 붙은 것만 지운다.
     철회에 실패하면 Cancelled로 끝내지 않는다 (다음 루프에서 다시)"""
+    if x.ann(K.ANN_CANCEL) == "observe_mode_cancel":
+        return cancel_for_observe(x)
     js = None
     try:
         ns, _ = x.job()

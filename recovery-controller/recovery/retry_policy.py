@@ -77,6 +77,15 @@ class Runner:
         if record['event'].get('lifecycle_type') == 'job.failed':
             from recovery.job_failed import reconcile
             return reconcile(self, record, now)
+        if (record.get('relocation_request') and not getattr(self.workflow, 'execute', True)
+                and (record['state'] not in TERMINAL or record['state'] == 'HOLD'
+                     or (record['state'] == 'RECOVERED' and not record.get('finalized')))):
+            reason = 'observe_mode_cancel'
+            if record.get('relocation_cancel_reason') != reason:
+                record = self.store.save(rid, state='HOLD', action='HOLD', reason=reason,
+                                         relocation_cancelled=False, relocation_cancel_reason=reason,
+                                         relocation_cancel_next_at=0)
+            return self.workflow.retry_cancel(record, now)
         if record['state'] == 'HOLD':
             record = self.poll_held(record, now, monitoring_hold)
         finish = record['state'] == 'RECOVERED'

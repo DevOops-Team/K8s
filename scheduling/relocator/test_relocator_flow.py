@@ -535,3 +535,28 @@ class Scope(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ObserveCancel(unittest.TestCase):
+    def test_cancels_both_generations_and_waits_for_worker(self):
+        from types import SimpleNamespace
+
+        co = FakeCO()
+        co.list_cluster_custom_object = mock.Mock(return_value={"items": []})
+        co.get_namespaced_custom_object = mock.Mock(side_effect=[
+            {"metadata": {"uid": "old", "labels": {K.LABEL_JOB_ID: "abc", K.LABEL_GENERATION: "1"}}},
+            {"metadata": {"uid": "new", "labels": {K.LABEL_JOB_ID: "abc", K.LABEL_GENERATION: "2"},
+                          "annotations": {K.ANN_RECOVERY_ID: "r1"}}},
+        ])
+        x = ctx(co, annotations={K.ANN_CANCEL: "observe_mode_cancel"})
+        x.mgr = object()
+        x.workers = SimpleNamespace(get=lambda: {"worker1": object()})
+        with mock.patch.object(relocator, "gone_on", side_effect=[(True, ""), (False, "unreachable")]):
+            relocator.step(x, [])
+        self.assertEqual([item[2] for item in co.deleted], ["old", "new"])
+        self.assertNotEqual(co.status.get("phase"), "Cancelled")
+        co.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+        with mock.patch.object(relocator, "gone_on", return_value=(True, "")) as gone:
+            relocator.step(x, [])
+        self.assertEqual(gone.call_count, 4)
+        self.assertEqual(co.status["phase"], "Cancelled")
