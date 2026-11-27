@@ -36,7 +36,7 @@ relocator는 4번의 확인 주석이 붙기 전에는 새 세대를 내지 않�
 | **`stopDeadline`** | RFC3339(시간대 필수) 또는 epoch 초 | 옛 실행 종료 마감 = 펜싱 표 `stop_wait_deadline`. 지나면 `Held`. 없으면 RR 생성 + 15분 |
 | **`jobSet`** | object | 해시를 대조한 원본 JobSet 전체 (`kind: JobSet`). 없으면 `Failed` |
 | **`sourceCluster`** | string | 옛 세대가 돌던 클러스터 (모든 action). moveToSpare cordon 클러스터, restartInPlace·moveToSpare 원래 클러스터 우선 힌트. moveToSpare인데 `excludeNodes`가 있고 이 값이 없으면 접수 단계 `Failed`. status `sourceCluster`에 그대로 기록한다(디스패처 자리 지키기·EKS 끄기 검사가 읽음) |
-| **`nodes`** | array `[{name, instanceId?}]` | 옛 세대가 쓰던 노드 (모든 action). restartInPlace면 재제출본을 이 노드·`sourceCluster`에 고정. 없으면 고정 안 함(원래 클러스터 우선). 있는데 `sourceCluster` 없음·name 없음/중복·Pod 수보다 적음이면 접수 단계 `Failed`. `instanceId`는 relocator가 쓰지 않는다 |
+| **`nodes`** | array `[{name, instanceId?}]` | 옛 세대가 쓰던 노드 (모든 action). restartInPlace면 재제출본을 이 노드·`sourceCluster`에 고정. 없으면 고정 안 함(원래 클러스터 우선, 예비 노드 허용·비예비 노드 선호). 있는데 `sourceCluster` 없음·name 없음/중복·Pod 수보다 적음이면 접수 단계 `Failed`. `instanceId`는 relocator가 쓰지 않는다 |
 
 relocator는 대상 클러스터·노드를 스스로 조회해서 정하지 않는다 (GPU-295). 관리 클러스터 Workload `status.clusterName`·
 `nominatedClusterNames`는 옛 실행 종료 확인을 할 워커(`status.seenClusters`)를 모으는 데만 쓰고, 워커 Pod로 옛 노드를 찾아

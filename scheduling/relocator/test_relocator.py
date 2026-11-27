@@ -83,6 +83,8 @@ class Render(unittest.TestCase):
         pod["spec"]["tolerations"] = [t for t in pod["spec"]["tolerations"] if t != R.SPARE_TOLERATION]
         if orig_tols is None and not pod["spec"]["tolerations"]:
             del pod["spec"]["tolerations"]
+        self.assertEqual(pod["spec"].pop("affinity"),
+                         {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [R.PREFER_NON_SPARE]}})
         self.assertEqual(back, ORIG)
 
     def test_spare_toleration_added_once(self):
@@ -182,6 +184,14 @@ def pod_spec(js):
     return js["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
 
 
+def preferred_terms(spec):
+    return ((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
+        "preferredDuringSchedulingIgnoredDuringExecution")
+
+
+ONLY_PREFER = {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [R.PREFER_NON_SPARE]}}
+
+
 def required_terms(spec):
     return (((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
         "requiredDuringSchedulingIgnoredDuringExecution") or {}).get("nodeSelectorTerms")
@@ -197,9 +207,22 @@ class PinNodes(unittest.TestCase):
         spec = pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", "worker1", [], pin_nodes=["node-2", "node-1"]))
         self.assertEqual(required_terms(spec), [{"matchExpressions": [PIN]}])
         self.assertIn(R.SPARE_TOLERATION, spec["tolerations"])
+        # 고정이 있으면 비예비 선호를 넣지 않는다 (옛 노드가 예비여도 그 노드로)
+        self.assertIsNone(preferred_terms(spec))
 
-    def test_no_pin_leaves_affinity_alone(self):
-        self.assertNotIn("affinity", pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", None, [])))
+    def test_no_pin_prefers_non_spare_only(self):
+        """고정 없는 재제출(노드 장애 restartInPlace·moveToSpare·evacuateCluster)은 예비 허용 + 비예비 선호 (GPU-306)"""
+        spec = pod_spec(R.render(ORIG, "3f9a1c2e", 2, "r", None, []))
+        self.assertEqual(spec["affinity"], ONLY_PREFER)
+        self.assertIn(R.SPARE_TOLERATION, spec["tolerations"])
+
+    def test_prefer_non_spare_added_once_and_dropped_when_pinned(self):
+        once = R.render(ORIG, "3f9a1c2e", 2, "r", None, [])
+        twice = R.render(once, "3f9a1c2e", 3, "r2", None, [])
+        self.assertEqual(preferred_terms(pod_spec(twice)), [R.PREFER_NON_SPARE])
+        pinned = pod_spec(R.render(twice, "3f9a1c2e", 4, "r3", "worker1", [], pin_nodes=["node-1", "node-2"]))
+        self.assertIsNone(preferred_terms(pinned))
+        self.assertEqual(required_terms(pinned), [{"matchExpressions": [PIN]}])
 
     def test_and_with_original_terms_and_keep_other_affinity(self):
         orig = copy.deepcopy(ORIG)
@@ -214,16 +237,17 @@ class PinNodes(unittest.TestCase):
         spec = pod_spec(twice)
         self.assertEqual(required_terms(spec), [{"matchExpressions": [gpu, PIN]}, {"matchExpressions": [zone, PIN]}])
         self.assertEqual(spec["affinity"]["podAntiAffinity"], {"x": 1})
-        self.assertEqual(len(spec["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]), 1)
-        # 다음 세대가 다른 action(고정 없음)이면 hostname 고정만 빠지고 원래 조건은 남는다
+        self.assertEqual(preferred_terms(spec), [{"weight": 1, "preference": {}}])
+        # 다음 세대가 다른 action(고정 없음)이면 hostname 고정만 빠지고 원래 조건은 남는다. 비예비 선호가 더해진다
         moved = pod_spec(R.render(twice, "3f9a1c2e", 4, "r3", None, []))
         self.assertEqual(required_terms(moved), [{"matchExpressions": [gpu]}, {"matchExpressions": [zone]}])
+        self.assertEqual(preferred_terms(moved), [{"weight": 1, "preference": {}}, R.PREFER_NON_SPARE])
         self.assertEqual(pod_spec(orig)["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
             "nodeSelectorTerms"], [{"matchExpressions": [gpu]}, {"matchExpressions": [zone]}])
 
     def test_strip_pin_only_term(self):
         pinned = R.render(ORIG, "3f9a1c2e", 2, "r", "worker1", [], pin_nodes=["node-1"])
-        self.assertNotIn("affinity", pod_spec(R.render(pinned, "3f9a1c2e", 3, "r2", None, [])))
+        self.assertEqual(pod_spec(R.render(pinned, "3f9a1c2e", 3, "r2", None, []))["affinity"], ONLY_PREFER)
 
     def test_pod_count(self):
         js = {"spec": {"replicatedJobs": [{"replicas": 2, "template": {"spec": {"parallelism": 2}}},
