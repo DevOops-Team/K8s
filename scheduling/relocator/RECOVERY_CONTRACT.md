@@ -81,6 +81,33 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 - 쓰면 `oldRunStopEvidence.kind`와 그 워커의 `checks[].kind`가 `self_fence`다 (새 증거가 섞이면 self_fence > automatic). 과거에 이미 기록된 `ec2` 증거는 재제출 시 그대로 보존한다.
 - 컨트롤러가 붙이기 전 확인할 것(ADR-49 쓰기 조건): `generation > self_fence_gen`, 그리고 `recovery_from_gen`·`recovery_to_gen`·`recovery_id`·`GENERATION_ADVANCED`가 이 복구와 맞을 것.
 
+### 검증된 종료 증거 `devoops/old-run-stop-verified` (GPU-304 생산, GPU-297 수신)
+
+워커 API는 닿는데 옛 JobSet·Workload·Pod가 남는 장애(노드그룹 0대, NotReady 노드, 시스템 노드까지 종료)를 위한 경로다.
+복구 컨트롤러 `integrations/stop_evidence.py`가 서명 승인(KMS)과 EC2 상태로 옛 세대 전체 실행 종료·재생성 차단을 검증하고,
+펜싱 표에 고정한 증거를 정규화 JSON으로 붙인다. 컨트롤러는 `verified_stop_input` 설정이 켜져야 붙인다(기본 off).
+
+relocator 확인 (하나라도 어긋나면 쓰지 않고 지금처럼 `WaitingForStop`/`Held`, 이유는 status `message`에 남김):
+
+| 칸 | relocator 확인 |
+| --- | --- |
+| `requestId`·`requestUid` | = spec.requestId·RR metadata.uid |
+| `jobId`·`namespace`·`jobset_name` | = jobRef의 작업·네임스페이스·옛 JobSet 이름 |
+| `generation`·`toGeneration` | = 옛 세대·spec.toGeneration (정수) |
+| `kind` | `ec2` 또는 `manual` (서명 승인 경로) |
+| `verificationId` | 비어 있지 않음 (서명 문서 digest) |
+| `recreationBlocked` | `true` |
+| `confirmed_at` | 비어 있지 않음 |
+| `clusters` | 중복 없는 문자열 목록, relocator가 아는 옛 복사본 워커(`sourceCluster`+`seenClusters`) 전부 포함 |
+| `checks` | `clusters` 전부를 같은 `kind`로 덮음, `detail` 있음 |
+
+- relocator는 서명·EC2·참여 rank를 다시 검증하지 않는다(판단은 컨트롤러, ADR-50).
+- 관리 클러스터 Workload가 사라진 뒤에만 쓴다. 워커 객체 잔존·마감(`Held`)과 무관하게 진행한다.
+- 받은 값을 **고치지 않고 그대로** `oldRunStopEvidence`로 쓴다. 컨트롤러 `validate_status`가 주석·펜싱 표 고정값과 완전 일치를 대조한다. `NEW_RUN_SUBMITTED`에서도 그대로다.
+- 사람 확인 주석 `devoops/old-execution-stopped`와 함께 있으면 이 증거를 우선한다.
+- 이후 `recovery-stop-recorded` → 재제출 순서는 그대로다.
+- `test_verified_stop.py`가 컨트롤러 실제 코드로 만든 주석 → relocator status → 컨트롤러 status 검사까지 확인한다.
+
 ## 4. RR status.recoveryProgress (relocator가 씀)
 
 복구 컨트롤러 `integrations/relocation_status.py` 계약 v1과 같다. 단위 테스트 `test_progress_contract.py`가 그 검사 코드에 실제로 넣어 확인한다.
@@ -111,7 +138,7 @@ relocator는 원본의 `metadata.namespace`가 요청 네임스페이스와 다�
 
 ## 5. 알려진 차이 (복구 컨트롤러 담당과 확인할 것)
 
-- **사람 확인 경로**: relocator는 `devoops/old-execution-stopped=true`를 받으면 `kind: manual`, `checks: []` 증거를 쓴다. 지금 컨트롤러 계약은 manual을 받지 않아 펜싱 표에 기록되지 않고 HOLD로 남는다. 이 주석만으로 전체 복구가 재개되는 것은 아니며 컨트롤러를 통한 승인·재개 경로를 맞춰야 한다.
+- **사람 확인 경로**: relocator는 `devoops/old-execution-stopped=true`를 받으면 `kind: manual`, `checks: []` 증거를 쓴다. 지금 컨트롤러 계약은 서명 없는 manual을 받지 않아 펜싱 표에 기록되지 않고 HOLD로 남는다. 인증된 수동 승인은 컨트롤러가 서명 승인을 검증해 `devoops/old-run-stop-verified`(`kind: manual`)로 내려주는 경로를 쓴다. 기존 사람 확인 주석의 제거 여부는 컨트롤러 담당과 정한다.
 - **워커에 보내지기 전 잡**: 옛 잡이 어느 워커에도 안 보내졌으면 `clusters`가 빈 목록이다. 컨트롤러 계약은 빈 목록과 사건 클러스터가 빠진 목록을 거부한다.
 - **확인 주석 대기 시간**: relocator는 확인 주석을 기한 없이 기다린다. 기한 판단과 HOLD는 컨트롤러 몫이다.
 - **자기 펜싱 연결**: 컨트롤러 `self_fence_input`이 펜싱 기록을 검증해 `devoops/self-fence-verified`를 붙이고, `relocation_status.py`가 해당 주석과 일치하는 `self_fence` 결과만 받는다. 기본 off이며 `relocation_status_input`·execute와 생산자 계약 확인이 필요하다. relocator `SELF_FENCE_EVIDENCE`도 별도 off다. jobspec·사이드카 보강 및 EKS 시험 통과 전에는 켜지 않는다. 상세: `recovery-controller/docs/self-fence-input.md`.
@@ -155,16 +182,17 @@ jobSet:
 
 ## 7. GPU-297: 복구 컨트롤러에 요청할 연계
 
-여기는 아직 합의되지 않은 연계 요구사항이다. 새 spec 필드·주석·증거 kind를 임의로 추가하지 않았다. 실제 EKS 재현을 수정의 선행조건으로 두지 않고, 구현 가능한 수신·실행 경계와 로컬 검증부터 진행한다.
+일반 종료 증거의 키·형식은 복구 컨트롤러 GPU-304 코드(`devoops/old-run-stop-verified`)를 따른다(위 3절). 아래는 그 밖에 남은 연계 요구사항이다. relocator가 새 spec 필드·주석·증거 kind를 임의로 추가하지 않는다. 실제 EKS 재현을 수정의 선행조건으로 두지 않고, 구현 가능한 수신·실행 경계와 로컬 검증부터 진행한다.
 
 | 요청 | 필요한 내용과 현재 부족한 점 |
 | --- | --- |
 | 여러 장애 노드 전달 | `sourceCluster`는 옛 실행 클러스터, `nodes`는 옛 세대 참여 노드 전체, `excludeNodes`는 격리할 장애 노드 전체다. 복구 컨트롤러는 K8s #72(develop)에서 `moveToSpare`의 `excludeNodes`를 공유 스냅샷의 장애 노드 전체로 채우도록 바뀌었다. relocator는 받은 목록을 그대로 격리하며, 이미 생성한 RR 뒤 추가 노드 장애가 생기는 경우의 처리는 컨트롤러 담당과 맞춰야 한다. relocator가 장애 노드를 추론하거나 멋대로 action을 바꾸지는 않는다. |
 | 옛 세대 전체 종료·재생성 차단 근거 | 복구 컨트롤러가 namespace/작업·requestId·옛/새 세대·원래 클러스터, 참여 Pod UID/번호·노드/인스턴스의 범위, 증거 종류·확인 시각, 실제 실행 종료와 재생성 차단을 검증한 근거를 전달해야 한다. 일부 노드의 종료, NotReady, desired=0, 강제 삭제로 객체만 사라진 것은 전체 종료 증거가 아니다. 남은 정상 노드의 옛 rank와 다른 워커의 복사본도 빠뜨리지 않는다. |
 | 전원 종료에 쓸 독립 근거 | 전원이 끊긴 노드는 사이드카 종료 보고를 남기지 못할 수 있다. 따라서 자기 펜싱 보고만으로 EC2 stop/terminate·노드그룹 0대 전체를 해결할 수 없다. 필요한 인스턴스 식별·실제 종료 확인과 재실행 차단은 복구 담당이 소유한 경로로 검증해야 하며, relocator는 AWS/저장소를 조회하지 않는다. 증거 수집·검증 담당과 권한도 함께 정한다. |
-| 생성 후 도착하는 증거의 전달 | 전달 위치는 복구 컨트롤러가 작성하는 RR annotation으로 정한다(2026-11-26 사용자 확정). 불변 spec에 고정 입력을 두고 이후 증거·제어 신호는 annotation으로 받는다. 일반 종료 증거 annotation의 키·형식·필수 검증 항목과 늦은 보고·중복·다른 복구 혼입 거절 조건은 컨트롤러 담당과 맞춰야 한다. 기존 `devoops/self-fence-verified`는 API 단절에 한정한 ADR-49 계약이므로 일반 노드/클러스터 장애 근거로 자동 확대하지 않는다. |
-| HOLD 이후 재개·종료 기록 확인 | 같은 recovery_id가 여전히 권한을 가졌는지 확인하고, 컨트롤러 HOLD와 relocator Held를 함께 풀 수 있는 인증된 재개 절차가 필요하다. 불변 `stopDeadline`을 relocator가 연장하거나 `recovery-stop-recorded`를 스스로 붙이지 않는다. 종료 증거 수락 → 펜싱 표 OLD_RUN_STOPPED 조건부 기록 → 기존 ACK → 재제출 순서는 유지한다. |
+| 생성 후 도착하는 증거의 전달 | relocator 수신 완료(3절 `devoops/old-run-stop-verified`). 컨트롤러 쪽 증거 생산 경로(참여 rank·인스턴스 기록, 서명 승인 저장소, EC2 조회 권한)와 `verified_stop_input` 활성화는 컨트롤러·인프라 담당 몫이다. 기존 `devoops/self-fence-verified`는 API 단절에 한정한 ADR-49 계약으로 그대로 둔다. |
+| HOLD 이후 재개·종료 기록 확인 | relocator는 검증 증거가 오면 `Held`에서도 진행한다. 컨트롤러는 같은 recovery_id 권한(`GENERATION_ADVANCED`)을 확인해 증거를 붙이고, status 검사 뒤 HOLD 재개는 컨트롤러가 맡는다. 불변 `stopDeadline`을 relocator가 연장하거나 `recovery-stop-recorded`를 스스로 붙이지 않는다. 종료 증거 수락 → 펜싱 표 OLD_RUN_STOPPED 조건부 기록 → 기존 ACK → 재제출 순서는 유지한다. |
+| 죽은 클러스터의 옛 객체 정리 | 재제출 뒤에도 장애 클러스터에 옛 JobSet·Workload·Pod가 남는다. 클러스터가 다시 살아날 때 옛 세대가 다시 뜨지 않도록 정리·차단할 주체를 정해야 한다(컨트롤러 증거의 `recreationBlocked`가 무엇을 보장하는지 포함). |
 
-현재 로컬 변경은 EC2 직접 조회 제거, 여러 격리 대상의 Node 삭제 경쟁 처리, 그리고 관련 안전 조건 테스트다. **옛 객체가 남은 상태의 일반 종료 증거 수신과 HOLD 자동 재개는 위 계약이 확정되기 전까지 구현 완료로 보지 않는다.** 근거 없이 Terminating Pod를 강제 삭제하거나 종료로 간주하지 않는다.
+현재 변경: EC2 직접 조회 제거, 여러 격리 대상의 Node 삭제 경쟁 처리, 검증된 종료 증거 수신과 Held 이후 진행. 근거 없이 Terminating Pod를 강제 삭제하거나 종료로 간주하지 않는다. 실제 EKS 통합 검증은 컨트롤러 증거 생산 경로가 켜진 뒤 진행한다.
 
 노드그룹 0대는 학습·예비만 내리는 경우와 시스템 노드까지 내리는 경우를 구분한다. 시스템 컨트롤러가 없어져 JobSet·Workload가 남는 조건도 가짜 API로 먼저 검증하고, 이후 EKS에서 실제 삭제·복원·첫 step을 확인한다. 복구 컨트롤러 코드·운영 매니페스트·IAM은 이 스케줄링 변경에서 수정하지 않는다.
