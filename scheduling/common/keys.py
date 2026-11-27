@@ -47,6 +47,10 @@ ANN_CANCEL = "devoops/recovery-cancel"                 # 값 = 이유. 권한 �
 # 값 = JSON. 컨트롤러가 펜싱 표 self_fence_*를 읽고 확인한 옛 세대 Pod 전원 종료 기록 (ADR-49, GPU-255).
 # 워커 API에 닿지 않을 때만, SELF_FENCE_EVIDENCE=on일 때만 relocator가 그 워커의 종료 증거로 쓴다
 ANN_SELF_FENCE = "devoops/self-fence-verified"
+# 값 = JSON(정규화). 컨트롤러가 서명 승인·EC2 상태로 옛 세대 전체 실행 종료와 재생성 차단을 검증하고
+# 펜싱 표에 고정한 증거 (GPU-304). 워커에 옛 객체가 남아 있거나 Held여도 relocator는 이것을 종료 증거로 쓰고,
+# 값을 그대로 status.recoveryProgress.oldRunStopEvidence에 옮긴다 (컨트롤러가 완전 일치를 대조, GPU-297)
+ANN_STOP_VERIFIED = "devoops/old-run-stop-verified"
 
 # --- 펜싱 / 노드
 LABEL_FENCED = "devoops/fenced"              # MultiKueueCluster에 "true" -> 새 잡 안 보냄
