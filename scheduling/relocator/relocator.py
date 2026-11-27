@@ -7,7 +7,7 @@
 action:
   restartInPlace   노드 격리 없이 재제출. spec.nodes가 있으면 그 노드·spec.sourceCluster에만 다시 띄움 (제자리 재시작,
                    GPU-280). 노드·클러스터는 복구 컨트롤러가 정해서 준다. relocator는 조회·판단하지 않는다.
-                   spec.nodes가 없으면(노드 소실·NotReady) 고정 없이 원래 클러스터 우선, 예비 허용·비예비 선호 (GPU-306)
+                   spec.nodes가 없으면(복구 컨트롤러 계약 반영 전) 원래 클러스터 우선 (ADR-38)
   moveToSpare      spec.sourceCluster의 spec.excludeNodes cordon·taint -> 복구 우선순위로 재제출, 원래 클러스터 우선·부족하면 다른 곳
                    펜싱 안 함: 그 클러스터의 다른 잡·새 잡은 그대로 받는다
   evacuateCluster  (AZ·클러스터 장애) spec.excludeClusters 펜싱 -> 그 클러스터를 빼고 재제출 (디스패처가 다른 곳을 고름)
