@@ -31,7 +31,8 @@ def request():
     return dict(metadata=dict(namespace='training', uid='rr-uid', resourceVersion='7',
         creationTimestamp=datetime.fromtimestamp(NOW-60, timezone.utc).isoformat()),
         spec=dict(requestId='r1', jobRef='training/job-abc-g0001', toGeneration=2, sourceCluster='eks-a',
-                  nodes=[dict(name='n1'), dict(name='n2')]), status=dict(phase='Held', seenClusters=['eks-a']))
+                  action='moveToSpare', nodes=[dict(name='n1'), dict(name='n2')]),
+    status=dict(phase='Held', seenClusters=['eks-a']))
 
 
 def document():

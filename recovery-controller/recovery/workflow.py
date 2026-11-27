@@ -4,7 +4,7 @@ import json
 import re
 import time
 from recovery.evidence import assess, policy_config, whole
-from recovery.policy import is_straggler, plan
+from recovery.policy import is_straggler, plan, native_node_restart
 from recovery.init_failure import decision as init_decision
 from integrations.dynamodb import RecoveryBlocked, RetryLimitReached
 
@@ -98,6 +98,20 @@ class Workflow:
         canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
         self.store.accept(event, hashlib.sha256(canonical.encode()).hexdigest())
 
+    def recovery_action(self, record):
+        """An in-flight recovery keeps its claimed/requested action across upgrades."""
+        frozen = record.get('recovery_action') or record.get('action')
+        if frozen in RELOCATION_ACTIONS:
+            return frozen
+        lookup = getattr(self.executor, 'action_for', None)
+        if record.get('relocation_request') and callable(lookup):
+            existing = lookup(record['event'], record['relocation_request'])
+            reverse = {value: key for key, value in RELOCATION_ACTIONS.items()}
+            if isinstance(existing, str) and existing in reverse:
+                return reverse[existing]
+            raise RecoveryBlocked('existing relocation action unresolved')
+        return 'QUARANTINE_AND_RETRY' if is_straggler(record['event']) else plan(record['event'])['suggested_action']
+
     def held_relocation_progress(self, record):
         """Read relocator-owned fencing progress; never create a request or claim here.
 
@@ -117,7 +131,7 @@ class Workflow:
         generation = event['generation'] + 1
         if record.get('generation') != generation:
             return None
-        action = 'QUARANTINE_AND_RETRY' if is_straggler(event) else plan(event)['suggested_action']
+        action = self.recovery_action(record)
         if action not in RELOCATION_ACTIONS:
             return None
         if self.refresh_relocation_inputs(record) is not None:
@@ -169,6 +183,8 @@ class Workflow:
         decision = plan(e)
         action = decision['suggested_action']
         state = record.get('state', 'RECEIVED')
+        if state in ('CLAIMED', 'FENCED', 'REQUESTED', 'SUBMITTED', 'RESUMING'):
+            action = self.recovery_action(record)
         if state == 'REVIEW':
             return self.store.save(rid, state='HOLD', action='HOLD',
                                    reason=record.get('reason', 'legacy review requires operator inspection'))
@@ -223,7 +239,7 @@ class Workflow:
             action = 'QUARANTINE_AND_RETRY'
         if action in ('HOLD', 'NEEDS_CONFIG_FIX', 'NONE'):
             terminal = {'HOLD':'HOLD', 'NEEDS_CONFIG_FIX':'REJECTED', 'NONE':'IGNORED'}[action]
-            return self.store.save(rid, state=terminal, action=action, reason=action)
+            return self.store.save(rid, state=terminal, action=action, reason=decision.get('reason', action))
         if monitoring_hold and state == 'RECEIVED':
             return record  # Pending input survives monitoring outage without changing authority.
         if not e.get('job_id') or e.get('generation') is None:
@@ -232,6 +248,13 @@ class Workflow:
         lost = self.refresh_relocation_inputs(record)
         if lost is not None:
             return lost
+        if action == 'RETRY_GROUP' and native_node_restart(e) and state in ('RECEIVED', 'CLAIMED', 'FENCED'):
+            prepare = getattr(getattr(self.executor, 'inputs', None), 'prepare_native_restart', None)
+            if callable(prepare):
+                try:
+                    prepare(e)
+                except RecoveryBlocked as exc:
+                    return self.store.save(rid, state='HOLD', action='HOLD', reason=str(exc))
         # For node migrations, verify the old placement and freeze exclusions BEFORE
         # Store.claim may advance the fencing generation. Replays reuse the snapshot.
         if action == 'QUARANTINE_AND_RETRY' and state in ('RECEIVED', 'CLAIMED', 'FENCED'):
@@ -253,7 +276,10 @@ class Workflow:
                                    retry_count=self.store.fencing_record(e['job_id']).get('retry_count'))
         if job is None:
             return self.store.save(rid, state='STALE')
-        record = self.store.save(rid, retry_count=job.get('retry_count'),
+        record = self.store.save(rid, recovery_action=action,
+                                 routing_reason=record.get('routing_reason') or (decision.get('reason', 'classifier_recommendation')
+                                     if state == 'RECEIVED' else 'preserved_existing_recovery'),
+                                 retry_count=job.get('retry_count'),
                                  **{key:job[key] for key in ('stop_wait_started_at', 'stop_wait_deadline') if key in job})
         if job.get('checkpoint_warning'):
             record = self.store.save(rid, checkpoint_warning=job['checkpoint_warning'])

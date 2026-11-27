@@ -1,8 +1,33 @@
-"""Select a recovery action for a fault event."""
+"""Select recovery by failure domain, not by the mere presence of a node name."""
+
+GPU_SOURCES = {'xid', 'gpu', 'dcgm', 'dmesg', 'driver'}
+MIGRATION_RECOMMENDATIONS = {'isolate_migrate', 'reset_then_migrate', 'evacuate_preemptive'}
+# These hardware/driver faults cannot be repaired by replacing a Kubernetes Pod.
+GPU_MIGRATION_XIDS = {48, 63, 64, 79, 119, 120}
 
 
 def is_straggler(event):
     return event.get('category') == 'straggler' or event.get('fault_type') == 'straggler'
+
+
+def gpu_migration_fault(event):
+    raw = event.get('raw')
+    xid = raw.get('xid') if isinstance(raw, dict) else None
+    correlated = event.get('correlated')
+    gpu_correlated = (isinstance(correlated, list) and any(
+        isinstance(item, dict) and item.get('source') in GPU_SOURCES for item in correlated))
+    return ((type(xid) is int and xid in GPU_MIGRATION_XIDS)
+            or (event.get('source') in GPU_SOURCES
+                and (event.get('category') in ('hw', 'gpu', 'driver')
+                     or event.get('suggested_action') in MIGRATION_RECOMMENDATIONS))
+            or (gpu_correlated and event.get('category') in ('hw', 'gpu', 'driver')
+                and event.get('suggested_action') in MIGRATION_RECOMMENDATIONS))
+
+
+def native_node_restart(event):
+    """Kubernetes node loss: group restart without pinning to the unavailable old nodes."""
+    return (event.get('source') == 'node' and not gpu_migration_fault(event)
+            and event.get('fault_type') != 'spot_interruption')
 
 
 def plan(event):
@@ -23,7 +48,6 @@ def plan(event):
         'restart_in_place': 'RETRY_GROUP',
         'isolate_migrate': 'QUARANTINE_AND_RETRY',
         'reset_then_migrate': 'QUARANTINE_AND_RETRY',
-        # Pre-save migration is deferred; use the normal generation-first spare path.
         'evacuate_preemptive': 'QUARANTINE_AND_RETRY',
         'fence_evacuate': 'FENCE_AND_EVACUATE',
         'hold': 'HOLD', 'refuse': 'NEEDS_CONFIG_FIX', 'none': 'NONE',
@@ -36,14 +60,25 @@ def plan(event):
     if not init and recommendation not in actions:
         raise ValueError('unknown suggested_action')
     action = init['action'] if init else actions[recommendation]
-    if not init and action == 'RETRY_GROUP' and event.get('source') == 'node':
-        # A node-loss signal cannot safely pin the replacement to the old nodes.
-        node = event.get('node')
-        action = 'QUARANTINE_AND_RETRY' if isinstance(node, str) and node.strip() else 'HOLD'
+    reason = None
+    if not init and action in ('RETRY_GROUP', 'QUARANTINE_AND_RETRY'):
+        if event.get('source') == 'spot' or event.get('fault_type') == 'spot_interruption':
+            action, reason = 'QUARANTINE_AND_RETRY', 'spot_node_will_be_removed'
+        elif gpu_migration_fault(event):
+            action, reason = 'QUARANTINE_AND_RETRY', 'gpu_or_driver_migration'
+        elif native_node_restart(event):
+            node = event.get('node')
+            action = 'RETRY_GROUP' if isinstance(node, str) and node.strip() else 'HOLD'
+            reason = 'native_node_restart_unpinned' if action == 'RETRY_GROUP' else 'node_identity_unresolved'
+        elif event.get('source') == 'pod':
+            action, reason = 'RETRY_GROUP', 'pod_group_restart'
     if is_straggler(event):
-        action = 'HOLD'
+        action, reason = 'HOLD', 'straggler_policy_required'
     if event.get('collector_healthy') is False and event.get('category') != 'site':
-        action = 'HOLD'
-    return {'event_id': event['event_id'], 'job_id': event.get('job_id'),
-            'cluster': event['cluster'], 'suggested_action': action,
-            'mode': 'observe', 'executed': False}
+        action, reason = 'HOLD', 'collector_unhealthy'
+    result = {'event_id': event['event_id'], 'job_id': event.get('job_id'),
+              'cluster': event['cluster'], 'suggested_action': action,
+              'mode': 'observe', 'executed': False}
+    if reason:
+        result['reason'] = reason
+    return result

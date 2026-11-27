@@ -18,20 +18,27 @@ CRD와 namespace는 scheduling 구성을 먼저 설치해야 합니다.
 - reason은 현재 CRD enum에 맞춰 변환
 - 리소스 이름은 event_id의 SHA256에서 생성. POST 응답 유실은 같은 이름 재요청,
   409이면 GET하여 spec 전체 일치를 확인합니다.
-- RR status는 읽거나 판단에 사용하지 않습니다. old-execution-stopped 어노테이션을 자동 생성하지 않습니다.
+- ADR-50 이후 RR status.recoveryProgress를 검증해 펜싱에 반영하고 종료 기록 ACK를 보냅니다. old-execution-stopped 수동 승인 주석은 자동 생성하지 않습니다.
 
-## 액션 변환
+## 액션 변환 — 실패 영역 우선
 
-| suggested_action | 컨트롤러 액션 | 요청 |
+| 신호·조건 | 컨트롤러 액션 | 요청·배치 |
 |---|---|---|
-| restart_in_place | RETRY_GROUP | restartInPlace |
-| isolate_migrate | QUARANTINE_AND_RETRY | moveToSpare |
-| reset_then_migrate | QUARANTINE_AND_RETRY | moveToSpare. GPU reset은 후속 운영 |
-| evacuate_preemptive | QUARANTINE_AND_RETRY | moveToSpare. 세대 먼저 증가 후 마지막 승인본에서 재개 |
-| fence_evacuate | FENCE_AND_EVACUATE | evacuateCluster |
-| hold | HOLD | 없음 |
-| refuse | NEEDS_CONFIG_FIX | 없음. 결과 state=REJECTED |
-| none | NONE | 없음. 결과 state=IGNORED |
+| source=pod 일반 실패, GPU 격리 근거 없음 | RETRY_GROUP | restartInPlace. 기존 참여 노드 고정 유지 |
+| source=node 일반 소실/NotReady, GPU·Spot 근거 없음 | RETRY_GROUP | restartInPlace. spec.nodes 생략으로 옛 노드 고정 해제, sourceCluster 우선 |
+| DCGM/dmesg 등 GPU/드라이버 hw 신호 또는 명확한 Xid 48·63·64·79·119·120 | QUARANTINE_AND_RETRY | moveToSpare. 장애 노드 제외 |
+| source=spot 또는 legacy spot_interruption | QUARANTINE_AND_RETRY | moveToSpare. 곧 사라질 노드에 다시 고정하지 않음 |
+| fence_evacuate | FENCE_AND_EVACUATE | evacuateCluster. 장애 클러스터 제외 |
+| hold / refuse / none | HOLD / NEEDS_CONFIG_FIX / NONE | 없음. 보류 / REJECTED / IGNORED 유지 |
+| straggler | 기본 HOLD | 기존 증거·정책·용량·횟수 조건을 통과한 경우에만 moveToSpare |
+
+node 필드는 위치이며 원인 판정이 아니다. gpu_uuid만 있는 것도 GPU 고장 증거가 아니다.
+Pod/Node 봉투라도 명확한 GPU Xid 또는 hw 판정+GPU 상관 신호가 있으면 GPU 이전을 우선한다.
+Xid 13 같은 앱 오류가 restart_in_place로 분류되면 일반 재시작으로 처리한다.
+source가 없는 legacy node_hardware는 기존 격리 경로를 호환 유지하며, 이를 새 source=node와 동일시하지 않는다.
+source=node인데 대상 노드가 없으면 HOLD하며, 등록된 옛 배치의 노드인지 세대 증가 전에 검증한다.
+신규 분기는 source=node/pod의 재시작·이전 추천을 위 실패 영역에 맞게 보정하며, hold/refuse/none/site 판정을 자동 복구로 승격하지 않는다.
+자세한 배치·롤아웃 경계는 [action-routing.md](action-routing.md).
 
 기존 fault_type 입력도 새 내부 액션으로 변환합니다.
 collector_healthy=false인 비-site 이벤트는 HOLD로 낮춥니다.
