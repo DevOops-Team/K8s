@@ -14,6 +14,7 @@
 | 배치 힌트 어노테이션                              | recovery-source-cluster(원래 우선) · exclude-clusters |
 | Pod 템플릿 tolerations                            | + devoops/spare=true:NoSchedule (예비 노드에 갈 수 있게, 11/10 정본) |
 | Pod 템플릿 affinity (restartInPlace만)            | + required nodeAffinity kubernetes.io/hostname In [옛 노드] |
+| Pod 템플릿 affinity (노드 고정이 없을 때)         | + preferred nodeAffinity devoops/spare NotIn [true] (비예비 선호) |
 
 예비 노드 toleration을 Kueue ResourceFlavor가 아니라 여기서 넣는 이유: 4장 복구 잡이 학습 노드 3대 + 예비 1대에
 걸쳐 뜨려면 학습 몫을 빌려야 하고(같은 flavor), flavor에 toleration을 두면 그 flavor를 쓰는 학습 잡도 예비에 간다.
@@ -22,6 +23,11 @@
 restartInPlace는 노드가 멀쩡하고 Pod만 죽은 경우라, 옛 세대가 쓰던 노드를 그대로 다시 쓴다 (제자리 재시작).
 노드 1·2에서 돌던 잡은 3·4나 예비로 가지 않고 1·2로만 간다. 옛 노드 목록은 relocator가 넘긴다(pin_nodes).
 pin_nodes가 없으면 이 고정을 넣지 않고, 이전 세대 재제출본에서 넣은 hostname 고정도 지운다.
+
+노드 고정이 없는 재제출(노드 장애 restartInPlace·moveToSpare·evacuateCluster)은 예비 노드에 갈 수 있지만
+학습 노드에 자리가 있으면 그쪽을 먼저 쓴다 (preferred nodeAffinity). 파드 장애처럼 학습 노드가 남는 경우에
+예비를 소모하지 않기 위해서다. 예비는 학습 노드에 자리가 없을 때만 쓴다. 고정이 있으면 이 선호는 넣지 않는다
+(옛 노드가 예비였어도 그대로 그 노드로 간다).
 """
 import copy
 import re
@@ -31,6 +37,9 @@ import keys as K
 PREFER_SOURCE = {"restartInPlace", "moveToSpare"}
 SPARE_TOLERATION = {"key": K.TAINT_SPARE, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
 HOSTNAME = "kubernetes.io/hostname"
+# 예비가 아닌 노드 선호. 예비 노드그룹에만 devoops/spare=true 라벨이 있으므로 NotIn은 라벨 없는 학습 노드도 고른다
+PREFER_NON_SPARE = {"weight": 100, "preference": {"matchExpressions": [
+    {"key": K.TAINT_SPARE, "operator": "NotIn", "values": ["true"]}]}}
 _GEN_NAME = re.compile(r"^job-(?P<id>.+)-g(?P<gen>\d{4})$")
 
 
@@ -130,6 +139,24 @@ def _set_pin(spec, nodes):
             parent.pop(key, None)
 
 
+def _set_prefer_non_spare(spec, on):
+    """preferred nodeAffinity에 PREFER_NON_SPARE를 하나만 둔다(on) / 뺀다(off). 원래 있던 preferred 항목은 그대로"""
+    affinity = spec.get("affinity") or {}
+    node = affinity.get("nodeAffinity") or {}
+    preferred = [p for p in node.get("preferredDuringSchedulingIgnoredDuringExecution") or [] if p != PREFER_NON_SPARE]
+    if on:
+        preferred.append(copy.deepcopy(PREFER_NON_SPARE))
+    if preferred:
+        node["preferredDuringSchedulingIgnoredDuringExecution"] = preferred
+    else:
+        node.pop("preferredDuringSchedulingIgnoredDuringExecution", None)
+    for parent, key, value in ((affinity, "nodeAffinity", node), (spec, "affinity", affinity)):
+        if value:
+            parent[key] = value
+        else:
+            parent.pop(key, None)
+
+
 def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude, *, preferred=None,
            pin_nodes=None) -> dict:
     """원본 jobset.json -> gen 세대 재제출본. orig는 바꾸지 않는다"""
@@ -172,6 +199,7 @@ def render(orig: dict, job_id: str, gen: int, recovery_id: str, target, exclude,
         if not any(t.get("key") == K.TAINT_SPARE for t in tols):
             tols.append(dict(SPARE_TOLERATION))
         _set_pin(spec, pin_nodes)
+        _set_prefer_non_spare(spec, not pin_nodes)
         for ct in (spec.get("initContainers") or []) + (spec.get("containers") or []):
             for e in ct.get("env") or []:
                 if e.get("name") == "GENERATION" and "value" in e:
