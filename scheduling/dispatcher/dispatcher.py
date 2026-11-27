@@ -51,9 +51,6 @@ RENOMINATE_SECONDS = int(os.getenv("RENOMINATE_SECONDS", "60"))
 RELOCATION_HOLD_SECONDS = int(os.getenv("RELOCATION_HOLD_SECONDS", "300"))
 # 지명도 찜도 못 하는 잡의 경고를 같은 이유로 다시 남기는 간격 (매 루프 반복 방지, GPU-237)
 UNPLACED_LOG_SECONDS = int(os.getenv("UNPLACED_LOG_SECONDS", "300"))
-# 배치 기록(devoops/placement)의 관측 시각을 내용이 같아도 다시 쓰는 간격 (GPU-268).
-# 복구 컨트롤러는 관측 시각이 max_age_seconds(기본 300)보다 오래되면 거절한다. PLACEMENT.md의 신선도 절 참고
-PLACEMENT_REFRESH_SECONDS = int(os.getenv("PLACEMENT_REFRESH_SECONDS", "60"))
 IN_PLACE = {"restartInPlace", "moveToSpare"}   # 재제출 잡이 원래 클러스터로 돌아오는 action
 # EKS OFF 펜싱 자동 해제 (GPU-277). 끄면 표시만 남고 사람이 on-check --unfence로 지운다
 AUTO_UNFENCE = os.getenv("AUTO_UNFENCE_ENABLED", "true").strip().lower() not in ("0", "false", "off", "no")
@@ -226,7 +223,8 @@ def old_placement(wl):
 def record_placements(mgr, all_wls, clusters):
     """실행 중인 잡의 실제 배치(EKS·노드)를 관리 클러스터 Workload에 남긴다 (GPU-268).
     조건이 안 맞으면(Pod 일부 죽음·스케줄 전·워커 조회 실패) 쓰지 않고, 지우지도 않는다 -> 장애 직전 배치가 남는다.
-    같은 내용이면 PLACEMENT_REFRESH_SECONDS마다 관측 시각만 갱신. 실패는 그 잡만 건너뛴다 (지명에 영향 없음)"""
+    배치(jobset·generation·cluster·nodes)가 바뀔 때만 쓴다. 같은 내용이면 관측 시각도 다시 쓰지 않는다 (GPU-287:
+    매번 patch하면 Kueue MultiKueue admitted Event가 다시 난다). 실패는 그 잡만 건너뛴다 (지명에 영향 없음)"""
     by_name = {c.name: c for c in clusters if c.active and c.observed_at}
     for wl in all_wls:
         c = by_name.get((wl.get("status") or {}).get("clusterName"))
@@ -237,18 +235,18 @@ def record_placements(mgr, all_wls, clusters):
             continue
         old = old_placement(wl)
         if old is not None:
-            same = all(old.get(k) == rec[k] for k in rec if k != "observed_at")
-            age = rec["observed_at"] - (old.get("observed_at") if type(old.get("observed_at")) is int else 0)
-            if age <= 0 or (same and age < PLACEMENT_REFRESH_SECONDS):
+            if all(old.get(k) == rec[k] for k in rec if k != "observed_at"):
+                continue
+            # 리더가 바뀐 직후 등 기존 기록보다 오래되거나 같은 관측으로는 덮지 않는다
+            if rec["observed_at"] <= (old.get("observed_at") if type(old.get("observed_at")) is int else 0):
                 continue
         try:
             set_placement(mgr, wl, rec)
         except Exception as e:  # noqa: BLE001
             log.warning("%s: 배치 기록 못 씀: %s", wl["metadata"]["name"], e)
             continue
-        if old is None or not same:
-            log.info("%s: 배치 기록 %s %s (세대 %d)", wl["metadata"]["name"], rec["cluster"], rec["nodes"],
-                     rec["generation"])
+        log.info("%s: 배치 기록 %s %s (세대 %d)", wl["metadata"]["name"], rec["cluster"], rec["nodes"],
+                 rec["generation"])
 
 
 def set_placement(mgr, wl, rec):
