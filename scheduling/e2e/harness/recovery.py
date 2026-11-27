@@ -208,6 +208,18 @@ def jobsets_of(kube, job_id):
     return sorted(js["metadata"]["name"] for js in items if not js["metadata"].get("deletionTimestamp"))
 
 
+def prefers_spare(js):
+    """모든 Pod 템플릿에 예비 선호(preferred nodeAffinity devoops/spare In [true])가 있나 (GPU-306)"""
+    for rj in js["spec"]["replicatedJobs"]:
+        spec = rj["template"]["spec"]["template"]["spec"]
+        prefs = ((spec.get("affinity") or {}).get("nodeAffinity") or {}).get(
+            "preferredDuringSchedulingIgnoredDuringExecution") or []
+        if not any(e.get("key") == K.TAINT_SPARE and e.get("operator") == "In" and "true" in (e.get("values") or [])
+                   for p in prefs for e in (p.get("preference") or {}).get("matchExpressions") or []):
+            return False
+    return True
+
+
 def tolerates_spare(js):
     for rj in js["spec"]["replicatedJobs"]:
         for t in rj["template"]["spec"]["template"]["spec"].get("tolerations") or []:
@@ -392,6 +404,8 @@ def check_resubmission(check, kube, job_id, new, rr_name, recovery_id, *, target
     check.eq("재제출본 우선순위", labels.get(K.LABEL_PRIORITY), K.PRIORITY_RECOVERY)
     check.eq("재제출본 recovery-id", ann.get(K.ANN_RECOVERY_ID), recovery_id)
     check.true("재제출본 예비 노드 toleration", tolerates_spare(js))
+    pinned = bool(st.get("pinnedNodes"))
+    check.eq("재제출본 예비 선호 (노드 고정 없을 때만)", prefers_spare(js), not pinned)
     check.eq("재제출본 target-cluster", ann.get(K.ANN_TARGET), target)
     check.eq("재제출본 원래 클러스터 선호", ann.get(K.ANN_PREFERRED), preferred)
     if exclude is not None:
