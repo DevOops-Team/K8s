@@ -95,6 +95,24 @@ class Store:
             return inbox_record({**previous, **values})
         return inbox_record(previous)
 
+    def freeze_stop_evidence(self, event, proof):
+        """Immutable acceptance audit. Only the controller can write this attribute."""
+        from integrations.stop_evidence import canonical
+        encoded = canonical(proof).decode()
+        try:
+            self.table.update_item(Key={'pk': 'event#' + event['event_id']},
+                UpdateExpression='SET verified_stop_evidence = :proof',
+                ConditionExpression='attribute_exists(pk) AND #event.job_id = :job '
+                                    'AND #event.generation = :old '
+                                    'AND (attribute_not_exists(verified_stop_evidence) OR verified_stop_evidence = :proof)',
+                ExpressionAttributeNames={'#event': 'event'},
+                ExpressionAttributeValues={':proof': encoded, ':job': event['job_id'], ':old': event['generation']})
+        except Exception as exc:
+            if getattr(exc, 'response', {}).get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                raise RecoveryBlocked('stop proof acceptance conflicted') from exc
+            raise
+        return proof
+
     def snapshot_excluded_nodes(self, event, calculate):
         """Freeze moveToSpare exclusions in the durable event inbox before RR creation.
 

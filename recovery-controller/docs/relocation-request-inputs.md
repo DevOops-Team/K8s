@@ -53,3 +53,10 @@ relocator가 펜싱을 쓰지 않으므로 **execute 배포는 반드시** 아�
 - 복구 컨트롤러 Role `recovery-controller-relocation`: `create, get, list, watch, patch` (Gitops에 이미 있음).
 - 복구 컨트롤러 IAM: 원본 버킷 `code/*/jobset.json` GetObject.
 - CRD `toGeneration` · `stopDeadline` · `jobSet` 필드(relocator 2.0.0과 함께 이미 배포).
+
+## GPU-304 제안: 서명한 일반 종료 증거 (기본 off)
+
+`verified_stop_input`이 전체 범위·재생성 차단에 대한 KMS 서명을 확인하고 선택적으로 EC2 상태를 조회해
+`devoops/old-run-stop-verified` 주석을 작성한다. raw manual 주석을 신뢰하도록 완화하지 않는다.
+relocator가 동일 증거를 반환해야 기존 HOLD→펜싱→ACK가 이어진다. 수신부는 별도 담당 구현이 필요하다.
+[계약과 IAM/운영 도구](verified-stop-evidence.md).

@@ -19,9 +19,10 @@ def status_config(value=None):
 
 
 class RelocationStatusInput:
-    def __init__(self, store, namespace, clock=time.time, allow_self_fence=False):
+    def __init__(self, store, namespace, clock=time.time, allow_self_fence=False, verified_stop_input=None):
         self.store, self.namespace, self.clock = store, namespace, clock
         self.allow_self_fence = allow_self_fence
+        self.verified_stop_input = verified_stop_input
 
     def __call__(self, event, request):
         """No field inference from phase/message/timestamps in the old status format."""
@@ -49,18 +50,25 @@ class RelocationStatusInput:
                 or evidence['generation'] != event['generation']
                 or evidence.get('namespace') != self.namespace
                 or evidence.get('jobset_name') != old_name
-                or evidence.get('kind') not in ('automatic', 'ec2', 'self_fence')
+                or evidence.get('kind') not in ('automatic', 'ec2', 'self_fence', 'manual')
                 or not isinstance(evidence.get('clusters'), list)
                 or not evidence['clusters']
                 or any(not isinstance(c, str) or not c for c in evidence['clusters'])
                 or event['cluster'] not in evidence['clusters']
                 or not isinstance(evidence.get('checks'), list) or not evidence['checks']
                 or any(not isinstance(c, dict) or c.get('cluster') not in evidence['clusters']
-                       or c.get('kind') not in ('automatic', 'ec2', 'self_fence')
+                       or c.get('kind') not in ('automatic', 'ec2', 'self_fence', 'manual')
                        or not isinstance(c.get('detail'), str) or not c['detail']
                        for c in evidence['checks'])
                 or set(c['cluster'] for c in evidence['checks']) != set(evidence['clusters'])):
             raise RecoveryBlocked('complete old-run stop evidence required')
+        if (evidence['kind'] == 'manual' or evidence.get('verificationId')
+                or (self.verified_stop_input is not None and
+                    (evidence['kind'] == 'ec2' or any(c['kind'] == 'ec2' for c in evidence['checks'])))
+                or any(c['kind'] == 'manual' for c in evidence['checks'])):
+            if self.verified_stop_input is None:
+                raise RecoveryBlocked('signed stop evidence input is disabled')
+            self.verified_stop_input.validate_status(event, request, evidence)
         if evidence['kind'] == 'self_fence' or any(c['kind'] == 'self_fence' for c in evidence['checks']):
             if not self.allow_self_fence:
                 raise RecoveryBlocked('self fence input is disabled')

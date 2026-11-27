@@ -202,3 +202,9 @@ relocator 2.0.0은 펜싱 표를 쓰지 않으므로 execute 배포는 `relocati
 일반 Pod/Node 신호는 restartInPlace, GPU/드라이버 격리 및 Spot은 moveToSpare로 분리한다.
 Node 소실은 옛 노드 고정을 생략하고 원래 클러스터를 선호한다. Pod 재시작은 기존 노드 고정을 유지한다.
 site 대피·OOM 거절·HOLD·straggler 조건은 유지한다. [상세 정책과 인계](docs/action-routing.md).
+
+## GPU-304 일반 종료 증거 입력 (제안, 기본 off)
+
+서명된 전체 실행 범위·재생성 차단 attestation과 선택적인 EC2 조회를 결합해 RR annotation으로 전달한다.
+동일 증거가 status로 반환된 뒤에만 펜싱/ACK를 기록한다. IAM·KMS·성모 담당 수신부 연계 전에는 활성화하지 않는다.
+[계약과 운영 도구](docs/verified-stop-evidence.md). 서버 종료·강제 Pod 삭제·완전 자동 재생성 차단은 하지 않는다.
