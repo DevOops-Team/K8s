@@ -5,6 +5,7 @@ import ssl
 import urllib.error
 import urllib.request
 from pathlib import Path
+from recovery.policy import native_node_restart
 
 SERVICE_ACCOUNT = Path('/var/run/secrets/kubernetes.io/serviceaccount')
 # relocator 2.0.0 control annotations (K8s scheduling/common/keys.py, RECOVERY_CONTRACT.md section 3)
@@ -13,12 +14,13 @@ CANCEL_ANNOTATION = 'devoops/recovery-cancel'
 
 
 class RelocationClient:
-    def __init__(self, namespace, transport=None, inputs=None, status_input=None, self_fence_input=None):
+    def __init__(self, namespace, transport=None, inputs=None, status_input=None, self_fence_input=None, verified_stop_input=None):
         self.namespace = namespace
         self.transport = transport or self._request
         self.inputs = inputs
         self.status_input = status_input
         self.self_fence_input = self_fence_input
+        self.verified_stop_input = verified_stop_input
 
     def _request(self, method, path, document=None):
         token = (SERVICE_ACCOUNT / 'token').read_text().strip()
@@ -59,9 +61,19 @@ class RelocationClient:
                 # Snapshot other confirmed node-scoped faults of this same job/generation
                 # before immutable RR creation. Relocator already accepts string arrays.
                 spec['excludeNodes'] = self.inputs.failed_nodes(event, spec['nodes'])
+        old_placement = None
+        if action == 'restartInPlace' and native_node_restart(event):
+            # Existing relocator contract: absent spec.nodes means no hostname pin.
+            # Keep the old execution scope for audit without using it as placement.
+            nodes = spec.pop('nodes', None)
+            if nodes is not None:
+                old_placement = json.dumps(dict(cluster=spec.get('sourceCluster'),
+                    generation=event['generation'], nodes=nodes), sort_keys=True, separators=(',', ':'))
         document = {'apiVersion': 'scheduling.devoops.site/v1alpha1',
                     'kind': 'RelocationRequest',
                     'metadata': {'name': name, 'namespace': self.namespace}, 'spec': spec}
+        if old_placement is not None:
+            document['metadata']['annotations'] = {'devoops/recovery-old-placement': old_placement}
         try:
             self.transport('POST', path, document)
         except urllib.error.HTTPError as exc:
@@ -70,10 +82,12 @@ class RelocationClient:
             existing = self.transport('GET', path + '/' + name)
             existing_spec = existing.get('spec', {})
             # An in-flight request created before GPU-295 has an immutable legacy spec.
-            if 'sourceCluster' not in existing_spec and 'nodes' not in existing_spec:
+            legacy_inputs = 'sourceCluster' not in existing_spec and 'nodes' not in existing_spec
+            if legacy_inputs:
                 spec = {key: value for key, value in spec.items()
                         if key not in ('sourceCluster', 'nodes')}
-            if existing_spec != spec:
+            if (existing_spec != spec or (old_placement is not None and not legacy_inputs
+                    and existing.get('metadata', {}).get('annotations', {}).get('devoops/recovery-old-placement') != old_placement)):
                 raise ValueError('RelocationRequest name belongs to a different request') from exc
         return name
 
@@ -86,6 +100,11 @@ class RelocationClient:
         if spec.get('requestId') != event['event_id'] or spec.get('jobRef') != expected_ref:
             raise ValueError('cannot refresh another relocation request')
         return path, existing
+
+    def action_for(self, event, name):
+        """Read an existing immutable request's action during policy upgrades/HOLD."""
+        _, request = self._owned(event, name)
+        return request.get('spec', {}).get('action')
 
     def _annotate(self, path, existing, key, value):
         """Merge-patch one control annotation; resourceVersion prevents a lost concurrent update."""
@@ -105,6 +124,14 @@ class RelocationClient:
         if (existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate')
                 or annotations.get(CANCEL_ANNOTATION)):
             return
+        if self.verified_stop_input:
+            from integrations.stop_evidence import ANNOTATION
+            value = self.verified_stop_input(event, existing)
+            if value and self._annotate(path, existing, ANNOTATION, value):
+                _, existing = self._owned(event, name)
+                annotations = existing.get('metadata', {}).get('annotations') or {}
+                if annotations.get(CANCEL_ANNOTATION) or existing.get('status', {}).get('phase') in ('Cancelled', 'Duplicate'):
+                    return
         if self.self_fence_input:
             from integrations.self_fence import ANNOTATION
             value = self.self_fence_input(event, existing)
