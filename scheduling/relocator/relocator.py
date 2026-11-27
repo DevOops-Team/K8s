@@ -33,9 +33,11 @@ JobSet 생성도 같은 이름으로 다시 해도 결과가 같아서(409 -> �
   acceptedAt -> isolatedAt -> stoppedAt -> resubmittedAt -> admittedAt (Done)
 
 시간 값은 복구 컨트롤러 제한 시간(장애 복구 규약 2절)에 맞춘다:
-  옛 실행 종료: spec.stopDeadline(없으면 요청 생성 + 15분) -> 넘으면 Held, 확인 어노테이션으로만 재개
+  옛 실행 종료: spec.stopDeadline(없으면 요청 생성 + 15분) -> 넘으면 Held, 컨트롤러 검증 증거·확인 어노테이션으로만 재개
     워커 API에 접속이 안 되면 컨트롤러가 확인한 사이드카 자기 펜싱 기록(devoops/self-fence-verified,
     SELF_FENCE_EVIDENCE)를 종료 증거로 쓴다 (기본 off). EC2·S3·DynamoDB는 직접 조회하지 않는다.
+    API는 살아 있는데 옛 객체가 남는 장애(노드그룹 0대 등)는 컨트롤러가 검증한 종료 증거
+    (devoops/old-run-stop-verified)를 받으면 Held여도 진행한다. 값은 그대로 status에 옮긴다.
   입장 15분 (ADMIT_TIMEOUT_SECONDS)     -> 넘으면 AdmitDelayed, 실패로 끝내지 않음
 """
 import json
@@ -255,11 +257,66 @@ class Unreachable(str):
     """워커 API에 닿지 못해서 확인 못 했다는 이유 (컨트롤러가 준 종료 근거가 필요)"""
 
 
+def old_places(x: Ctx):
+    """옛 잡의 복사본이 있을 수 있는 워커 = 입장했던 워커(sourceCluster) + 지명만 됐던 워커(seenClusters)"""
+    return sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c})
+
+
+def verified_stop_evidence(x: Ctx):
+    """복구 컨트롤러가 검증·고정한 옛 세대 전체 종료 증거(devoops/old-run-stop-verified, GPU-304). (증거 dict 또는 None, 이유)
+    relocator는 서명·EC2를 다시 확인하지 않는다(컨트롤러 판단, ADR-50). 이 요청·옛 세대·옛 잡과 묶여 있고
+    재생성 차단이 확인됐으며 옛 복사본이 있을 수 있는 워커를 전부 덮을 때만 쓴다. 하나라도 어긋나면 지금처럼 기다린다.
+    컨트롤러는 status 증거가 주석 값과 완전히 같은지 대조하므로 받은 값을 고치지 않고 그대로 돌려준다."""
+    raw = x.ann(K.ANN_STOP_VERIFIED)
+    if not raw:
+        return None, "컨트롤러 종료 증거 없음"
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return None, "컨트롤러 종료 증거가 JSON이 아님"
+    if not isinstance(rec, dict):
+        return None, "컨트롤러 종료 증거 형식 오류"
+    ns, name = x.job()
+    uid = x.rr["metadata"].get("uid")
+    expect = {"requestId": x.spec["requestId"], "jobId": x.job_id(), "namespace": ns, "jobset_name": name}
+    for k, v in expect.items():
+        if rec.get(k) != v:
+            return None, f"컨트롤러 종료 증거 {k}={rec.get(k)!r} (이 요청 {v!r} 아님)"
+    if not uid or rec.get("requestUid") != uid:
+        return None, f"컨트롤러 종료 증거 requestUid {rec.get('requestUid')!r}가 이 요청 UID가 아님"
+    for k, v in (("generation", x.old_gen()), ("toGeneration", x.to_gen())):
+        if type(rec.get(k)) is not int or rec[k] != v:
+            return None, f"컨트롤러 종료 증거 {k}={rec.get(k)!r} ({v} 아님)"
+    kind = rec.get("kind")
+    if kind not in ("ec2", "manual"):
+        return None, f"컨트롤러 종료 증거 kind {kind!r} 모름"
+    if not isinstance(rec.get("verificationId"), str) or not rec["verificationId"]:
+        return None, "컨트롤러 종료 증거 verificationId 없음"
+    if rec.get("recreationBlocked") is not True:
+        return None, "컨트롤러 종료 증거에 재생성 차단 확인 없음"
+    if not isinstance(rec.get("confirmed_at"), str) or not rec["confirmed_at"]:
+        return None, "컨트롤러 종료 증거 확인 시각 없음"
+    clusters = rec.get("clusters")
+    if (not isinstance(clusters, list) or not clusters or len(set(clusters)) != len(clusters)
+            or any(not isinstance(c, str) or not c for c in clusters)):
+        return None, f"컨트롤러 종료 증거 clusters 형식 오류 ({clusters!r})"
+    missing = sorted(set(old_places(x)) - set(clusters))
+    if missing:
+        return None, f"컨트롤러 종료 증거가 워커 {missing}를 덮지 않음"
+    checks = rec.get("checks")
+    if (not isinstance(checks, list)
+            or any(not isinstance(c, dict) or c.get("kind") != kind or c.get("cluster") not in clusters
+                   or not isinstance(c.get("detail"), str) or not c["detail"] for c in checks)
+            or {c["cluster"] for c in checks} != set(clusters)):
+        return None, "컨트롤러 종료 증거 checks가 clusters 전부를 같은 kind로 덮지 않음"
+    return rec, f"복구 컨트롤러 검증 종료 증거 ({kind}, {', '.join(sorted(clusters))}, {rec['verificationId'][:12]})"
+
+
 def old_gone_on_worker(x: Ctx, ns, name):
     """옛 잡의 복사본이 있을 수 있는 모든 워커에서 JobSet·Workload·Pod가 전부 없어졌는지. (멈춤확인, 이유)
     볼 곳 = 입장했던 워커(sourceCluster) + 지명만 됐던 워커(seenClusters). 하나라도 확인 못 하면 멈췄다고 보지 않는다"""
     x.stop_evidence = []  # 이번 조회에서 확인한 워커별 근거
-    places = sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c})
+    places = old_places(x)
     if not places:
         return True, "워커에 보내지기 전이었음"
     whys = []
@@ -351,7 +408,17 @@ def stop_old(x: Ctx):
     left = kube.workload_for_jobset(x.mgr, ns, name)
     note_copies(x, left)
     mgr_gone = left is None
+    # 컨트롤러가 검증한 전체 종료 증거: 워커 객체가 남아 있어도, Held여도 진행 (GPU-297/304).
+    # 관리 클러스터 Workload는 relocator가 직접 지우고 볼 수 있으므로 그것까지 사라진 뒤에만 쓴다
+    verified, vwhy = verified_stop_evidence(x)
+    if verified is not None and mgr_gone:
+        x.save(phase="Executing", stoppedAt=kube.now_rfc3339(), message=vwhy,
+               recoveryProgress=progress(x, "OLD_RUN_STOPPED", verified))
+        log.info("%s: 옛 실행 멈춤 (%s) -> status OLD_RUN_STOPPED", x.name, vwhy)
+        return
     worker_gone, why = (old_gone_on_worker(x, ns, name) if mgr_gone else (False, "관리 클러스터 Workload 남아 있음"))
+    if x.ann(K.ANN_STOP_VERIFIED) and verified is None:
+        why = f"{why}; {vwhy}"   # 주석은 있는데 못 쓰는 이유를 status에서 보이게
     confirmed = x.ann(K.ANN_STOP_CONFIRMED) == "true"
     held = stop_held(x)
     if confirmed or (mgr_gone and worker_gone and not held):
@@ -360,7 +427,7 @@ def stop_old(x: Ctx):
         checks = [] if confirmed else getattr(x, "stop_evidence", [])
         evidence = {
             "generation": x.old_gen(), "namespace": ns, "jobset_name": name,
-            "clusters": sorted({c for c in [x.st.get("sourceCluster"), *(x.st.get("seenClusters") or [])] if c}),
+            "clusters": old_places(x),
             "kind": "manual" if confirmed else stop_kind(checks),
             "checks": checks, "confirmed_at": stopped_at,
             "confirmed_by": "unknown (RR annotation)" if confirmed else "relocator",
@@ -376,7 +443,7 @@ def stop_old(x: Ctx):
         # 복구 컨트롤러가 이미 HOLD했을 시간. 뒤늦게 멈춘 게 보여도 혼자 재제출하지 않는다
         if x.st.get("phase") != "Held":
             msg = (f"종료 대기 기한 안에 옛 실행 종료를 확인 못 함 ({why}) -> 멈춤 (복구 컨트롤러 HOLD 시간). "
-                   "복구 컨트롤러의 종료 증거 검증과 HOLD 재개 처리가 필요함. "
+                   f"복구 컨트롤러가 검증한 종료 증거({K.ANN_STOP_VERIFIED})가 오면 이어서 진행함. "
                    "사람 확인 주석만으로 복구 컨트롤러까지 재개되지는 않음")
             log.warning("%s: %s", x.name, msg)
             x.save(phase="Held", message=msg)
