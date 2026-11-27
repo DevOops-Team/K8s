@@ -3,7 +3,15 @@
 `restartInPlace`(Pod만 죽은 경우)는 제자리 재시작이다. 복구 컨트롤러가 RR `spec.sourceCluster`·`spec.nodes`로 옛 세대 노드를
 주면, 재제출본은 `kubernetes.io/hostname` required nodeAffinity와 `target-cluster`로 그 노드에만 뜬다(1·2에서 돌던 잡은 1·2로만).
 relocator는 노드·클러스터를 조회하거나 판단하지 않는다. 노드가 Pod 수보다 적은 등 실행할 수 없으면 접수 단계에서 `Failed`.
-`spec.nodes`가 없으면(복구 컨트롤러 계약 반영 전) 아래 `moveToSpare`처럼 원래 EKS 우선이다. 고정한 노드는 `status.pinnedNodes`.
+`spec.nodes`가 없으면(노드 소실·NotReady) 노드를 고정하지 않고 아래 `moveToSpare`처럼 원래 EKS 우선이다. 고정한 노드는 `status.pinnedNodes`.
+
+두 action의 차이는 고장 노드 격리 여부 하나다. `restartInPlace` = 같은 클러스터에서 새 세대로 다시 시작(격리 없음),
+`moveToSpare` = 고장 노드를 격리하고 다시 시작(이름과 달리 꼭 예비 노드로 가지는 않음). 어느 action이 오는지와
+`spec.nodes`를 보낼지는 복구 컨트롤러가 정한다(Pod 장애는 nodes 있음, 노드 장애는 없음).
+
+모든 복구 재제출본은 예비 노드 toleration을 가진다. 노드 고정이 없으면 예비 노드 선호
+(`preferred nodeAffinity devoops/spare In [true]`, weight 100)도 넣어 예비를 먼저 쓰고, 예비가 모자라면 학습 노드로 간다.
+예비는 복구 잡만 쓸 수 있으므로, 복구가 예비를 먼저 써야 학습 노드가 학습 잡 몫으로 남는다. 노드 고정이 있으면 선호를 넣지 않는다(GPU-306).
 
 ADR-38: `moveToSpare` 재제출본은 `devoops/recovery-source-cluster`로 원래 EKS를 우선한다.
 원래 EKS가 부족하면 디스패처가 다른 EKS를 검토하고, 모두 부족하면 대기한다. 일반 `target-cluster`는 계속 강제 제한이다.
