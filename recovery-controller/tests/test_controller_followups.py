@@ -135,8 +135,15 @@ class EvidenceInputTests(unittest.TestCase):
         self.fence.item['recovery_training_evidence']=dict(self.message,jobset_uid='worker-copy-uid')
         with self.assertRaises(ValueError):self.input.ingest(self.record)
         self.assertNotIn('progress',self.table.item)
+        self.store.save = lambda rid, **fields: dict(self.record, **fields)
+        rejected = self.input.reconcile(self.record, NOW)
+        self.assertEqual(rejected['evidence_input_error'], 'ValueError')
+        self.assertEqual(rejected['evidence_input_error_detail'],
+                         'training evidence JobSet UID differs from the manager JobSet UID')
         self.fence.item['recovery_training_evidence']=self.message
-        self.assertTrue(self.input.ingest(self.record))
+        accepted = self.input.reconcile(rejected, NOW + 5)
+        self.assertIsNone(accepted['evidence_input_error_detail'])
+        self.assertEqual(self.table.item['progress']['jobset_uid'], 'uid')
     def test_refresh_with_new_observation_id_updates_step_and_receipt(self):
         self.assertTrue(self.input.ingest(self.record))
         self.writer.clock=lambda:NOW+60
