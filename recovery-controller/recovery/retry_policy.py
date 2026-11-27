@@ -15,11 +15,12 @@ class Runner:
         self.store, self.workflow, self.producer, self.topic = store, workflow, producer, topic
         self.policy = dict(DEFAULTS, **(policy or {}))
 
-    def hold(self, record, reason):
+    def hold(self, record, reason, **details):
         print(json.dumps(dict(component='recovery', event_id=record['event']['event_id'],
-                              state='HOLD', reason=reason)), flush=True)
+                              state='HOLD', reason=reason, **details)), flush=True)
         return self.store.save(record['event']['event_id'], state='HOLD', action='HOLD', reason=reason,
-                               stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])))
+                               stopped_stage=record.get('waiting_phase', record.get('budget_stage', record['state'])),
+                               **details)
 
     def lost_authority(self, record, reason='recovery authority changed'):
         """HOLD and withdraw relocator's new JobSet (ADR-50 devoops/recovery-cancel)."""
@@ -110,6 +111,8 @@ class Runner:
         deadline = int(record['stage_started_at']) + timeout
         waiting_for_stop = stage in ('REQUESTED', 'GENERATION_ADVANCED')
         if not waiting_for_stop and now >= deadline:
+            if stage == 'RESUME' and record['state'] == 'RESUMING' and record.get('reason'):
+                return self.hold(record, 'stage deadline exceeded: RESUME', resume_wait_reason=record['reason'])
             return self.hold(record, 'stage deadline exceeded: ' + stage)
         attempts = int(record.get('api_attempts', 0))
         if attempts >= self.policy['api_attempts']:

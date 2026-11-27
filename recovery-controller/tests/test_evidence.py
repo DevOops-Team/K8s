@@ -151,6 +151,8 @@ class ControllerEvidenceTests(unittest.TestCase):
         self.assertEqual(runner.operation(self.store.get('e1'),9,False)['state'],'RESUMING')
         result=runner.operation(self.store.get('e1'),10,False)
         self.assertEqual(result['state'],'HOLD')
+        self.assertEqual(result['reason'], 'stage deadline exceeded: RESUME')
+        self.assertEqual(result['resume_wait_reason'], 'training progress evidence required')
         self.assertEqual(len(self.requests.calls),1)
     def test_resume_phase_change_does_not_reset_deadline(self):
         self.store.nodes.pop('progress')
