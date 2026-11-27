@@ -7,6 +7,10 @@ from decimal import Decimal
 from recovery.evidence import whole
 
 
+class FencingEvidenceError(ValueError):
+    """An input rejection with a fixed message safe to persist."""
+
+
 def input_config(value=None):
     value = {} if value is None else value
     if not isinstance(value, dict) or set(value) - {'enabled','producer_contract_confirmed','attribute'}:
@@ -27,7 +31,7 @@ def input_config(value=None):
 def normalise(value):
     if isinstance(value, Decimal):
         if not whole(value):
-            raise ValueError('non-integral evidence number')
+            raise FencingEvidenceError('non-integral evidence number')
         return int(value)
     if isinstance(value, dict):
         return {key:normalise(item) for key,item in value.items()}
@@ -47,7 +51,7 @@ class FencingProgressInput:
         if message is None:
             return False
         if not isinstance(message, dict):
-            raise ValueError('fencing training evidence must be a Map')
+            raise FencingEvidenceError('fencing training evidence must be a Map')
         message = normalise(message)
         generation = message.get('generation')
         # Relocator creates the manager JobSet and records its name/UID in fencing.
@@ -56,15 +60,16 @@ class FencingProgressInput:
         if (not whole(generation) or generation < 1
                 or fence.get('new_jobset_name') != f"job-{event['job_id']}-g{int(generation):04d}"
                 or not isinstance(fence.get('new_jobset_uid'), str) or not fence['new_jobset_uid']):
-            raise ValueError('manager JobSet name and UID required for current training evidence')
+            raise FencingEvidenceError('manager JobSet name and UID required for current training evidence')
         if (message.get('kind') != 'progress' or message.get('job_id') != event['job_id']
                 or message.get('recovery_id') != event['event_id']
                 or message.get('generation') != record.get('generation')
                 or message.get('generation') != fence.get('generation')
                 or message.get('recovery_id') != fence.get('recovery_id')
-                or not fence.get('owner') or message.get('cluster') != fence['owner']
-                or message.get('jobset_uid') != fence.get('new_jobset_uid')):
-            raise ValueError('training evidence must match current owner, recovery, generation and JobSet')
+                or not fence.get('owner') or message.get('cluster') != fence['owner']):
+            raise FencingEvidenceError('training evidence must match current job, owner, recovery and generation')
+        if message.get('jobset_uid') != fence['new_jobset_uid']:
+            raise FencingEvidenceError('training evidence JobSet UID differs from the manager JobSet UID')
         # Producer identity is a configured IAM/attribute-writer contract, never a body field.
         # The sidecar must check its job/generation/cluster and the manager JobSet name,
         # then conditionally write the Map for generation/owner/recovery_id/manager UID
@@ -83,6 +88,10 @@ class FencingProgressInput:
         except Exception as exc:
             failures = int(record.get('evidence_input_errors',0)) + 1
             delay = min(300,5 * 2 ** min(failures-1,6))
+            rejected = isinstance(exc, FencingEvidenceError)
             return self.store.save(rid,evidence_input_errors=failures,
-                                   evidence_input_error=type(exc).__name__,evidence_input_next_at=now+delay)
-        return self.store.save(rid,evidence_input_errors=0,evidence_input_error=None,evidence_input_next_at=0)
+                                   evidence_input_error='ValueError' if rejected else type(exc).__name__,
+                                   evidence_input_error_detail=str(exc) if rejected else None,
+                                   evidence_input_next_at=now+delay)
+        return self.store.save(rid,evidence_input_errors=0,evidence_input_error=None,
+                               evidence_input_error_detail=None,evidence_input_next_at=0)
