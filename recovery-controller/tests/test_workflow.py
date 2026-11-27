@@ -211,12 +211,14 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.flow.accept(dict(EVENT, node=None))
 
-    def test_node_loss_with_restart_recommendation_requests_move_to_spare(self):
+    def test_node_loss_with_restart_recommendation_requests_restart_in_place(self):
         event = dict(EVENT, event_id='node-loss', source='node',
                      category='infra', suggested_action='restart_in_place')
         self.flow.accept(event)
         self.flow.tick(self.store.events['node-loss'])
-        self.assertEqual(self.requests.calls, [(event, 'moveToSpare')])
+        self.assertEqual(self.requests.calls, [(event, 'restartInPlace')])
+        self.assertEqual(self.store.events['node-loss']['recovery_action'], 'RETRY_GROUP')
+        self.assertEqual(self.store.events['node-loss']['routing_reason'], 'native_node_restart_unpinned')
 
     def test_node_loss_without_target_holds_before_claim(self):
         event = dict(EVENT, event_id='node-loss', source='node', node=None,
