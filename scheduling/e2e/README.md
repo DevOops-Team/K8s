@@ -159,7 +159,7 @@ def test_something(kube, check, info):
 ### 장애복구 (`tests/recovery/`, 정본 4절 · I1·I2·I4·I6·I7)
 
 복구 컨트롤러 몫(펜싱 기록 세대 +1 -> RR 생성)은 하네스가 흉내 내고, relocator·디스패처는 진짜를 띄운다.
-재제출이 있는 케이스는 공통으로 재제출본(queue-recovery, recovery 우선순위, recovery-id, 예비 toleration, 노드 고정 없을 때만 비예비 선호, target/exclude),
+재제출이 있는 케이스는 공통으로 재제출본(queue-recovery, recovery 우선순위, recovery-id, 예비 toleration, target/exclude),
 다른 세대 JobSet 없음, 펜싱 기록 NEW_RUN_SUBMITTED·new_jobset_name·uid, OLD_RUN_STOPPED 뒤 재제출(I6)을 본다.
 
 | 케이스 | 확인하는 것 | 규칙 |
@@ -173,7 +173,6 @@ def test_something(kube, check, info):
 | 11 recovery_under_load | 학습 12장 + Heavy 대기에서 4장 moveToSpare -> 복구 잡이 자기 몫으로 쿼터·원래 워커 입장 | R10 |
 | 12 fencing_gate | 세대 +1 전 RR은 Pending, 아무것도 안 함 -> 세대 +1 뒤 진행 | R7·I6 |
 | 13 admission_policy | 권한 없는 사용자는 복구 큐·우선순위·디스패처 어노테이션·RR 못 만듦, 학습 잡은 관리자도 예비 toleration 못 닮 (dry-run) | 3.1·I4 |
-| 17 prefer_non_spare | 2장 잡의 노드 하나 cordon(NotReady 흉내) + nodes 없는 restartInPlace -> 고정 없음, 새 세대 2개 모두 학습 노드, 예비·고장 노드에 Pod 없음 | R7·GPU-306 |
 
 옛 bash 시나리오와 다른 점: 04는 queue-recovery 잡을 손으로 넣던 것을 restartInPlace 재제출로 바꿈(예비 taint 때문에 손으로 넣은 잡은 예비 노드에 못 감).
 11은 "복구 잡이 wait-c보다 먼저 쿼터"를 기대하던 것을 "복구 몫으로 쿼터·원래 워커 입장"으로 바꿈(풀린 Heavy 몫은 옛 잡을 내리는 순간 wait-c가 먼저 받는 게 정상).
