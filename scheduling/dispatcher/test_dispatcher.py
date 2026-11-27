@@ -478,7 +478,7 @@ class FillCapacity(unittest.TestCase):
 
 
 class PlacementRecord(unittest.TestCase):
-    """실제 배치 기록 devoops/placement (GPU-268): 전원 Running일 때만 쓰고, 지우지 않는다"""
+    """실제 배치 기록 devoops/placement (GPU-268·287): 전원 Running이고 배치가 바뀔 때만 쓰고, 지우지 않는다"""
 
     JS = "job-j1-g0002"
 
@@ -535,13 +535,31 @@ class PlacementRecord(unittest.TestCase):
                 self.pod("n4", placeholder=True), self.pod("n5", gpus=0)]
         self.assertEqual(self.record([self.workload()], [self.cluster(pods)]), [])
 
-    def test_same_content_refreshed_only_after_interval(self):
+    def test_same_content_is_never_rewritten(self):
+        """GPU-287: 내용이 같으면 시간이 아무리 지나도 patch 0회 (관측 시각만 바꾸는 갱신 없음)"""
         old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n2"],
-               "observed_at": 1000 - D.PLACEMENT_REFRESH_SECONDS + 1}
+               "observed_at": 1000}
+        pods = [self.pod("n2"), self.pod("n1")]
+        for at in (1001, 1060, 1061, 100000):
+            self.assertEqual(self.record([self.workload(old=old)], [self.cluster(pods, at=at)]), [])
+        self.assertFalse(hasattr(D, "PLACEMENT_REFRESH_SECONDS"))
+
+    def test_each_change_written_once(self):
+        """노드가 바뀌면 1회, 그 뒤 같은 내용이면 다시 안 씀. 세대·클러스터가 달라도 1회"""
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n9"],
+               "observed_at": 999}
         pods = [self.pod("n1"), self.pod("n2")]
-        self.assertEqual(self.record([self.workload(old=old)], [self.cluster(pods)]), [])
-        old["observed_at"] = 1000 - D.PLACEMENT_REFRESH_SECONDS
-        self.assertEqual(len(self.record([self.workload(old=old)], [self.cluster(pods)])), 1)
+        out = self.record([self.workload(old=old)], [self.cluster(pods)])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(self.record([self.workload(old=out[0][1])], [self.cluster(pods, at=1500)]), [])
+        for changed in ({"generation": 1}, {"cluster": "eks-b"}, {"jobset": "job-j1-g0001"}):
+            stale = dict(out[0][1], **changed)
+            self.assertEqual(len(self.record([self.workload(old=stale)], [self.cluster(pods, at=1500)])), 1)
+
+    def test_changed_content_with_same_observation_time_skipped(self):
+        old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n9"],
+               "observed_at": 1000}
+        self.assertEqual(self.record([self.workload(old=old)], [self.cluster([self.pod("n1"), self.pod("n2")])]), [])
 
     def test_changed_nodes_written_immediately(self):
         old = {"version": 1, "jobset": self.JS, "generation": 2, "cluster": "eks-a", "nodes": ["n1", "n9"],
